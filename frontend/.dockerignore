@@ -1,0 +1,26 @@
+# ===== 前端 Docker 构建上下文排除 =====
+
+# 关键红线：.env.local 含魔珐星云驱动密钥，严禁进入镜像
+# （前端密钥走「页面填写 → localStorage」，镜像内不固化任何密钥）
+.env
+.env.*
+secrets/
+*.pem
+*.key
+
+# 依赖与构建产物（容器内由 npm ci / npm run build 重新生成）
+node_modules/
+.next/
+out/
+dist/
+build/
+*.tsbuildinfo
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 文档（镜像运行不需要）
+README.md

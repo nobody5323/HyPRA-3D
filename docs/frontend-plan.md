@@ -215,8 +215,10 @@ type ChatResponse = {
 | **F4 稳定性** | 断线重连、SDK 降级、错误提示、弱网提示 | 拔网线可演示降级；重连后恢复 |
 | **F5 演示包装** | 文风切换（A/B）、情绪曲线、视觉打磨、演示脚本对齐 | 与 3–5 分钟演示视频脚本一致 |
 
-**合并进 docker compose**（评审一键部署）：F2 后补 `frontend` 服务
-（`next build` + `next start`，端口 3000，`NEXT_PUBLIC_API_BASE` 指向 backend）。
+**合并进 docker compose**（评审一键部署）：✅ **已完成** —— `frontend` 服务已并入根目录
+`docker-compose.yml`（三阶段 Dockerfile + Next.js **standalone** 产物，端口 3000；
+`NEXT_PUBLIC_API_BASE` 经 `build.args` 构建期内联为宿主机可达地址；
+健康依赖链 `qdrant → backend(healthy) → frontend`，详见 [deployment.md](deployment.md)）。
 
 ---
 

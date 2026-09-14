@@ -2,6 +2,7 @@
 # HyPRA 评审交付：docker compose 一键部署
 #   用法：docker compose up -d --build
 #   评审先在 backend/.env 填入自己的 embedding / LLM key
+#   前端密钥（魔珐星云）无需配置：页面右上角「数字人设置」内填写即可
 #   （详见 docs/deployment.md）
 # =============================================================
 
@@ -38,9 +39,44 @@ services:
       - COLD_DB_PATH=/data/memory.db   # 冷层 SQLite 落盘持久卷
     volumes:
       - cold_data:/data
+    healthcheck:
+      # 镜像内无 curl，用标准库 urllib 探测 /health（无需额外依赖）
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3).status == 200 else 1)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s          # 首次启动预留（首次加载配置/连接 Qdrant）
     depends_on:
       qdrant:
         condition: service_healthy
+
+  # ---- 前端 Next.js（对话 UI + 数字人舞台）----
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        # 请求由**宿主机浏览器**发起，必须是宿主可达地址
+        # （容器名 backend 在浏览器中无法解析，故不能用 http://backend:8000）
+        NEXT_PUBLIC_API_BASE: http://localhost:8000
+    container_name: hypra-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    # 等后端就绪再启动：避免页面打开时后端仍在初始化，首屏显示「未连接」
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
 
 volumes:
   qdrant_storage:    # 向量数据持久化

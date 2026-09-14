@@ -14,6 +14,26 @@ npm run dev                       # http://localhost:3000
 > 需要先启动后端（`cd backend && ../.venv/Scripts/python -m uvicorn app.main:app --reload`），
 > 页面顶部会显示「后端在线 / 未连接」。
 
+## Docker 部署（评审一键，推荐）
+
+前端已并入项目根目录的 `docker compose`（详见 [docs/deployment.md](../docs/deployment.md)）：
+
+```bash
+cd backend && cp .env.example .env      # 填自己的 LLM / Embedding key
+cd .. && docker compose up -d --build   # 拉起 qdrant + backend + frontend
+# 打开 http://localhost:3000
+```
+
+要点：
+
+- `NEXT_PUBLIC_API_BASE` 是**构建期内联**变量，由 compose 的 `build.args` 传入
+  `http://localhost:8000`（请求由宿主机浏览器发起，容器名 `backend` 无法解析）；
+  改动后需 `docker compose build frontend` 重建，改 `.env` 重启无效。
+- 镜像基于 Next.js **standalone** 产物（`next.config.mjs` 的 `output: "standalone"`），
+  运行时镜像不含全量 `node_modules`；本地 `npm run dev` / `npm run build` 行为不变。
+- `.env.local`（含魔珐密钥）已被 `frontend/.dockerignore` 排除，**不入镜像**。
+- 前端等后端健康后再启动（compose 健康依赖链），首屏不会显示「后端未连接」。
+
 ## 已实现
 
 ### F1：对话产品化

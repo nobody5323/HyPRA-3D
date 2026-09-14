@@ -74,3 +74,28 @@ jobs:
           done
           if [ $failed -ne 0 ]; then exit 1; fi
           echo "未发现被跟踪的密钥或产物文件 ✅"
+
+  docker-build:
+    name: 镜像可构建（docker build，不启动）
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 构建后端镜像
+        run: docker build -t hypra-backend:ci ./backend
+
+      - name: 构建前端镜像
+        # NEXT_PUBLIC_API_BASE 为构建期内联变量，故须在构建时传入
+        run: |
+          docker build -t hypra-frontend:ci \
+            --build-arg NEXT_PUBLIC_API_BASE=http://localhost:8000 \
+            ./frontend
+
+      - name: 校验 compose 配置可解析
+        # compose 引用了 backend/.env（含真实密钥、不入库），CI 用模板占位
+        run: |
+          cp backend/.env.example backend/.env
+          docker compose config -q
+          echo "compose 服务：$(docker compose config --services | tr '\n' ' ')"
