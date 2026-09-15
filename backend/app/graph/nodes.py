@@ -232,7 +232,50 @@ class ChatNodes:
                 result.reply = sanitize_reply(result.reply)
                 return {"reply": result.reply, "emotion": result, "tools_used": tools_used}
 
-        # ② 降级通道：普通回复 + 兜底情绪（用真实回复替换占位文本）
+        # ② 模型只给了纯文本、未调用情绪工具 → **强制补一次结构化输出**。
+        #    否则会直接落到关键词兜底：未命中关键词时情绪恒为 neutral / intensity 0.5
+        #    （实测缺陷：前端情绪强度「始终 50%」）。靠提示词无法保证模型一定调工具，
+        #    故此处用 tool_choice 强制（仅多一次调用，且只在模型未调工具时发生）。
+        if agent.reply:
+            # 末尾需要一条**指令消息**：实测仅以 assistant 结尾时，部分 OpenAI 兼容实现
+            # 不会返回 tool_call（3 次中 2 次落回关键词兜底）。
+            # 指令里保留用户原话，避免「最后一条用户消息」丢失真实输入
+            # （兜底实现与部分模型会据此判情绪）。
+            forced_calls = self.llm.chat_with_tools(
+                [
+                    *messages,
+                    ChatMessage(role="assistant", content=agent.reply),
+                    ChatMessage(
+                        role="user",
+                        content=(
+                            f"{state.get('user_input', '')}\n\n"
+                            "请调用工具，返回「我此刻的情绪判定」与「你刚才的回复」的完整文本。"
+                        ),
+                    ),
+                ],
+                [build_emotion_tool()],
+                tool_choice={
+                    "type": "function",
+                    "function": {"name": EMOTION_TOOL_NAME},
+                },
+                **kwargs,
+            )
+            forced = next(
+                (call for call in (forced_calls or []) if call.name == EMOTION_TOOL_NAME),
+                None,
+            )
+            if forced is not None:
+                result = parse_emotion_result(forced.arguments)
+                if result is not None:
+                    # 回复沿用首次生成的内容：避免风格漂移，也不多花一次生成
+                    result.reply = sanitize_reply(agent.reply or result.reply)
+                    return {
+                        "reply": result.reply,
+                        "emotion": result,
+                        "tools_used": tools_used,
+                    }
+
+        # ③ 终极降级：普通回复 + 关键词兜底情绪（用真实回复替换占位文本）
         reply = sanitize_reply(agent.reply or self.llm.chat(messages, **kwargs))
         fallback = extract_emotion_fallback(state.get("user_input", ""))
         fallback.reply = reply

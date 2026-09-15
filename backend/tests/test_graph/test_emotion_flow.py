@@ -6,7 +6,7 @@ import pytest
 
 from app.graph.chat_graph import build_chat_graph
 from app.graph.nodes import ChatNodes
-from app.llm.base import ChatMessage, LLMProvider, ToolCall
+from app.llm.base import AgentResult, ChatMessage, LLMProvider, ToolCall
 from app.llm.mock import MockLLMProvider
 from app.memory.cold.models import Fact, FactType
 from app.memory.cold.sqlite_store import SqliteColdStore
@@ -65,6 +65,50 @@ def test_generate_reply_structured_channel(nodes: ChatNodes) -> None:
     assert out["emotion"] is not None
     assert out["emotion"].emotion == EmotionLabel.ANXIOUS
     assert out["emotion"].source == "llm"
+
+
+def test_generate_reply_forces_structured_output_when_model_returns_plain_text() -> None:
+    """模型只给纯文本、不调工具 → 必须强制补一次结构化输出。
+
+    回归背景（实测缺陷）：真实模型在完整提示词下一律返回纯文本，
+    旧实现直接落到关键词兜底——未命中关键词时情绪恒为 neutral / intensity 0.5，
+    前端表现为「情绪强度始终 50%」。
+    """
+    forced_choices: list[object] = []
+
+    class _TextOnlyProvider(MockLLMProvider):
+        """chat_with_tool_loop 只给纯文本（模拟真实模型行为）。"""
+
+        def chat_with_tool_loop(self, messages, tools, executor, **kwargs):
+            return AgentResult(reply="我在听，你慢慢说。", tool_calls=[], rounds=1)
+
+        def chat_with_tools(self, messages, tools, *, tool_choice="auto", **kwargs):
+            forced_choices.append(tool_choice)
+            return super().chat_with_tools(
+                messages, tools, tool_choice=tool_choice, **kwargs
+            )
+
+    nodes = ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=MemoryStore(SqliteColdStore(db_path=":memory:"), InMemoryWarmStore()),
+        llm_provider=_TextOnlyProvider(),
+    )
+    out = nodes.generate_reply(
+        _state(
+            user_input="我最近总是失眠，压力好大",
+            messages=[{"role": "user", "content": "我最近总是失眠，压力好大"}],
+        )
+    )
+
+    # ① 确实发起了强制结构化调用，且指定了具体函数（而非 "auto"）
+    assert forced_choices
+    assert forced_choices[0] != "auto"
+    assert forced_choices[0]["function"]["name"] == EMOTION_TOOL_NAME
+    # ② 情绪来自结构化输出（而非关键词兜底）；回复沿用首次生成，不重复生成
+    assert out["emotion"].source == "llm"
+    assert out["emotion"].emotion == EmotionLabel.ANXIOUS
+    assert out["reply"] == "我在听，你慢慢说。"
 
 
 def test_generate_reply_fallback_channel() -> None:
