@@ -87,7 +87,7 @@ const MessageList = memo(function MessageList({
       {busy && (
         <div className="flex justify-start">
           <div className="rounded-2xl bg-surface-raised px-4 py-2.5 text-sm text-ink-soft">
-            苏澄正在回应…
+             <span translate="no">苏澄</span>正在回应…
           </div>
         </div>
       )}
@@ -192,10 +192,15 @@ export function ChatPanel({
   );
 
   return (
-    <section className="flex h-full min-h-0 flex-col rounded-2xl border border-line bg-surface-panel">
+    <section
+      aria-labelledby="chat-title"
+      className="flex h-full min-h-0 flex-col rounded-2xl border border-line bg-surface-panel"
+    >
       <header className="flex items-center justify-between border-b border-line px-4 py-3">
-        <h2 className="text-sm font-medium text-ink">对话</h2>
-        <span className="text-xs text-ink-soft">
+        <h2 id="chat-title" className="text-sm font-medium text-ink">
+          对话
+        </h2>
+        <span className="tabular-nums text-xs text-ink-soft">
           {messages.length > 0 ? `${messages.length} 条消息` : "开始聊聊吧"}
         </span>
       </header>
