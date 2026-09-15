@@ -3,26 +3,65 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  /* 浅色主题：原生控件 / 输入光标 / 滚动条按浅色渲染 */
+  color-scheme: light;
 }
 
 body {
-  /* 氛围底色：左上冷色、右下暖紫，避免纯黑显得压抑 */
+  /* 氛围底色：左上鼠尾草绿、右下暖沙色，米白纸上一层极淡的光，避免纯白刺眼 */
   background-image:
-    radial-gradient(circle at 15% 0%, rgba(56, 189, 248, 0.09), transparent 45%),
-    radial-gradient(circle at 85% 100%, rgba(139, 92, 246, 0.09), transparent 45%);
-  background-attachment: fixed;
+    radial-gradient(circle at 15% 0%, rgba(94, 139, 126, 0.1), transparent 45%),
+    radial-gradient(circle at 85% 100%, rgba(200, 154, 91, 0.1), transparent 45%);
 }
 
-/* 细滚动条 */
+/* 细滚动条（浅底适配：暖灰滑块） */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: rgba(148, 163, 184, 0.28);
+  background: rgba(125, 116, 106, 0.3);
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* 触屏基础：消除双击缩放的 300ms 等待；点击高亮改用暖色调（替代默认蓝块） */
+@layer base {
+  button,
+  a,
+  input,
+  textarea,
+  [role="option"] {
+    touch-action: manipulation;
+  }
+  * {
+    -webkit-tap-highlight-color: rgba(78, 119, 107, 0.15);
+  }
+}
+
+/* 尊重系统「减少动态效果」：关闭装饰性动画与过渡（无障碍要求） */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+@layer components {
+  /**
+   * 统一键盘焦点环（浅色主题）。
+   *
+   * 只对键盘导航（:focus-visible）生效：鼠标点击不会出现伪焦点。
+   * ring-offset 用面板底色，让环在米白底 / 纯白卡片 / 抬起层上都有清晰分隔。
+   * 所有可交互元素都挂这个类（审计 F1/F2：此前全站零 focus-visible）。
+   */
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-panel;
+  }
 }

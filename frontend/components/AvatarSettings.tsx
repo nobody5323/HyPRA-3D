@@ -5,24 +5,60 @@
  *
  * 凭证保存到 localStorage 并即时生效（SDK 会自动重建）；
  * 未配置时自动降级为「浏览器原生 TTS + 占位形象」。
+ *
+ * 组件是**受控的展示层**：凭证状态由页面统一持有（避免同一 store 被多处订阅）。
+ *
+ * 无障碍要点（审计 A3 / A8 / F1 / F2 / F3）：
+ * - 面板是模态对话框（`role="dialog"` + `aria-modal` + `aria-labelledby`）；
+ * - 打开即把焦点移入首个输入框，Esc 或「关闭」都会关闭面板并**把焦点归还触发器**；
+ * - 保存 / 清除结果用 `role="status"` 播报；
+ * - 面板自带最大高度与内部滚动，矮视口不会溢出遮挡页面内容。
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
-import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
+import type { AvatarCredentials, CredentialSource } from "@/lib/avatar-config";
 
 const SOURCE_LABEL: Record<string, { text: string; className: string }> = {
-  local: { text: "已填写（本机保存）", className: "bg-emerald-500/15 text-emerald-300" },
-  env: { text: "来自部署配置", className: "bg-sky-500/15 text-sky-300" },
-  none: { text: "未配置 → 使用浏览器语音", className: "bg-amber-500/15 text-amber-300" },
+  local: { text: "已填写（本机保存）", className: "bg-success-soft text-success-text" },
+  env: { text: "来自部署配置", className: "bg-accent-soft text-accent-text" },
+  none: { text: "未配置 → 使用浏览器语音", className: "bg-warning-soft text-warning-text" },
 };
 
-export function AvatarSettings({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const { credentials, source, save, clear } = useAvatarCredentials();
+export function AvatarSettings({
+  open,
+  onClose,
+  credentials,
+  source,
+  save,
+  clear,
+  panelId = "avatar-settings",
+}: {
+  open: boolean;
+  onClose: () => void;
+  credentials: AvatarCredentials | null;
+  source: CredentialSource;
+  save: (credentials: AvatarCredentials) => boolean;
+  clear: () => void;
+  /** 面板 id（与触发器的 aria-controls 对应） */
+  panelId?: string;
+}) {
   const [appId, setAppId] = useState("");
   const [appSecret, setAppSecret] = useState("");
   const [revealSecret, setRevealSecret] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  const firstFieldRef = useRef<HTMLInputElement>(null);
+  /** 打开面板前持有焦点的元素（通常是触发器）：关闭时把焦点还回去 */
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const titleId = `${panelId}-title`;
+
+  /** 关闭面板并归还焦点（「关闭」按钮与 Esc 共用同一路径） */
+  function close() {
+    onClose();
+    const previous = restoreFocusRef.current;
+    restoreFocusRef.current = null;
+    if (previous && previous.isConnected) previous.focus();
+  }
 
   // 打开面板时同步当前值
   useEffect(() => {
@@ -33,6 +69,27 @@ export function AvatarSettings({ open, onClose }: { open: boolean; onClose: () =
     setMessage(null);
   }, [open, credentials]);
 
+  // 打开后把焦点移入首个输入框（键盘用户无需绕过整页 Tab），并记住来源焦点
+  useEffect(() => {
+    if (!open) return;
+    restoreFocusRef.current =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    firstFieldRef.current?.focus();
+  }, [open]);
+
+  // Esc 关闭
+  useEffect(() => {
+    if (!open) return;
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      close();
+    }
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   if (!open) return null;
 
   const canSave = appId.trim().length > 0 && appSecret.trim().length > 0;
@@ -40,8 +97,12 @@ export function AvatarSettings({ open, onClose }: { open: boolean; onClose: () =
 
   function handleSave() {
     if (!canSave) return;
-    save({ appId, appSecret });
-    setMessage("已保存，数字人将自动重新初始化。");
+    const ok = save({ appId, appSecret });
+    setMessage(
+      ok
+        ? "已保存，数字人将自动重新初始化。"
+        : "保存失败：本机存储不可用（可能是隐私模式），请检查浏览器设置。",
+    );
   }
 
   function handleClear() {
@@ -52,56 +113,64 @@ export function AvatarSettings({ open, onClose }: { open: boolean; onClose: () =
   }
 
   return (
-    <div className="absolute right-0 top-full z-30 mt-2 w-[380px] rounded-2xl border border-white/10 bg-slate-900 p-4 shadow-2xl">
+    <div
+      id={panelId}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
+      className="absolute right-0 top-full z-30 mt-2 max-h-[min(70vh,520px)] w-[380px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-lg"
+    >
       <div className="flex items-start justify-between">
         <div>
-          <h3 className="text-sm font-medium text-slate-100">数字人设置</h3>
-          <p className="mt-0.5 text-[11px] text-slate-500">
-            填写后即时生效，无需重新构建前端
-          </p>
+          <h2 id={titleId} className="text-sm font-medium text-ink">
+            数字人设置
+          </h2>
+          <p className="mt-0.5 text-xs text-ink-soft">填写后即时生效，无需重新构建前端</p>
         </div>
         <button
           type="button"
-          onClick={onClose}
-          className="rounded-lg px-2 py-1 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-200"
+          onClick={close}
+          className="focus-ring rounded-lg px-2 py-1 text-xs text-ink-soft transition-colors hover:bg-surface-hover hover:text-ink"
         >
           关闭
         </button>
       </div>
 
       <div className="mt-3">
-        <span className={`inline-block rounded-full px-2.5 py-1 text-[11px] ${badge.className}`}>
+        <span className={`inline-block rounded-full px-2.5 py-1 text-xs ${badge.className}`}>
           {badge.text}
         </span>
       </div>
 
       <div className="mt-3 space-y-3">
         <label className="block">
-          <span className="text-xs text-slate-400">App ID（AK）</span>
+          <span className="text-xs text-ink-muted">App ID（AK）</span>
           <input
+            ref={firstFieldRef}
             value={appId}
             onChange={(event) => setAppId(event.target.value)}
             placeholder="例如 c8fc6578…"
             autoComplete="off"
-            className="mt-1 w-full rounded-lg border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-sky-500/50"
+            className="focus-ring mt-1 w-full rounded-lg border border-line bg-surface-inset px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent"
           />
         </label>
 
         <label className="block">
-          <span className="text-xs text-slate-400">App Secret</span>
-          <div className="mt-1 flex gap-2">
+          <span className="text-xs text-ink-muted">App Secret</span>
+          {/* 组合控件：焦点落在内部任一元素时整组高亮（审计 F2） */}
+          <div className="mt-1 flex gap-2 rounded-lg focus-within:ring-2 focus-within:ring-accent/60 focus-within:ring-offset-2 focus-within:ring-offset-surface-panel">
             <input
               value={appSecret}
               onChange={(event) => setAppSecret(event.target.value)}
               type={revealSecret ? "text" : "password"}
               placeholder="••••••••"
               autoComplete="off"
-              className="w-full rounded-lg border border-white/10 bg-slate-950/60 px-3 py-2 text-sm text-slate-100 outline-none placeholder:text-slate-600 focus:border-sky-500/50"
+              className="focus-ring w-full rounded-lg border border-line bg-surface-inset px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent"
             />
             <button
               type="button"
               onClick={() => setRevealSecret((prev) => !prev)}
-              className="shrink-0 rounded-lg border border-white/10 px-3 text-xs text-slate-400 transition-colors hover:bg-slate-800"
+              className="focus-ring shrink-0 rounded-lg border border-line px-3 text-xs text-ink-soft transition-colors hover:bg-surface-hover"
             >
               {revealSecret ? "隐藏" : "显示"}
             </button>
@@ -114,25 +183,29 @@ export function AvatarSettings({ open, onClose }: { open: boolean; onClose: () =
           type="button"
           onClick={handleSave}
           disabled={!canSave}
-          className="flex-1 rounded-lg bg-sky-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-700"
+          className="focus-ring flex-1 rounded-lg bg-accent px-3 py-2 text-sm font-medium text-ink-on transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-surface-hover disabled:text-ink-faint"
         >
           保存并启用
         </button>
         <button
           type="button"
           onClick={handleClear}
-          className="rounded-lg border border-white/10 px-3 py-2 text-sm text-slate-300 transition-colors hover:bg-slate-800"
+          className="focus-ring rounded-lg border border-line px-3 py-2 text-sm text-ink-muted transition-colors hover:bg-surface-hover"
         >
           清除
         </button>
       </div>
 
-      {message && <p className="mt-2 text-[11px] text-emerald-300">{message}</p>}
+      {message && (
+        <p role="status" className="mt-2 text-xs text-success-text">
+          {message}
+        </p>
+      )}
 
-      <div className="mt-3 space-y-1 border-t border-white/5 pt-3 text-[11px] leading-relaxed text-slate-500">
+      <div className="mt-3 space-y-1 border-t border-line pt-3 text-xs leading-relaxed text-ink-soft">
         <p>
-          获取方式：魔珐星云控制台 → <span className="text-slate-400">应用中心</span> → 创建
-          <span className="text-slate-400">驱动应用</span> → 查看密钥 → 复制 App ID / App Secret。
+          获取方式：魔珐星云控制台 → <span className="text-ink-muted">应用中心</span> → 创建
+          <span className="text-ink-muted">驱动应用</span> → 查看密钥 → 复制 App ID / App Secret。
         </p>
         <p>
           留空即使用浏览器原生语音（字幕与对话功能不受影响）。

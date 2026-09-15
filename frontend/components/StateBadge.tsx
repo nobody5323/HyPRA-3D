@@ -5,10 +5,10 @@
 import { AVATAR_STATE_LABELS, type AvatarState } from "@/lib/types";
 
 const STATE_STYLE: Record<AvatarState, string> = {
-  idle: "bg-slate-700/60 text-slate-200",
-  listen: "bg-sky-500/25 text-sky-200 ring-1 ring-sky-400/40",
-  think: "bg-amber-500/25 text-amber-200 ring-1 ring-amber-400/40",
-  speak: "bg-emerald-500/25 text-emerald-200 ring-1 ring-emerald-400/40",
+  idle: "bg-surface-hover text-ink-muted",
+  listen: "bg-accent-soft text-accent-text ring-1 ring-accent/30",
+  think: "bg-warning-soft text-warning-text ring-1 ring-warning/30",
+  speak: "bg-success-soft text-success-text ring-1 ring-success/30",
 };
 
 export function StateBadge({ state }: { state: AvatarState }) {

@@ -23,6 +23,14 @@ export type CredentialSource = "local" | "env" | "none";
 
 const STORAGE_KEY = "hypra.avatar.credentials";
 const CHANGE_EVENT = "hypra:avatar-credentials-changed";
+/** 存储结构版本：结构变更时可据此丢弃旧数据（避免半途结构升级造成的脏读） */
+const STORAGE_VERSION = 1;
+
+/**
+ * 安全提示：localStorage 为**明文**存储。
+ * 魔珐官方 SDK 设计上要求前端持有驱动密钥，此处面向演示/内网场景；
+ * 正式上线应由后端签发短期临时凭证，不把长期密钥下发到浏览器。
+ */
 
 /** 构建时环境变量（可能为空串） */
 const ENV_CREDENTIALS: AvatarCredentials = {
@@ -53,6 +61,8 @@ export function readStoredCredentials(): AvatarCredentials | null {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
+    // 版本不匹配：结构已变，丢弃旧数据（宁可让用户重填，也不读脏值）
+    if (parsed && typeof parsed === "object" && parsed.v !== STORAGE_VERSION) return null;
     return isComplete(parsed)
       ? { appId: parsed.appId.trim(), appSecret: parsed.appSecret.trim() }
       : null;
@@ -87,21 +97,39 @@ export function getInitialCredentials(): {
   return { credentials: null, source: "none" };
 }
 
-/** 保存界面填写的凭证（并通知订阅者）。 */
-export function saveCredentials(credentials: AvatarCredentials): void {
-  if (typeof window === "undefined") return;
+/**
+ * 保存界面填写的凭证（并通知订阅者）。
+ *
+ * @returns 是否真正写入成功（隐私模式 / 存储配额满时为 false，调用方据此提示用户）
+ */
+export function saveCredentials(credentials: AvatarCredentials): boolean {
+  if (typeof window === "undefined") return false;
   const payload: AvatarCredentials = {
     appId: credentials.appId.trim(),
     appSecret: credentials.appSecret.trim(),
   };
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+  try {
+    window.localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ v: STORAGE_VERSION, ...payload }),
+    );
+  } catch (error) {
+    // localStorage 可能被禁用（隐私模式）或写满：不抛错，交由调用方提示
+    console.warn("[HyPRA] 凭证写入 localStorage 失败：", error);
+    return false;
+  }
   notifyChange();
+  return true;
 }
 
 /** 清除界面填写的凭证（回落到环境变量或降级）。 */
 export function clearCredentials(): void {
   if (typeof window === "undefined") return;
-  window.localStorage.removeItem(STORAGE_KEY);
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+  } catch (error) {
+    console.warn("[HyPRA] 凭证清除失败：", error);
+  }
   notifyChange();
 }
 

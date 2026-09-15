@@ -60,6 +60,12 @@ const XMOV_GATEWAY = "https://nebula-agent.xingyun3d.com/user/v1/ttsa/session";
 /** 初始化超时（毫秒）：资源下载或 socket.io 连接卡住时兜底，避免永久“初始化中” */
 const INIT_TIMEOUT_MS = 90_000;
 
+/** SDK 脚本加载超时（毫秒）：CDN 被拦截/断网时必须 settle，否则降级链路不触发 */
+const SDK_LOAD_TIMEOUT_MS = 20_000;
+
+/** 已失败脚本的标记属性（见 loadXmovSdk 注释） */
+const SDK_FAILED_ATTR = "data-hypra-failed";
+
 // =============================================================
 // 实现一：浏览器原生 TTS（零依赖，默认）
 // =============================================================
@@ -77,11 +83,16 @@ export function useBrowserAvatar(): AvatarController {
         voices.find((v) => /zh/i.test(v.lang) && /female|Xiaoxiao|Huihui/i.test(v.name)) ??
         voices.find((v) => /zh/i.test(v.lang)) ??
         null;
-      setReady(true);
     };
     pickVoice();
+    // ready 表示「浏览器 TTS 可用」，与是否匹配到中文音色无关（否则语义失真）
+    setReady(true);
     window.speechSynthesis.onvoiceschanged = pickVoice;
     return () => {
+      // 清理挂在全局单例上的回调：否则组件卸载后仍会被浏览器调用
+      if (window.speechSynthesis.onvoiceschanged === pickVoice) {
+        window.speechSynthesis.onvoiceschanged = null;
+      }
       window.speechSynthesis?.cancel();
     };
   }, []);
@@ -89,12 +100,29 @@ export function useBrowserAvatar(): AvatarController {
   const speak = useCallback(async (text: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window) || !text.trim()) return;
     window.speechSynthesis.cancel();
+
+    // 超时兜底：onend / onerror 在部分浏览器上可能不触发，
+    // 否则 await 会永久挂起，调用方永远不回到 idle
+    const timeoutMs = Math.min(60_000, Math.max(8_000, text.length * 250));
     await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(() => {
+        console.warn(`[HyPRA][avatar] 浏览器 TTS 未收到结束事件，${timeoutMs}ms 后按超时收尾`);
+        finish();
+      }, timeoutMs);
+
       const utterance = new SpeechSynthesisUtterance(text);
       if (voiceRef.current) utterance.voice = voiceRef.current;
       utterance.rate = 0.95;
-      utterance.onend = () => resolve();
-      utterance.onerror = () => resolve();
+      utterance.onend = finish;
+      utterance.onerror = finish;
       window.speechSynthesis.speak(utterance);
     });
   }, []);
@@ -136,24 +164,57 @@ interface UseXmovOptions {
   onUnavailable?: (reason: string) => void;
 }
 
-/** 动态加载 SDK 脚本（幂等）。 */
+/** 动态加载 SDK 脚本（幂等 + 可重试 + 超时兜底）。
+ *
+ * 两个必须处理的失败模式（否则重连后界面永久卡在「正在加载 SDK 脚本…」，且不会降级）：
+ * 1. 浏览器不会对**同一 src 的已失败脚本**重新发起请求，且其 load/error 事件早已触发完毕——
+ *    对它继续 addEventListener 永远不会回调 → 必须标记失败并在下次调用时移除重建；
+ * 2. 断网/CDN 被拦截时事件可能永远不来 → 必须超时 reject，让上层走 catch → onUnavailable → 降级。
+ */
 function loadXmovSdk(): Promise<void> {
   return new Promise((resolve, reject) => {
     if (typeof window === "undefined") return reject(new Error("非浏览器环境"));
     if ((window as any).XmovAvatar) return resolve();
 
+    let scriptTag: HTMLScriptElement | null = null;
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    /** 统一收尾：保证只 settle 一次，并清掉超时定时器 */
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback();
+    };
+
+    timer = setTimeout(() => {
+      scriptTag?.setAttribute(SDK_FAILED_ATTR, "1"); // 标记失败：下次调用可重建
+      finish(() => reject(new Error(`SDK 脚本加载超时（${SDK_LOAD_TIMEOUT_MS / 1000}s）`)));
+    }, SDK_LOAD_TIMEOUT_MS);
+
     const existing = document.querySelector<HTMLScriptElement>(`script[src="${XMOV_SDK_URL}"]`);
-    if (existing) {
-      existing.addEventListener("load", () => resolve());
-      existing.addEventListener("error", () => reject(new Error("SDK 脚本加载失败")));
+    if (existing && existing.getAttribute(SDK_FAILED_ATTR) !== "1") {
+      scriptTag = existing;
+      existing.addEventListener("load", () => finish(() => resolve()));
+      existing.addEventListener("error", () => {
+        existing.setAttribute(SDK_FAILED_ATTR, "1");
+        finish(() => reject(new Error("SDK 脚本加载失败")));
+      });
       return;
     }
+    // 已失败的旧脚本：移除后重建，浏览器才会重新发起请求
+    existing?.remove();
 
     const script = document.createElement("script");
     script.src = XMOV_SDK_URL;
     script.async = true;
-    script.onload = () => resolve();
-    script.onerror = () => reject(new Error("SDK 脚本加载失败（网络或域名被拦截）"));
+    scriptTag = script;
+    script.onload = () => finish(() => resolve());
+    script.onerror = () => {
+      script.setAttribute(SDK_FAILED_ATTR, "1");
+      finish(() => reject(new Error("SDK 脚本加载失败（网络或域名被拦截）")));
+    };
     document.head.appendChild(script);
   });
 }
@@ -182,6 +243,16 @@ export function useXmovAvatar(
   const avatarRef = useRef<any>(null);
   /** 同步跟踪具身状态（供 speak 判断是否需要先切回待机） */
   const stateRef = useRef<AvatarState>("idle");
+  /** 当前播报的收尾回调：由 SDK 的 voice_end 触发，让 speak() 的 Promise 正确结束 */
+  const finishSpeakRef = useRef<(() => void) | null>(null);
+  /** 组件是否已卸载（异步等待结束后据此放弃后续操作） */
+  const unmountedRef = useRef(false);
+  useEffect(() => {
+    unmountedRef.current = false;
+    return () => {
+      unmountedRef.current = true;
+    };
+  }, []);
 
   const updateState = useCallback((next: AvatarState) => {
     stateRef.current = next;
@@ -227,6 +298,24 @@ export function useXmovAvatar(
         // - containerId / container：容器定位（选择器兜底 + 元素优先）
         // - 回调：官方列为初始化参数，且 SDK 内部**无条件调用 onDownloadProgress**，
         //   缺失会抛 TypeError（实测错误：Cannot read properties of undefined 'onDownloadProgress'）
+        // 进度处理统一走这里：① 消除「构造参数」与「init 参数」各写一份的重复；
+        // ② 每 5% 才 setState 一次，避免加载期间整页高频重渲染
+        let lastReportedProgress = -5;
+        const reportProgress = (progress: number) => {
+          const pct = Math.round(progress);
+          if (pct >= 99) {
+            // 资源已就绪：即使 init 的 Promise 仍在等会话握手，界面也先转为可用
+            setStage("ready");
+            setReady(true);
+            setDetail("魔珐数字人已就绪");
+            return;
+          }
+          if (pct - lastReportedProgress < 5) return;
+          lastReportedProgress = pct;
+          setStage("initializing");
+          setDetail(`正在加载数字人资源… ${pct}%`);
+        };
+
         const config: Record<string, unknown> = {
           containerId,
           appId: credentials.appId,
@@ -235,24 +324,15 @@ export function useXmovAvatar(
           hardwareAcceleration: "prefer-hardware",
 
           /** 资源加载进度（必需参数）：达到 100% 即视为就绪，不阻塞在 init 的 Promise 上 */
-          onDownloadProgress: (progress: number) => {
-            const pct = Math.round(progress);
-            console.log(`[HyPRA][avatar] 资源加载 ${pct}%`);
-            if (pct >= 99) {
-              setStage("ready");
-              setReady(true);
-              setDetail("魔珐数字人已就绪");
-            } else {
-              setStage("initializing");
-              setDetail(`正在加载数字人资源… ${pct}%`);
-            }
-          },
+          onDownloadProgress: reportProgress,
           /** SDK 状态 → 具身状态机（speak / idle 等） */
           onStateChange: (sdkState: string) => {
+            // 必须走 updateState：它同步维护 stateRef，
+            // 否则 speak() 的「是否正在播报」判断会读到过期值
             const value = String(sdkState ?? "").toLowerCase();
-            if (value.includes("speak") || value.includes("play")) setState("speak");
-            else if (value.includes("listen")) setState("listen");
-            else if (value.includes("idle")) setState("idle");
+            if (value.includes("speak") || value.includes("play")) updateState("speak");
+            else if (value.includes("listen")) updateState("listen");
+            else if (value.includes("idle")) updateState("idle");
           },
           /** SDK 消息 / 错误（错误通过 code 字段区分） */
           onMessage: (payload: any) => {
@@ -287,6 +367,8 @@ export function useXmovAvatar(
           if (name === "voice_end") {
             avatar?.interactiveidle?.(); // SDK 公开方法（小写无下划线）
             updateState("idle");
+            // 播报结束 → resolve speak()，使 xmov 与浏览器 TTS 的 await 语义一致
+            finishSpeakRef.current?.();
           }
         };
         avatar.onVoiceStateChange = handleVoiceState;
@@ -320,19 +402,8 @@ export function useXmovAvatar(
         try {
           await Promise.race([
             avatar.init({
-              onDownloadProgress: (progress: number) => {
-                const pct = Math.round(progress);
-                console.log(`[HyPRA][avatar] init 进度 ${pct}%`);
-                if (pct >= 99) {
-                  // 资源已就绪：即使 init Promise 仍在等待会话握手，界面也先转为可用
-                  setStage("ready");
-                  setReady(true);
-                  setDetail("魔珐数字人已就绪");
-                } else {
-                  setStage("initializing");
-                  setDetail(`正在加载数字人资源… ${pct}%`);
-                }
-              },
+              // 与构造参数共用同一进度处理（同样每 5% 才刷新一次界面）
+              onDownloadProgress: reportProgress,
               initModel: "normal",
             }),
             timeoutPromise,
@@ -395,10 +466,42 @@ export function useXmovAvatar(
       avatar.interrupt?.();
       avatar.interactiveidle?.();
       await new Promise((resolve) => setTimeout(resolve, 400));
+      if (unmountedRef.current) return; // 等待期间组件已卸载
+      // 等待期间用户已打断（stateRef 被 interrupt 置回 idle）→ 不再开始播报
+      if (stateRef.current !== "speak") {
+        console.log("[HyPRA][avatar] 等待期间已打断，跳过本次播报");
+        return;
+      }
     }
 
     console.log("[HyPRA][avatar] speak 调用:", (ssml || text).slice(0, 60));
-    avatar.speak(ssml || text, true, true);
+
+    // 等 SDK 的 voice_end 再返回：原先直接 fire-and-forget，调用方 `await speak()`
+    // 会立刻继续并把「说话中」打回 idle（与浏览器 TTS 实现语义不一致，字幕/徽标提前回落）。
+    // 超时按文本长度估算兜底，保证 voice_end 丢失时也不会永久挂起。
+    const timeoutMs = Math.min(60_000, Math.max(8_000, text.length * 250));
+    await new Promise<void>((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (finishSpeakRef.current === finish) finishSpeakRef.current = null;
+        resolve();
+      };
+      timer = setTimeout(() => {
+        console.warn(`[HyPRA][avatar] 未收到 voice_end，${timeoutMs}ms 后按超时收尾`);
+        finish();
+      }, timeoutMs);
+      finishSpeakRef.current = finish;
+      try {
+        avatar.speak(ssml || text, true, true);
+      } catch (error) {
+        console.warn("[HyPRA][avatar] speak 抛错:", describeError(error));
+        finish();
+      }
+    });
   }, []);
 
   const interrupt = useCallback(() => {

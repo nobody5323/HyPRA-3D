@@ -67,9 +67,20 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 ```
 
 > 页面右上角显示当前渲染方式（「魔珐 SDK」/「浏览器 TTS」）。
+### F3：视觉与可访问性（浅色主题改造）
+
+| 能力 | 说明 |
+|---|---|
+| **温和浅色主题** | 语义色板（`surface-*` / `ink-*` / `line` / `accent-*` / `success|danger|warning|brand` / `mood`）集中定义于 `tailwind.config.ts`；数字人画布保留深色（`stage.canvas`），形成「浅色卡片 + 深色画布」层次 |
+| **对比度** | 正文 ≥ 4.5:1、装饰 ≥ 3:1（15 项颜色组合按 WCAG 公式实测）；`text-[11px]` 全部提升为 `text-xs` |
+| **键盘与读屏** | 文风下拉为 listbox 语义（↑↓ / Escape / 点击外部关闭）、密钥面板为 dialog 语义（焦点进出 + Escape）、消息区 `role="log"` + `aria-live`、错误条 `role="alert"`、字幕/提示 `role="status"`、全站 `focus-visible` 焦点环 |
+| **动效与触屏** | `prefers-reduced-motion` 支持、`touch-action: manipulation`、`overscroll-contain`、只用可插值属性做过渡 |
+| **字体** | 中文优先**系统**字体栈（**零新增依赖**，未引入 webfont） |
+| **交互稳定性** | SDK 脚本加载超时降级、打断状态机回合隔离、两个 provider 的 `speak()` 语义对齐 |
+
 ## 待实现
 
-- 断线重连（弱网演示）与更细的 SDK 错误提示
+- 弱网断线重连演示（当前 SDK 加载失败会超时降级，但不做自动重连）
 - 多模态 Widget 展示（图片 / 字幕组件）
 
 ## 🔑 密钥配置（两种方式）

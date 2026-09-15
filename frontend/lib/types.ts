@@ -52,6 +52,8 @@ export interface ChatResponse {
 
 /** 一条对话消息（前端展示用） */
 export interface ChatMessage {
+  /** 前端本地生成的稳定 id（用作列表 key；后端不感知） */
+  id?: string;
   role: "user" | "assistant";
   text: string;
 }

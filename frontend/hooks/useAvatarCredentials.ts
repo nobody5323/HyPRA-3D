@@ -25,7 +25,7 @@ export interface AvatarCredentialsState {
   configured: boolean;
   /** 配置修订号：每次保存/清除 +1（即使内容相同），用于触发重新连接 */
   revision: number;
-  save: (credentials: AvatarCredentials) => void;
+  save: (credentials: AvatarCredentials) => boolean;
   clear: () => void;
 }
 

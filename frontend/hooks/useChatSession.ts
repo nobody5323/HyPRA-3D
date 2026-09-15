@@ -5,9 +5,15 @@
  *
  * 流程（与赛题要求的 Listen/Think/Speak/Interrupt 对齐）：
  *   listen（记录用户输入）→ think（等待后端）→ speak（播报 + 字幕）→ idle
+ *
+ * 稳定性设计：
+ * - `turnRef` 回合序号：发送与打断都会自增，旧回合的后续写入全部失效
+ *   （否则打断后旧回合会把新回合状态打回 idle，且第二次「打断」静默失效）；
+ * - `avatar` / `busy` 经 ref 读取，使 send / interrupt 身份保持稳定；
+ * - 每条消息带稳定 id，供列表 key 使用（避免用数组下标）。
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { postChat } from "@/lib/api";
 import type { ChatMessage, EmotionInfo, ToolUsage } from "@/lib/types";
@@ -41,60 +47,94 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  /** 回合序号：发送与打断都会自增；旧回合据此判断自己已被作废 */
+  const turnRef = useRef(0);
+  /** 消息 id 自增计数（仅用于前端列表 key） */
+  const messageIdRef = useRef(0);
+
+  // avatar / busy 经 ref 读取：让 send、interrupt 的身份保持稳定
+  const avatarRef = useRef(avatar);
+  useEffect(() => {
+    avatarRef.current = avatar;
+  }, [avatar]);
+  const busyRef = useRef(busy);
+  busyRef.current = busy;
 
   const send = useCallback(
     async (text: string) => {
       const content = text.trim();
-      if (!content || busy) return;
+      if (!content || busyRef.current) return;
+
+      const turn = ++turnRef.current;
+      /** 本回合是否仍是当前回合（被打断 / 被新回合取代后为 false） */
+      const isCurrent = () => turnRef.current === turn;
+      const currentAvatar = avatarRef.current;
 
       setError(null);
       setBusy(true);
-      avatar.setState("listen"); // ① 聆听
-      setMessages((prev) => [...prev, { role: "user", text: content }]);
+      currentAvatar.setState("listen"); // ① 聆听
+      setMessages((prev) => [
+        ...prev,
+        { id: `msg-${++messageIdRef.current}`, role: "user", text: content },
+      ]);
 
       const controller = new AbortController();
       abortRef.current = controller;
 
       try {
-        avatar.setState("think"); // ② 思考（等待后端）
+        currentAvatar.setState("think"); // ② 思考（等待后端）
         const res = await postChat(
           { text: content, session_id: sessionId, style_id: styleId, user_name: userName },
           { signal: controller.signal },
         );
+        // 已被打断 / 被新回合取代：丢弃结果，不写任何界面状态
+        if (!isCurrent()) return;
 
         setSessionId(res.session_id);
-        setMessages((prev) => [...prev, { role: "assistant", text: res.reply }]);
+        setMessages((prev) => [
+          ...prev,
+          { id: `msg-${++messageIdRef.current}`, role: "assistant", text: res.reply },
+        ]);
         setEmotion(res.emotion ?? null);
         setToolsUsed(res.tools_used ?? []);
         setSubtitle(res.speak?.display_text || res.reply);
         setTone(res.speak?.tone ?? "");
         setMemoryCounts(res.memory_counts ?? {});
 
-        avatar.setState("speak"); // ③ 播报（文本给浏览器 TTS，SSML 给魔珐 SDK）
-        await avatar.speak(res.speak?.display_text || res.reply, res.speak?.ssml);
-        avatar.setState("idle"); // ④ 回到待机
+        currentAvatar.setState("speak"); // ③ 播报（文本给浏览器 TTS，SSML 给魔珐 SDK）
+        await currentAvatar.speak(res.speak?.display_text || res.reply, res.speak?.ssml);
+        if (!isCurrent()) return; // 播报期间被打断 → 状态已由 interrupt() 处理
+        currentAvatar.setState("idle"); // ④ 回到待机
       } catch (err) {
+        if (!isCurrent()) return; // 旧回合的失败不得影响新回合界面
         if ((err as Error).name === "AbortError") {
-          setError("已打断本轮对话。");
+          // 打断属用户主动行为：interrupt() 已清掉提示，这里不再当错误展示
+          currentAvatar.setState("idle");
         } else {
           setError((err as Error).message || "对话失败，请检查后端是否已启动。");
+          currentAvatar.setState("idle");
         }
-        avatar.setState("idle");
       } finally {
-        setBusy(false);
-        abortRef.current = null;
+        // 只清理本回合：否则旧回合会把新回合的 controller 清空，
+        // 导致第二次「打断」静默失效
+        if (isCurrent()) {
+          setBusy(false);
+          abortRef.current = null;
+        }
       }
     },
-    [avatar, busy, sessionId, styleId, userName],
+    [sessionId, styleId, userName],
   );
 
   /** 打断：立即停止播报并中止请求（客户端即时打断，不等服务端）。 */
   const interrupt = useCallback(() => {
+    turnRef.current += 1; // 作废进行中的回合（其后续 setState 全部失效）
     abortRef.current?.abort();
     abortRef.current = null;
-    avatar.interrupt();
+    avatarRef.current.interrupt();
     setBusy(false);
-  }, [avatar]);
+    setError(null); // 打断是用户主动行为，不作为错误提示
+  }, []);
 
   return {
     messages,
