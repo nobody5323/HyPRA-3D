@@ -168,6 +168,34 @@ def test_graph_produces_emotion(graph) -> None:
     assert result["emotion"].facial_expression  # 供 M5 数字人使用
 
 
+# ---------- 模型预设（per-model）----------
+
+
+def test_assemble_prompt_uses_selected_preset(nodes: ChatNodes) -> None:
+    """显式 preset_id 生效，并出现在本轮 sampling 中。"""
+    out = nodes.assemble_prompt(_state(preset_id="deepseek"))
+    assert out["sampling"].profile_id == "deepseek"
+    assert out["sampling"].profile_label == "DeepSeek"
+
+
+def test_preset_enable_thinking_reaches_provider() -> None:
+    """推理开关必须真的传给 provider（否则「按模型分档」只是展示）。"""
+    provider = MockLLMProvider()
+    nodes = ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=MemoryStore(SqliteColdStore(db_path=":memory:"), InMemoryWarmStore()),
+        llm_provider=provider,
+        model_name="deepseek-chat",
+    )
+    state = _state(user_input="聊聊吧", messages=[{"role": "user", "content": "聊聊吧"}])
+    assembled = nodes.assemble_prompt(state)
+    assert assembled["sampling"].enable_thinking is False
+
+    nodes.generate_reply({**state, **assembled})
+    assert provider.last_enable_thinking is False
+
+
 def test_graph_emotion_written_to_facts(graph, memory: MemoryStore) -> None:
     """本轮情绪应作为 emotion_tag 落到冷层事实。"""
     graph.invoke(_state(user_input="我最近总是失眠，很焦虑"))

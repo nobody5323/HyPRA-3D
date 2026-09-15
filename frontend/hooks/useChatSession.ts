@@ -29,6 +29,9 @@ export interface ChatSession {
   sessionId: string | null;
   styleId: string;
   setStyleId: (id: string) => void;
+  /** 模型预设 id；"" = 自动（后端按模型名匹配） */
+  presetId: string;
+  setPresetId: (id: string) => void;
   busy: boolean;
   error: string | null;
   send: (text: string) => Promise<void>;
@@ -44,6 +47,7 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
   const [memoryCounts, setMemoryCounts] = useState<Record<string, number>>({});
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [styleId, setStyleId] = useState("modern-conversational");
+  const [presetId, setPresetId] = useState(""); // "" = 自动（按模型名匹配）
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -84,7 +88,13 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
       try {
         currentAvatar.setState("think"); // ② 思考（等待后端）
         const res = await postChat(
-          { text: content, session_id: sessionId, style_id: styleId, user_name: userName },
+          {
+            text: content,
+            session_id: sessionId,
+            style_id: styleId,
+            user_name: userName,
+            preset_id: presetId || null,
+          },
           { signal: controller.signal },
         );
         // 已被打断 / 被新回合取代：丢弃结果，不写任何界面状态
@@ -123,7 +133,7 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
         }
       }
     },
-    [sessionId, styleId, userName],
+    [sessionId, styleId, presetId, userName],
   );
 
   /** 打断：立即停止播报并中止请求（客户端即时打断，不等服务端）。 */
@@ -146,6 +156,8 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
     sessionId,
     styleId,
     setStyleId,
+    presetId,
+    setPresetId,
     busy,
     error,
     send,

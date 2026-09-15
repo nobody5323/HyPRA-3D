@@ -9,7 +9,7 @@
 """
 
 from app.llm.base import ChatMessage, LLMProvider
-from app.llm.profiles import ResolvedSampling, resolve_sampling
+from app.llm.profiles import ModelProfile, ResolvedSampling, resolve_sampling
 from app.memory.store import MemoryStore
 from app.prompts.assemble import assemble_worldbook_section
 from app.prompts.persona.loader import PersonaPreset
@@ -49,6 +49,7 @@ class ChatNodes:
         tool_registry: ToolRegistry | None = None,
         mood_store=None,
         max_tool_rounds: int = 2,
+        profiles: list[ModelProfile] | None = None,
     ) -> None:
         self.presets = presets
         self.entries = entries
@@ -64,6 +65,8 @@ class ChatNodes:
         self.tool_registry = tool_registry
         self.mood_store = mood_store
         self.max_tool_rounds = max_tool_rounds
+        # 模型预设档：进程内缓存（传入 None 时由 resolve_sampling 自行读盘）
+        self.profiles = profiles
 
     # ---------- 工具 ----------
 
@@ -146,14 +149,19 @@ class ChatNodes:
     def assemble_prompt(self, state: ChatState) -> dict:
         """用 PromptManager 按固定顺序与预算组装完整提示（含风格层与示例对话）。"""
         style, style_warnings = self._resolve_style(state)
-        sampling: ResolvedSampling | None = None
         style_text = ""
         examples: list[tuple[str, str]] = []
 
+        # 模型预设档总要解析：采样参数与推理开关都来自它，
+        # 文风预设的 sampling 仅在其之上覆盖（因此 style 缺失时也不能跳过）。
+        sampling: ResolvedSampling = resolve_sampling(
+            self.model_name,
+            style.sampling if style is not None else None,
+            profiles=self.profiles,
+            preset_id=state.get("preset_id") or None,
+        )
+
         if style is not None:
-            sampling = resolve_sampling(
-                self.model_name, style.sampling, profiles=None
-            )
             style_text = self._compose_style_text(style, sampling.style_hint)
             examples = [(e.user, e.assistant) for e in style.examples]
 
@@ -208,6 +216,13 @@ class ChatNodes:
         messages = [ChatMessage(**m) for m in state.get("messages", [])]
         sampling: ResolvedSampling | None = state.get("sampling")
         kwargs = sampling.to_provider_kwargs() if sampling is not None else {}
+        # 推理开关：仅当 provider 声明支持时才传（避免破坏自定义/第三方实现）
+        if (
+            sampling is not None
+            and sampling.enable_thinking is not None
+            and getattr(self.llm, "supports_thinking_override", False)
+        ):
+            kwargs["enable_thinking"] = sampling.enable_thinking
 
         # 工具集：情绪工具（终止工具）+ Agent 行动层工具
         tools = [build_emotion_tool()]

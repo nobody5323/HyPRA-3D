@@ -26,6 +26,7 @@ class ChatState(TypedDict, total=False):
     turn_index: int              # 本轮序号（摘要并入用）
     state_vars: dict[str, str]   # 动态状态变量（current_mood 等）
     style_id: str                # 本轮文风预设 id（缺省用默认档）
+    preset_id: str               # 本轮模型预设 id（空串 = 按模型名自动匹配）
 
     # ---- 中间产物（各节点填充）----
     persona_text: str

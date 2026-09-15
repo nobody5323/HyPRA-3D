@@ -25,6 +25,9 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 class OpenAICompatibleProvider(LLMProvider):
     """通过 openai SDK 调用任意 OpenAI 兼容端点。"""
 
+    #: 支持按请求覆盖推理开关（模型预设档可逐轮切换）
+    supports_thinking_override = True
+
     def __init__(
         self,
         *,
@@ -67,11 +70,15 @@ class OpenAICompatibleProvider(LLMProvider):
             http_client=http_client,
         )
 
-    def _extra_body(self) -> dict | None:
-        """非标准参数（如推理模型的思考开关）。None 时不传，避免影响普通模型。"""
-        if self._enable_thinking is None:
+    def _extra_body(self, enable_thinking: bool | None = None) -> dict | None:
+        """非标准参数（如推理模型的思考开关）。None 时不传，避免影响普通模型。
+
+        参数 enable_thinking 优先于构造时的实例默认值——供模型预设档逐轮指定。
+        """
+        effective = self._enable_thinking if enable_thinking is None else enable_thinking
+        if effective is None:
             return None
-        return {"enable_thinking": self._enable_thinking}
+        return {"enable_thinking": effective}
 
     def chat(
         self,
@@ -82,6 +89,7 @@ class OpenAICompatibleProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
         """调用 chat/completions，返回助手回复文本。"""
         kwargs: dict = {
@@ -98,7 +106,7 @@ class OpenAICompatibleProvider(LLMProvider):
         ):
             if value is not None:
                 kwargs[key] = value
-        extra_body = self._extra_body()
+        extra_body = self._extra_body(enable_thinking)
         if extra_body is not None:
             kwargs["extra_body"] = extra_body
 
@@ -120,6 +128,7 @@ class OpenAICompatibleProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ):
         """Agent 工具循环（OpenAI tools 协议）。
 
@@ -144,7 +153,7 @@ class OpenAICompatibleProvider(LLMProvider):
             ):
                 if value is not None:
                     kwargs[key] = value
-            extra_body = self._extra_body()
+            extra_body = self._extra_body(enable_thinking)
             if extra_body is not None:
                 kwargs["extra_body"] = extra_body
             return kwargs
@@ -253,6 +262,7 @@ class OpenAICompatibleProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> list[ToolCall] | None:
         """function calling（OpenAI tools 协议）。
 
@@ -273,7 +283,7 @@ class OpenAICompatibleProvider(LLMProvider):
         ):
             if value is not None:
                 kwargs[key] = value
-        extra_body = self._extra_body()
+        extra_body = self._extra_body(enable_thinking)
         if extra_body is not None:
             kwargs["extra_body"] = extra_body
 

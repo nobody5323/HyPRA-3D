@@ -20,6 +20,7 @@ from app.graph.chat_graph import build_chat_graph
 from app.graph.nodes import ChatNodes
 from app.llm.base import LLMProvider
 from app.llm.factory import create_llm_provider
+from app.llm.profiles import list_presets, load_model_profiles, resolve_profile
 from app.memory.cold.extractor import create_extractor
 from app.memory.cold.mood_log import SqliteMoodLogStore
 from app.memory.cold.sqlite_store import SqliteColdStore
@@ -45,6 +46,7 @@ _memory_store: MemoryStore | None = None
 _mood_store = None
 _llm_provider: LLMProvider | None = None
 _chat_graph = None
+_model_profiles = None
 
 _DEFAULT_PERSONA_ID = "therapist-elder-sister"
 
@@ -80,7 +82,6 @@ def set_memory_store(store: MemoryStore | None) -> None:
     _memory_store = store
     _chat_graph = None
 
-
 def get_mood_store():
     """懒加载情绪日记库（Agent 工具用）。"""
     global _mood_store
@@ -95,6 +96,14 @@ def set_mood_store(store) -> None:
     global _mood_store, _chat_graph
     _mood_store = store
     _chat_graph = None
+
+
+def get_model_profiles():
+    """懒加载模型预设档（进程内缓存，避免每轮对话都读盘）。"""
+    global _model_profiles
+    if _model_profiles is None:
+        _model_profiles = load_model_profiles()
+    return _model_profiles
 
 
 def get_llm_provider() -> LLMProvider:
@@ -141,6 +150,7 @@ def get_chat_graph():
             styles=_styles,
             default_style_id=settings.style_preset,
             model_name=settings.llm_model,
+            profiles=get_model_profiles(),
             tool_registry=build_default_registry() if settings.agent_tools_enabled else None,
             mood_store=get_mood_store() if settings.agent_tools_enabled else None,
             max_tool_rounds=settings.max_tool_rounds,
@@ -163,6 +173,10 @@ class ChatRequest(BaseModel):
     style_id: str | None = Field(
         default=None,
         description="文风预设 id（可选，缺省用服务端默认；用于 A/B 对比演示）",
+    )
+    preset_id: str | None = Field(
+        default=None,
+        description="模型预设 id（可选，缺省按当前模型名自动匹配；见 GET /chat/presets）",
     )
 
 
@@ -192,6 +206,12 @@ class ChatResponse(BaseModel):
         default_factory=dict,
         description="本轮文风与采样：style_id/style_name/examples/sampling",
     )
+    preset: dict[str, object] = Field(
+        default_factory=dict,
+        description=(
+            "本轮模型预设（实际生效）：preset_id/preset_label/采样参数/enable_thinking"
+        ),
+    )
     speak: dict[str, object] = Field(
         default_factory=dict,
         description="数字人播报指令（SSML + 字幕 + 音色），供前端 SDK 播报",
@@ -204,6 +224,26 @@ class ChatResponse(BaseModel):
 
 
 # ---------- 路由 ----------
+
+
+@router.get("/presets")
+def list_chat_presets() -> dict:
+    """模型预设档清单（界面「模型预设」选择器用）。
+
+    同时给出按当前 LLM_MODEL 自动匹配到的档位 id，供前端在「自动」状态下
+    展示实际生效的预设。
+
+    合规说明：预设内容全部为项目自写（采样参数取自各模型官方通用建议值），
+    未复制任何社区预设的提示词原文。
+    """
+    settings = get_settings()
+    profiles = get_model_profiles()
+    matched = resolve_profile(settings.llm_model, profiles)
+    return {
+        "model": settings.llm_model,
+        "auto_preset_id": matched.id,
+        "presets": list_presets(profiles),
+    }
 
 
 @router.post("", response_model=ChatResponse)
@@ -238,6 +278,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         "turn_index": len(session.history) + 1,
         "state_vars": dict(session.state_vars),
         "style_id": req.style_id or settings.style_preset,
+        "preset_id": req.preset_id or "",
         "warnings": [],
     }
 
@@ -318,6 +359,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         warnings=result.get("warnings", []),
         estimated_tokens=estimate_tokens(system_prompt),
         style=style_meta,
+        preset=sampling.to_public_dict() if sampling is not None else {},
         speak=speak_meta,
         tools_used=result.get("tools_used", []),
         note=(

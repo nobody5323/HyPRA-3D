@@ -4,6 +4,7 @@ import pytest
 
 from app.llm.profiles import (
     ModelProfile,
+    list_presets,
     load_model_profiles,
     resolve_profile,
     resolve_sampling,
@@ -96,3 +97,40 @@ def test_qwen_profile_hint_forbids_meta_comment(profiles) -> None:
     resolved = resolve_sampling("qwen3.7-flash-2026-07-15", None, profiles)
     assert "自我纠正" in resolved.style_hint
     assert "元评论" in resolved.style_hint
+
+
+# ---------- 预设选择（界面可选 + 按模型自动匹配）----------
+
+
+def test_explicit_preset_id_overrides_model_match(profiles) -> None:
+    """显式选定的预设优先于按模型名自动匹配（界面手动指定的场景）。"""
+    assert resolve_profile("qwen3.7-flash-2026-07-15", profiles).id == "qwen3.7-flash"
+    forced = resolve_profile("qwen3.7-flash-2026-07-15", profiles, preset_id="deepseek")
+    assert forced.id == "deepseek"
+
+
+def test_unknown_preset_id_falls_back_to_match(profiles) -> None:
+    """未知 preset_id 不应报错，回落到按模型名匹配。"""
+    assert resolve_profile("deepseek-chat", profiles, preset_id="not-exist").id == "deepseek"
+
+
+def test_resolve_sampling_carries_preset_metadata(profiles) -> None:
+    """合并结果需带预设标识与推理开关（供界面展示与 provider 传参）。"""
+    resolved = resolve_sampling("deepseek-chat", None, profiles)
+    assert resolved.profile_id == "deepseek"
+    assert resolved.profile_label == "DeepSeek"
+    assert resolved.enable_thinking is False
+
+    public = resolved.to_public_dict()
+    assert public["preset_id"] == "deepseek"
+    assert public["preset_label"] == "DeepSeek"
+    assert public["enable_thinking"] is False
+
+
+def test_list_presets_shape(profiles) -> None:
+    """界面选择器需要的最小字段集，且展示名不能为空。"""
+    items = list_presets(profiles)
+    assert len(items) == len(profiles)
+    required = {"id", "label", "description", "match", "temperature", "enable_thinking"}
+    assert required <= set(items[0])
+    assert all(item["label"] for item in items)

@@ -45,9 +45,34 @@ export interface ChatResponse {
   warnings: string[];
   estimated_tokens: number;
   style: Record<string, unknown>;
+  /** 本轮实际生效的模型预设（preset_id/preset_label/采样参数/enable_thinking） */
+  preset?: Record<string, unknown>;
   speak: SpeakCommand;
   tools_used: ToolUsage[];
   note: string;
+}
+
+/** 模型预设档（与后端 app/llm/profiles.yaml 对应） */
+export interface PresetInfo {
+  id: string;
+  label: string;
+  description: string;
+  match: string[];
+  temperature: number;
+  top_p: number | null;
+  frequency_penalty: number | null;
+  presence_penalty: number | null;
+  max_tokens: number | null;
+  /** 推理模型思考开关：null = 不传该参数（兼容普通模型） */
+  enable_thinking: boolean | null;
+}
+
+/** GET /chat/presets 响应 */
+export interface PresetCatalog {
+  model: string;
+  /** 按当前模型名自动匹配到的档位 id */
+  auto_preset_id: string;
+  presets: PresetInfo[];
 }
 
 /** 一条对话消息（前端展示用） */

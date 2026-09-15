@@ -1,41 +1,61 @@
 # =============================================================
-# 模型适配档（per-model）
-#   不同模型对指令的敏感度、对采样参数的容忍度不同；
-#   这里为每个模型记录「技术适配」——与文风预设正交互补。
-#   匹配规则：按 match 中的子串匹配模型名，取最长匹配；无匹配用 default。
+# 模型预设档（per-model presets）
+#   不同模型对指令的敏感度、对采样参数的容忍度、对推理链的默认行为都不同；
+#   这里为每个模型记录一档「技术适配」，与文风预设（style/）正交互补：
+#     模型预设 = 怎么生成（采样参数 / 推理开关 / 技术性输出约束）
+#     文风预设 = 说什么风格（内容意图，可覆盖采样参数）
+#
+#   选择规则（优先级从高到低）：
+#     ① 界面显式选定的 preset_id（POST /chat 的 preset_id 字段）
+#     ② 按 match 子串匹配当前模型名（多个命中取最长匹配）
+#     ③ 都不匹配 → default（match: ["*"]）
+#
 #   合并规则：文风预设的 sampling 覆盖本档的 sampling（文风更贴近内容意图），
-#             本档独有的键（如 top_p / style_hint）保留。
+#             本档独有的键（top_p / style_hint / enable_thinking）保留。
+#
+#   合规说明：本文件内容全部为项目自写（未复制任何社区预设的提示词原文）。
+#             采样档位参数取自各模型官方文档的通用建议值。
 # =============================================================
 
 profiles:
   - id: qwen3.7-flash
+    label: Qwen3.7-Flash
+    description: 推理型模型档：关闭思考链（实测提速约 6 倍）、抑制复读、控制篇幅
     match: ["qwen3.7-flash", "qwen3", "qwen"]
     temperature: 0.85
     top_p: 0.9
     frequency_penalty: 0.4      # 抑制复读与句式重复
     presence_penalty: 0.1
     max_tokens: 400             # 防长篇大论（文风预设可覆盖）
+    enable_thinking: false      # 推理模型默认先生成大量思考 token，情感陪伴场景不需要
     style_hint: |
       用纯文字说话：不使用任何格式标记（加粗、列表、标题、分隔线），也不使用表情符号与 emoji。
       只输出对用户说的话；不要把思考过程、规则检查、自我纠正或“（注：…）”
       这类元评论写进回复（例如不要写“虽然不能加 emoji”“已按要求修正”）。
 
   - id: deepseek
+    label: DeepSeek
+    description: 通用对话模型档：官方建议略高温度 + 核采样，抑制复读
     match: ["deepseek"]
-    temperature: 0.8
-    top_p: 0.9
+    temperature: 1.0
+    top_p: 0.95
     frequency_penalty: 0.35
+    presence_penalty: 0.0
     max_tokens: 400
+    enable_thinking: false
     style_hint: |
       用纯文字说话：不使用格式标记（加粗、列表、标题）与 emoji；
       只输出对用户说的话，不要把思考过程或自我纠正写进回复。
 
   - id: default
+    label: 通用默认
+    description: 通配档：任何未匹配到具体模型的对话模型都落到这一档
     match: ["*"]
     temperature: 0.8
     top_p: 0.95
     frequency_penalty: 0.3
     max_tokens: 400
+    enable_thinking: false
     style_hint: |
       用纯文字说话：不使用格式标记（列表、加粗、标题）与 emoji；
       只输出对用户说的话，不要把思考过程、规则引用或自我纠正写进回复。

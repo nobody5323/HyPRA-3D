@@ -45,6 +45,31 @@ def test_chat_empty_text_422() -> None:
     assert resp.status_code == 422
 
 
+# ---------- 模型预设（选择器接口）----------
+
+
+def test_presets_endpoint_lists_profiles() -> None:
+    """GET /chat/presets：界面选择器的数据源。"""
+    resp = client.get("/chat/presets")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model"]
+    assert body["auto_preset_id"]
+    ids = [item["id"] for item in body["presets"]]
+    assert "default" in ids
+    assert all(item["label"] for item in body["presets"])  # 展示名不能为空
+
+
+def test_chat_accepts_explicit_preset_id() -> None:
+    """显式 preset_id 生效，并把本轮实际生效项回传到响应。"""
+    resp = client.post("/chat", json={"text": "聊聊吧", "preset_id": "default"})
+    assert resp.status_code == 200
+    preset = resp.json()["preset"]
+    assert preset["preset_id"] == "default"
+    assert preset["preset_label"]
+    assert "temperature" in preset
+
+
 def test_chat_includes_memory_recall(tmp_path) -> None:
     """预置记忆后，召回内容应进入 system_prompt 的记忆块。"""
     from app.api import chat as chat_module

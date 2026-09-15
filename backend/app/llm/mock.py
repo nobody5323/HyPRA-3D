@@ -63,21 +63,28 @@ class MockLLMProvider(LLMProvider):
 
     name = "mock"
 
+    #: 支持按请求覆盖推理开关（便于测试断言预设档已生效）
+    supports_thinking_override = True
+
     def __init__(self, scripted_rounds: list[list[ToolCall]] | None = None) -> None:
         self._script: list[list[ToolCall]] = list(scripted_rounds or [])
         self._cursor = 0
+        #: 最近一次请求携带的推理开关（None = 未传）——供测试断言
+        self.last_enable_thinking: bool | None = None
 
     def reset_script(self) -> None:
         """重置脚本游标（同实例多次调用时用）。"""
         self._cursor = 0
 
-    def _next_scripted_calls(self, messages: list[ChatMessage]) -> list[ToolCall]:
+    def _next_scripted_calls(
+        self, messages: list[ChatMessage], enable_thinking: bool | None = None
+    ) -> list[ToolCall]:
         """取本轮的 tool_calls：优先按脚本，脚本用尽则回落默认（情绪工具）。"""
         if self._cursor < len(self._script):
             calls = self._script[self._cursor]
             self._cursor += 1
             return calls
-        return self.chat_with_tools(messages, []) or []
+        return self.chat_with_tools(messages, [], enable_thinking=enable_thinking) or []
 
     def chat_with_tool_loop(
         self,
@@ -92,15 +99,19 @@ class MockLLMProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> AgentResult:
         """模拟 Agent 循环：按脚本模拟「调用工具 → 回传 → 再调用」的过程。"""
+        self.last_enable_thinking = enable_thinking
         executed: list[dict] = []
         rounds = 0
         for _ in range(max_rounds):
             rounds += 1
-            calls = self._next_scripted_calls(messages)
+            calls = self._next_scripted_calls(messages, enable_thinking)
             if not calls:
-                reply = self.chat(messages, temperature=temperature)
+                reply = self.chat(
+                    messages, temperature=temperature, enable_thinking=enable_thinking
+                )
                 return AgentResult(reply=reply, tool_calls=executed, rounds=rounds)
 
             final_call = next(
@@ -127,7 +138,7 @@ class MockLLMProvider(LLMProvider):
 
         # 收尾轮：不再执行工具，只取最终结果（终止工具或纯文本）
         rounds += 1
-        calls = self._next_scripted_calls(messages)
+        calls = self._next_scripted_calls(messages, enable_thinking)
         final_call = next(
             (c for c in calls if final_tool and c.name == final_tool), None
         )
@@ -150,7 +161,9 @@ class MockLLMProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> str:
+        self.last_enable_thinking = enable_thinking
         last_user = next(
             (m.content for m in reversed(messages) if m.role == "user"),
             "",
@@ -171,8 +184,10 @@ class MockLLMProvider(LLMProvider):
         top_p: float | None = None,
         frequency_penalty: float | None = None,
         presence_penalty: float | None = None,
+        enable_thinking: bool | None = None,
     ) -> list[ToolCall] | None:
         """模拟 function calling：用关键词规则生成结构化结果（回复 + 情绪）。"""
+        self.last_enable_thinking = enable_thinking
         from app.tools.emotion import EMOTION_TOOL_NAME, extract_emotion_fallback
 
         last_user = next(
@@ -182,7 +197,7 @@ class MockLLMProvider(LLMProvider):
         fallback = extract_emotion_fallback(last_user)
         arguments = json.dumps(
             {
-                "reply": self.chat(messages),  # 复用共情话术作为回复
+                "reply": self.chat(messages, enable_thinking=enable_thinking),  # 复用共情话术
                 "emotion": fallback.emotion.value,
                 "intensity": fallback.intensity,
                 "confidence": 0.5,

@@ -56,6 +56,10 @@ class LLMProvider(ABC):
     #: 提供商名称（mock / dashscope / siliconflow / openai-compatible）
     name: str
 
+    #: 是否支持按请求覆盖推理开关（模型预设档可逐轮切换）。
+    #: 默认 False —— 调用方据此决定是否传 enable_thinking，避免破坏第三方实现。
+    supports_thinking_override: bool = False
+
     @abstractmethod
     def chat(
         self,

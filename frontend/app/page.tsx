@@ -19,12 +19,14 @@ import { AvatarSettings } from "@/components/AvatarSettings";
 import { AvatarStage } from "@/components/AvatarStage";
 import { ChatPanel } from "@/components/ChatPanel";
 import { MoodIndicator } from "@/components/MoodIndicator";
+import { PresetSwitcher } from "@/components/PresetSwitcher";
 import { StyleSwitcher } from "@/components/StyleSwitcher";
 import { SubtitleBar } from "@/components/SubtitleBar";
 import { useBrowserAvatar, useXmovAvatar } from "@/hooks/useAvatar";
 import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
 import { useChatSession } from "@/hooks/useChatSession";
-import { getHealth } from "@/lib/api";
+import { getHealth, getPresets } from "@/lib/api";
+import type { PresetCatalog } from "@/lib/types";
 
 const CONTAINER_ID = "avatar-container"; // 用于 DOM 元素的 id
 const CONTAINER_SELECTOR = "#avatar-container"; // 传给 SDK 的 CSS 选择器（兜底）
@@ -39,6 +41,8 @@ export default function HomePage() {
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  /** 模型预设档清单（选择器数据源；后端不可用时为 null，选择器不渲染） */
+  const [presetCatalog, setPresetCatalog] = useState<PresetCatalog | null>(null);
   /** SDK 降级标记（记录是哪一版凭证降级的，凭证变化后自动失效） */
   const [degraded, setDegraded] = useState<{ version: string; reason: string } | null>(null);
 
@@ -83,8 +87,14 @@ export default function HomePage() {
     };
   }, []);
 
+  // 模型预设档：后端就绪后拉取一次（列表由服务端配置决定，不会频繁变）
+  useEffect(() => {
+    if (backendOnline !== true) return;
+    getPresets().then((catalog) => setPresetCatalog(catalog));
+  }, [backendOnline]);
+
   return (
-    <main className="mx-auto flex min-h-screen max-w-6xl flex-col gap-4 p-4 lg:p-6">
+    <main className="mx-auto flex min-h-[100dvh] max-w-6xl flex-col gap-4 p-4 lg:h-[100dvh] lg:min-h-0 lg:overflow-hidden lg:p-6">
       <header className="relative flex flex-wrap items-center justify-between gap-2">
         <div>
           <h1 className="text-balance text-lg font-semibold text-ink">
@@ -147,8 +157,8 @@ export default function HomePage() {
       </header>
 
       <div className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[1.05fr_1fr]">
-        {/* 左：数字人 + 字幕 */}
-        <div className="flex flex-col gap-3">
+        {/* 左：数字人 + 字幕（高度受限时内部滚动，不把页面撞长） */}
+        <div className="flex min-h-0 flex-col gap-3 lg:overflow-y-auto">
           <AvatarStage
             state={avatar.state}
             emotion={session.emotion}
@@ -192,6 +202,12 @@ export default function HomePage() {
           <StyleSwitcher
             value={session.styleId}
             onChange={session.setStyleId}
+            disabled={session.busy}
+          />
+          <PresetSwitcher
+            value={session.presetId}
+            onChange={session.setPresetId}
+            catalog={presetCatalog}
             disabled={session.busy}
           />
           <div className="min-h-0 flex-1">

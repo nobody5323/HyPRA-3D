@@ -76,6 +76,7 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 | **键盘与读屏** | 文风下拉为 listbox 语义（↑↓ / Escape / 点击外部关闭）、密钥面板为 dialog 语义（焦点进出 + Escape）、消息区 `role="log"` + `aria-live`、错误条 `role="alert"`、字幕/提示 `role="status"`、全站 `focus-visible` 焦点环 |
 | **动效与触屏** | `prefers-reduced-motion` 支持、`touch-action: manipulation`、`overscroll-contain`、只用可插值属性做过渡 |
 | **字体** | 中文优先**系统**字体栈（**零新增依赖**，未引入 webfont） |
+| **模型预设** | 按模型分档的采样参数与推理开关（`GET /chat/presets`）；界面可选「自动（按模型匹配）/ 手动指定」 |
 | **交互稳定性** | SDK 脚本加载超时降级、打断状态机回合隔离、两个 provider 的 `speak()` 语义对齐 |
 
 ## 待实现
