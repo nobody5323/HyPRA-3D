@@ -14,13 +14,29 @@ import type { RefObject } from "react";
 
 import type { ChatMessage, ToolUsage } from "@/lib/types";
 
-/** 工具调用 → 用户可读提示（体现「能办事」） */
+/** 内置工具 → 用户可读提示（体现「能办事」） */
 const TOOL_LABELS: Record<string, string> = {
   record_mood_journal: "已记录这次心情",
   query_mood_trend: "已查看情绪趋势",
   start_breathing_exercise: "已准备好呼吸引导",
   recall_memory: "已检索长期记忆",
 };
+
+/**
+ * 工具名 → 展示文案。
+ *
+ * MCP 工具命名约定为 `mcp__<服务器>__<工具>`（见 backend/app/mcp/bridge.py），
+ * 这里按来源统一展示为「已调用外部服务」，具体工具名在 hover 提示里可见。
+ */
+function toolLabel(name: string): string | null {
+  const builtin = TOOL_LABELS[name];
+  if (builtin) return builtin;
+  if (name.startsWith("mcp__")) {
+    const server = name.split("__")[1];
+    return server ? `已调用外部服务「${server}」` : "已调用外部服务";
+  }
+  return null;
+}
 
 /** 键盘焦点样式（浅色主题：鼠尾草绿环） */
 const FOCUS_RING =
@@ -186,7 +202,7 @@ export function ChatPanel({
   const toolNotes = useMemo(
     () =>
       toolsUsed
-        .map((tool) => TOOL_LABELS[tool.name])
+        .map((tool) => toolLabel(tool.name))
         .filter((label): label is string => Boolean(label)),
     [toolsUsed],
   );

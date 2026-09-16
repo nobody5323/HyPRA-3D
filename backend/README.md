@@ -13,6 +13,8 @@
         cold/        # 冷层：SQLite 结构化事实表 + 滚动增量摘要
         warm/        # 温层：WarmMemoryStore 接口 + 时间衰减 + 确定性 embedding + 内存实现
       llm/           # LLM 抽象：接口 / mock / 工厂 / 模型预设档（profiles.yaml）
+      tools/         # function calling 工具（内置：情绪日记/趋势/呼吸/记忆检索）
+      mcp/           # MCP Client：把外部 MCP server 的工具接入 Agent 行动层
       config.py      # 配置（backend/.env 读取，双模式：本地 Docker 优先，云可切）
       main.py        # 应用工厂 + /health + 路由注册
     tests/           # pytest（91 项，全离线无外部依赖）
@@ -40,6 +42,48 @@ python scripts/import_st_preset.py <preset.json> --preset-id deepseek --model-ma
 该脚本**只提取采样参数与槽位骨架（字段名/角色/注入位置/启用状态）**，
 **丢弃全部提示词正文**并打印丢弃统计 —— 这是 `AGENTS.md §6`「借鉴社区插件只取
 机制思想，不复制代码与提示词原文」的落地方式。产出的草稿需人工复核后再并入 `profiles.yaml`。
+
+## MCP 接入（外部能力进入 Agent 行动层）
+
+HyPRA 作为 **MCP Client** 连接外部 MCP 服务器，把它们的工具桥接进 `ToolRegistry`，
+模型即可像调用内置工具一样调用外部能力。
+
+```
+app/mcp/
+  config.py   服务器清单（兼容 Claude Desktop 的 mcpServers 写法；支持 ${PYTHON}/${BACKEND_DIR} 占位符）
+  session.py  常驻会话：后台事件循环线程 + run_coroutine_threadsafe 同步门面
+  bridge.py   MCP 工具 → ToolSpec（命名 mcp__<服务器>__<工具>）
+  manager.py  生命周期单例：启动连接 / 关闭断开 / 注册工具 / 状态快照
+```
+
+**配置**：`backend/mcp_servers.json`（不存在 = 未配置，等同不启用）
+
+```json
+{
+  "mcpServers": {
+    "wellness": {
+      "command": "${PYTHON}",
+      "args": ["${BACKEND_DIR}/mcp_servers/wellness_server.py"]
+    }
+  }
+}
+```
+
+`.env` 可调：`MCP_ENABLED` / `MCP_SERVERS_FILE` / `MCP_CONNECT_TIMEOUT` / `MCP_CALL_TIMEOUT`。
+
+**为什么需要 `session.py` 这层桥接**：MCP 官方 SDK 是 asyncio 的（且内部用 anyio
+task group，必须在同一存活任务内使用），而 HyPRA 的编排链是同步的
+（LangGraph 节点 → `ToolRegistry.execute` → handler）。这里用一个**常驻后台事件循环线程**
+承载会话，同步侧 `run_coroutine_threadsafe(...).result(timeout)` 调用，
+好处是无论调用多少次工具都复用同一条连接（stdio 子进程只启动一次）。
+
+**自带演示服务器**：`mcp_servers/wellness_server.py`（100% 原创）提供
+「情绪 → 环境音推荐」「压力 → 呼吸节奏建议」，用于演示「数字人通过 MCP 调用外部能力办事」。
+
+**观测**：`GET /health` 返回 MCP 连接状态与工具清单。
+
+**容错**：任一服务器连接失败只告警不阻断启动；工具调用异常由 `ToolRegistry` 隔离，
+对话不中断。
 
 ## 本地开发（零云端 key 可跑通链路）
 

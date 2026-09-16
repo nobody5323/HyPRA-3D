@@ -34,6 +34,7 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
         rag/            # 检索拼接与优先级逻辑（PromptManager）
         llm/            # 云端模型 API 封装
         tools/          # function calling 工具（情绪/记忆写入/TTS…）
+      mcp/            # MCP Client：外部 MCP server 的工具接入 Agent 行动层
         digital_human/  # 魔珐星云 SDK 对接 + 媒体转码
       tests/            # pytest
     frontend/           # Next.js 应用
@@ -53,6 +54,9 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
   情绪标签同时驱动 3D 表情联动与记忆加权。
 - RAG 拼接优先级（PromptManager 固定顺序）：世界书触发 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口。
 - 数字人：文本 + 情绪标签 → SSML 播报指令（含 KA 动作）→ 魔珐星云具身驱动 SDK（前端实时渲染）。
+- MCP 接入：HyPRA 作为 **MCP Client** 连接外部 MCP 服务器，把它们的工具桥接进 Agent 行动层
+  （命名 `mcp__<服务器>__<工具>`），模型可像调用内置工具一样调用外部能力；
+  连接失败不影响启动，协议与传输由官方 SDK 负责。
 
 ## 5. 开发与验证
 

@@ -1,0 +1,12 @@
+{
+  "//": "MCP 服务器清单（HyPRA 作为 MCP Client 接入外部工具）。",
+  "//格式": "兼容 Claude Desktop 的 mcpServers 写法；也可用 servers 列表写法（含 transport/enabled）。",
+  "//占位符": "${PYTHON} = 当前解释器；${BACKEND_DIR} = backend 目录绝对路径（跨平台/容器通用）。",
+  "mcpServers": {
+    "wellness": {
+      "command": "${PYTHON}",
+      "args": ["${BACKEND_DIR}/mcp_servers/wellness_server.py"],
+      "//": "项目自带的演示服务器（原创内容）：情绪→环境音推荐、压力→呼吸节奏建议"
+    }
+  }
+}

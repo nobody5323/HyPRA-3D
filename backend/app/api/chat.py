@@ -11,6 +11,8 @@ POST /chat 的完整链路由 LangGraph 节点图驱动：
     ③ 历史追加 user/assistant 两轮
 """
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
@@ -33,7 +35,10 @@ from app.rag.prompt_manager import PromptManager
 from app.session.context import ChatTurn
 from app.session.repository import SessionRepository
 from app.tools.builtin_tools import build_default_registry
+from app.mcp.manager import get_mcp_manager
 from app.worldbook.loader import load_builtin_entries
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 
@@ -106,6 +111,22 @@ def get_model_profiles():
     return _model_profiles
 
 
+def _build_tool_registry():
+    """内置工具 + 已连接的 MCP 工具。
+
+    MCP 工具在应用启动（lifespan）时建立连接，此处只做注册；
+    注册失败（未配置 / 连接失败）不影响内置工具可用。
+    """
+    registry = build_default_registry()
+    try:
+        names = get_mcp_manager().register_into(registry)
+        if names:
+            logger.info("已接入 %d 个 MCP 工具：%s", len(names), ", ".join(names))
+    except Exception as exc:  # noqa: BLE001 - MCP 不可用不应阻断对话能力
+        logger.warning("MCP 工具注册失败：%s", exc)
+    return registry
+
+
 def get_llm_provider() -> LLMProvider:
     """懒加载 LLM provider（默认 mock：无 key 可跑通对话链路）。"""
     global _llm_provider
@@ -151,7 +172,7 @@ def get_chat_graph():
             default_style_id=settings.style_preset,
             model_name=settings.llm_model,
             profiles=get_model_profiles(),
-            tool_registry=build_default_registry() if settings.agent_tools_enabled else None,
+            tool_registry=_build_tool_registry() if settings.agent_tools_enabled else None,
             mood_store=get_mood_store() if settings.agent_tools_enabled else None,
             max_tool_rounds=settings.max_tool_rounds,
         )
