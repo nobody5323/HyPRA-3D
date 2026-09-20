@@ -11,6 +11,7 @@
 from app.llm.base import ChatMessage, LLMProvider
 from app.llm.profiles import ModelProfile, ResolvedSampling, resolve_sampling
 from app.memory.store import MemoryStore
+from app.memory.warm.embedding import EmbeddingProvider
 from app.prompts.assemble import assemble_worldbook_section
 from app.prompts.persona.loader import PersonaPreset
 from app.prompts.renderer import render_persona_prompt
@@ -29,6 +30,7 @@ from app.tools.builtin_tools import build_tool_context
 from app.tools.registry import ToolRegistry
 from app.worldbook.matcher import match_entries
 from app.worldbook.models import WorldBookEntry
+from app.worldbook.vector_index import WorldBookVectorIndex
 
 
 class ChatNodes:
@@ -40,6 +42,7 @@ class ChatNodes:
         presets: dict[str, PersonaPreset],
         entries: list[WorldBookEntry],
         memory_store: MemoryStore,
+        embedding_provider: EmbeddingProvider | None = None,
         llm_provider: LLMProvider,
         prompt_manager: PromptManager | None = None,
         worldbook_budget: int = 400,
@@ -54,6 +57,9 @@ class ChatNodes:
         self.presets = presets
         self.entries = entries
         self.memory = memory_store
+        # 世界书语义向量索引：构造时一次性编码全部条目；provider 为 None 时
+        # 索引为空，向量通道静默关闭（关键词/正则通道不受影响）。
+        self.worldbook_index = WorldBookVectorIndex(entries, embedding_provider)
         self.llm = llm_provider
         self.prompt_manager = prompt_manager or PromptManager()
         self.worldbook_budget = worldbook_budget
@@ -89,8 +95,12 @@ class ChatNodes:
     # ---------- ② 世界书命中 ----------
 
     def worldbook_recall(self, state: ChatState) -> dict:
-        """关键词/正则触发 + 注入编排（priority + 预算）。"""
-        hits = match_entries(self.entries, state.get("user_input", ""))
+        """关键词 / 正则 / 语义向量三通道触发 + 注入编排（priority + 预算）。"""
+        hits = match_entries(
+            self.entries,
+            state.get("user_input", ""),
+            vector_index=self.worldbook_index,
+        )
         text, skipped = assemble_worldbook_section(hits, self.worldbook_budget)
         return {
             "worldbook_hits": hits,

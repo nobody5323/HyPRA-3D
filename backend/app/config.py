@@ -75,11 +75,17 @@ class Settings(BaseSettings):
     # 情感陪伴场景不需要长思考，默认关闭（None = 不传该参数，兼容非推理模型）
     llm_enable_thinking: bool = False
 
-    # ---- Embedding（deterministic 本地假实现 | dashscope | siliconflow | openai-compatible）----
+    # ---- Embedding（deterministic 本地实现 | dashscope | siliconflow | openai-compatible）----
     embedding_provider: str = "deterministic"
     embedding_api_key: str = ""
     embedding_model: str = "text-embedding-v3"
     embedding_base_url: str = ""
+    # 向量维度：必须与模型实际输出一致（Qdrant 建 collection 需要静态维度，
+    # 不能等首次请求才确定）。常见值：text-embedding-v3 = 1024，
+    # BAAI/bge-m3 = 1024，Qwen/Qwen3-Embedding-8B = 4096。
+    # 配置不符时 provider 会在首次请求报错并告知实际维度。
+    embedding_dim: int = 1024
+    embedding_timeout: float = 30.0
 
     # ---- Agent 行动层（P1）----
     agent_tools_enabled: bool = True   # 是否启用工具调用（情绪日记/趋势/呼吸引导/记忆检索）

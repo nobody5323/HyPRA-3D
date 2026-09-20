@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nobody5323/HyPRA-3D-/actions/workflows/ci.yml/badge.svg)](https://github.com/nobody5323/HyPRA-3D-/actions/workflows/ci.yml)
 ![License](https://img.shields.io/badge/license-Apache%202.0-blue)
-![Tests](https://img.shields.io/badge/tests-286%20passed-brightgreen)
+![Tests](https://img.shields.io/badge/tests-407%20passed-brightgreen)
 
 > 在高速发展的网络情感、日益破碎化的日常生活中，给现代人一个完全符合其幻想的 AI 陪聊助手，
 > 化解当代人各方面的压力。
@@ -14,12 +14,19 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 
 - **分层提示词（System Prompt）架构**：全局人设 / 动态状态变量（如 `{{current_mood}}`）/ 对话格式分层设计；
   预设内容与代码分离。
-- **世界书（World Info）动态注入**：JSON/YAML 条目 + 关键词 / 正则 / 向量三重触发机制，按优先级拼入上下文。
+- **世界书（World Info）动态注入**：JSON/YAML 条目 + **关键词 / 正则 / 语义向量三通道**触发
+  （任一命中即注入），按 priority 与 token 预算拼入上下文；向量通道复用 embedding 做语义匹配，
+  能捕捉关键词覆盖不到的同义改写（如「翻来覆去睡不着」→「深夜倾听模式」条目）。
 - **混合记忆引擎（热 / 温 / 冷三层）**：
   - 热层：上下文滚动窗口，保留最近 N 轮；
-  - 温层：Qdrant 向量库（本地 Docker / 云双模式），对话 Embedding 入库与语义检索（含时间衰减）；
+  - 温层：Qdrant 向量库（本地 Docker / 云双模式），对话 Embedding 入库与语义检索（含时间衰减）——
+    即**记忆侧的 RAG 检索（Memory RAG）**；
   - 冷层：SQLite/JSON 结构化事实表，回复后由 LLM 自动抽取并更新关键事实（时间、地点、人物关系）+ 增量摘要。
-- **RAG + 推理编排**：LangChain / LangGraph 组装——世界书触发 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口。
+- **RAG + 推理编排**：LangChain / LangGraph 组装。检索分**两条线**，共用同一套 embedding 与 prompt
+  注入层，最终按固定优先级拼装：
+  **① 记忆检索（Memory RAG）**＝温层语义召回 + 冷层结构化事实 + 摘要；
+  **② 知识检索（World Info）**＝世界书三通道触发。
+  注入顺序：世界书触发 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口。
 - **全链路 function calling + MCP 工具生态**：LLM 回复强制走 **function calling** 结构化输出
   **8 类情绪标签**（正则仅作兜底）→ 情绪驱动 **3D 表情映射**与**记忆召回加权**；并通过
   **MCP 协议**把外部 MCP server 的工具接入 Agent 行动层（`mcp__<服务器>__<工具>`），
@@ -53,6 +60,15 @@ cp .env.example .env    # 默认 mock LLM + 本地 embedding，无需任何 key
 
 评审模式（docker compose 一键部署，见 [`docs/deployment.md`](docs/deployment.md)）。
 
+> **关于 Embedding（影响语义检索效果）**
+> 不填 key 时用本地确定性实现（零依赖，可跑通全链路），但它是字符 n-gram 哈希：
+> 记忆向量召回与**世界书向量通道**会降级为字面级匹配（关键词 / 正则通道不受影响）。
+> 填入 `EMBEDDING_PROVIDER` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` / `EMBEDDING_DIM`
+> 即启用真实语义检索。`EMBEDDING_DIM` 须与模型实际输出一致（`Qwen/Qwen3-Embedding-8B` = 4096、
+> `text-embedding-v3` = 1024），不符时首次请求会直接报错并告知正确值。
+> 世界书条目的 `vector_threshold`（默认 0.7）须按所用模型校准——不同模型相似度基线差异很大，
+> 实测数据见 `backend/app/worldbook/models.py`。
+
 ## 🗂 目录结构
 
     backend/     Python 后端（FastAPI + LangChain/LangGraph + Qdrant + 魔珐星云驱动）
@@ -68,13 +84,17 @@ cp .env.example .env    # 默认 mock LLM + 本地 embedding，无需任何 key
 
 ## 📌 路线图
 
-- [ ] M1 提示词架构（分层 System Prompt + 世界书）
-- [ ] M2 混合记忆引擎（热 / 温 / 冷三层）
-- [ ] M3 RAG + LangGraph 推理编排
-- [ ] M4 情绪识别 + 工具调用
-- [ ] M5 魔珐星云 3D 数字人 + TTS
-- [ ] M6 100+ 轮长对话压测与记忆调优
-- [ ] M7 参赛文档与演示视频
+- [x] M1 提示词架构（分层 System Prompt + 世界书三通道触发）
+- [x] M2 混合记忆引擎（热 / 温 / 冷三层）
+- [x] M3 RAG + LangGraph 推理编排
+- [x] M4 情绪识别 + 工具调用（function calling + MCP）
+- [x] M5 数字人驱动**指令层**（SSML 播报 + KA 动作 + 渲染无关时间轴）
+- [ ] M6 前端 + 魔珐 SDK **真实渲染**接入 ← 当前最大缺口
+- [ ] M7 100+ 轮长对话压测与记忆调优
+- [ ] M8 参赛文档与演示视频
+
+> M5 已完成的是驱动指令层（后端产出 SSML 与时间轴）；真实 SDK 渲染依赖前端接入，
+> 归入 M6。缺口清单与优先级见 [`docs/competition-gap-analysis.md`](docs/competition-gap-analysis.md)。
 
 ## 📄 许可
 

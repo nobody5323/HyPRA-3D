@@ -22,7 +22,10 @@ def load_entry_file(file_path: str | Path) -> WorldBookEntry:
         raise ValueError(f"世界书文件 {path.name} 顶层必须是映射（dict）")
     entry = WorldBookEntry.model_validate(raw)
     if not entry.has_trigger:
-        raise ValueError(f"世界书条目 {entry.id} 缺少触发条件（keys 或 regex 至少一项）")
+        raise ValueError(
+            f"世界书条目 {entry.id} 缺少触发条件"
+            "（keys / regex / vector_text 至少一项）"
+        )
     return entry
 
 

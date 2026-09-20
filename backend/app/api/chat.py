@@ -27,6 +27,7 @@ from app.memory.cold.extractor import create_extractor
 from app.memory.cold.mood_log import SqliteMoodLogStore
 from app.memory.cold.sqlite_store import SqliteColdStore
 from app.memory.store import MemoryStore
+from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provider
 from app.memory.warm.factory import create_warm_store
 from app.prompts.persona.loader import load_builtin_presets
 from app.prompts.renderer import estimate_tokens
@@ -48,6 +49,7 @@ _presets = load_builtin_presets()
 _entries = load_builtin_entries()
 _styles = load_builtin_styles()
 _memory_store: MemoryStore | None = None
+_embedding_provider: EmbeddingProvider | None = None
 _mood_store = None
 _llm_provider: LLMProvider | None = None
 _chat_graph = None
@@ -59,6 +61,49 @@ _DEFAULT_PERSONA_ID = "therapist-elder-sister"
 # ---------- 依赖懒加载（测试可经 set_* 注入）----------
 
 
+def get_embedding_provider() -> EmbeddingProvider:
+    """懒加载 embedding provider（温层向量召回 + 世界书语义触发**共用**）。
+
+    两者必须用同一个 provider：否则向量空间不一致，相似度没有意义。
+    进程内单例，避免每次编码都重建 SDK 客户端。
+
+    容错：配置有误（如云端 provider 缺 key / 缺 base_url）时降级为本地确定性
+    实现并告警——embedding 不可用只应让语义检索退化为字面检索，**不能阻断对话**
+    （与 MemoryStore 中温层/冷层异常的降级策略一致）。
+    """
+    global _embedding_provider
+    if _embedding_provider is None:
+        settings = get_settings()
+        try:
+            _embedding_provider = create_embedding_provider(
+                settings.embedding_provider,
+                api_key=settings.embedding_api_key,
+                model=settings.embedding_model,
+                base_url=settings.embedding_base_url,
+                dimension=settings.embedding_dim,
+                timeout=settings.embedding_timeout,
+            )
+        except Exception as exc:  # noqa: BLE001 - 配置错误不应阻断对话
+            logger.warning(
+                "embedding provider「%s」创建失败，降级为本地确定性实现：%s",
+                settings.embedding_provider,
+                exc,
+            )
+            _embedding_provider = create_embedding_provider("deterministic")
+    return _embedding_provider
+
+
+def set_embedding_provider(provider: EmbeddingProvider | None) -> None:
+    """替换/重置 embedding provider（测试注入用）。
+
+    换 provider 等于换向量空间：记忆门面与已编译的图必须一起重建。
+    """
+    global _embedding_provider, _memory_store, _chat_graph
+    _embedding_provider = provider
+    _memory_store = None
+    _chat_graph = None
+
+
 def get_memory_store() -> MemoryStore:
     """懒加载记忆门面（冷层 SQLite + 温层 memory/qdrant + 规则抽取器）。"""
     global _memory_store
@@ -67,6 +112,7 @@ def get_memory_store() -> MemoryStore:
         cold = SqliteColdStore(db_path=settings.cold_db_path)
         warm = create_warm_store(
             settings.warm_backend,
+            provider=get_embedding_provider(),
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
         )
@@ -160,6 +206,7 @@ def get_chat_graph():
             presets=_presets,
             entries=_entries,
             memory_store=get_memory_store(),
+            embedding_provider=get_embedding_provider(),
             llm_provider=provider,
             prompt_manager=PromptManager(
                 worldbook_budget=settings.worldbook_budget,
