@@ -56,6 +56,11 @@ _MULTI_BLANK = re.compile(r"\n{3,}")
 #: 重复行判定：同一行出现这么多次且足够短，才认定是页眉/页脚
 _REPEAT_MIN_TIMES = 3
 _REPEAT_MAX_LENGTH = 60
+#: 只有总行数达到这个规模，才启用页眉页脚检测。
+#: 理由：短文档里「重复的短行」更可能是**合法内容**（歌词副歌、诗歌叠句、
+#: 模板段落），而页眉页脚是**多页文档**才有的现象——用行数做门槛既保留了
+#: 对 PDF 噪音的检测，又不会误删这几类正当重复。
+_REPEAT_MIN_LINES = 15
 
 
 @dataclass
@@ -88,8 +93,16 @@ def _is_structural(line: str) -> bool:
 
 
 def _drop_repeated_short_lines(text: str) -> tuple[str, int]:
-    """删除重复出现的短行（页眉/页脚残留），返回 (文本, 删除行数)。"""
+    """删除重复出现的短行（页眉/页脚残留），返回 (文本, 删除行数)。
+
+    两道保护，避免误删正当的重复内容：
+    1. 文档行数不足 `_REPEAT_MIN_LINES` 时**整条规则不启用**（短文档不会有页眉）；
+    2. 结构行（Markdown 标题 / 分隔线）永不删除。
+    """
     lines = text.split("\n")
+    if len(lines) < _REPEAT_MIN_LINES:
+        return text, 0
+
     counts: Counter[str] = Counter(
         line.strip()
         for line in lines

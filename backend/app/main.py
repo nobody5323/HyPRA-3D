@@ -14,7 +14,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import chat_router, media_router
+from app.api import chat_router, knowledge_router, media_router
 from app.config import cors_origin_list, get_settings
 from app.mcp.manager import configure_manager, get_mcp_manager
 
@@ -72,6 +72,7 @@ def create_app() -> FastAPI:
         }
 
     app.include_router(chat_router)
+    app.include_router(knowledge_router)
     app.include_router(media_router)
     return app
 

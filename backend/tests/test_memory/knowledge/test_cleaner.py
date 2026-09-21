@@ -34,7 +34,7 @@ def test_drops_page_number_lines() -> None:
 def test_drops_repeated_header_lines() -> None:
     """重复出现的短行是页眉/页脚残留，应删除。"""
     text = ""
-    for i in range(4):
+    for i in range(8):          # 16 行，达到页眉检测的行数门槛
         text += (
             "内部资料 请勿外传\n"
             f"这是第 {i} 段的正文内容，足够长以避免被当作重复短行。\n"
@@ -43,7 +43,19 @@ def test_drops_repeated_header_lines() -> None:
 
     assert "内部资料" not in result.text
     assert "这是第 0 段" in result.text
-    assert result.hits["repeated_line"] == 4
+    assert result.hits["repeated_line"] == 8
+
+
+def test_short_document_keeps_repeated_lines() -> None:
+    """短文档里的重复短行是**合法内容**，不该被当成页眉删除。
+
+    页眉页脚是多页文档才有的现象；歌词副歌、诗歌叠句、模板段落都会重复。
+    """
+    text = "\n".join(["副歌", "第一句歌词", "副歌", "第二句歌词", "副歌"])
+    result = clean(text)
+
+    assert result.text.count("副歌") == 3
+    assert "repeated_line" not in result.hits
 
 
 def test_keeps_markdown_headings_and_rules() -> None:

@@ -97,6 +97,21 @@ class Settings(BaseSettings):
     # 情感陪伴场景不需要长思考，默认关闭（None = 不传该参数，兼容非推理模型）
     llm_enable_thinking: bool = False
 
+    # ---- 个人记忆（知识库：用户上传的私人语料）----
+    knowledge_enabled: bool = True
+    # 存储后端：留空则**跟随温层**（memory | qdrant）——评审只需配一处
+    knowledge_backend: str = ""
+    knowledge_max_file_mb: float = 5.0        # 单文件大小上限
+    # 分块参数（字符）：target 聚合目标 / max 单块硬上限 / overlap 句级回退
+    knowledge_chunk_target: int = 400
+    knowledge_chunk_max: int = 600
+    knowledge_chunk_overlap: int = 80
+    # 语义边界判据（关闭则退化为纯递归字符分块）
+    knowledge_semantic_chunking: bool = True
+    knowledge_semantic_threshold: float = 0.75
+    # MinHash 近似判重阈值（命中不自动覆盖，需 force=true）
+    knowledge_dedup_threshold: float = 0.85
+
     # ---- Embedding（deterministic 本地实现 | dashscope | siliconflow | openai-compatible）----
     embedding_provider: str = "deterministic"
     embedding_api_key: str = ""

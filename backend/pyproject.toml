@@ -18,6 +18,10 @@ dependencies = [
     "mcp>=1.28,<2",
     # 中文分词（BM25 稀疏检索通道）；缺失时代码自动降级为字符 bigram
     "jieba>=0.42.1",
+    # 个人记忆：上传文档的格式解析
+    "pypdf>=5.1",          # PDF 文字提取（扫描件无文字层会明确报错）
+    "python-docx>=1.1",    # .docx 解析（不支持老 .doc）
+    "python-multipart>=0.0.20",  # FastAPI UploadFile 必需，缺失时上传路由直接 500
 ]
 
 [project.optional-dependencies]
