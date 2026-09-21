@@ -30,6 +30,11 @@ from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provid
 COLLECTION_PREFIX = "memory_"
 
 
+def _age_days(moment: datetime, now: datetime) -> float:
+    """时间差（天）；未来时间按 0 计。"""
+    return max(0.0, (now - moment).total_seconds() / 86400.0)
+
+
 class QdrantWarmStore(WarmMemoryStore):
     """基于 Qdrant 的温层实现。"""
 
@@ -84,11 +89,17 @@ class QdrantWarmStore(WarmMemoryStore):
         payload = payload or {}
         created_raw = payload.get("created_at")
         created_at = datetime.fromisoformat(created_raw) if created_raw else datetime.now()
+        # 兼容旧数据：没有 last_recalled_at 时回退到 created_at（否则会被立即淘汰）
+        recalled_raw = payload.get("last_recalled_at")
+        last_recalled_at = (
+            datetime.fromisoformat(recalled_raw) if recalled_raw else created_at
+        )
         return MemoryRecord(
             memory_id=str(point_id),
             companion_id=companion_id,
             text=payload.get("text", ""),
             created_at=created_at,
+            last_recalled_at=last_recalled_at,
             metadata=payload.get("metadata", {}) or {},
             vector=vector or [],
         )
@@ -119,6 +130,7 @@ class QdrantWarmStore(WarmMemoryStore):
                     payload={
                         "text": text,
                         "created_at": created.isoformat(),
+                        "last_recalled_at": created.isoformat(),
                         "metadata": dict(metadata or {}),
                     },
                 )
@@ -151,7 +163,7 @@ class QdrantWarmStore(WarmMemoryStore):
         results: list[SearchResult] = []
         for point in response.points:
             record = self._payload_to_record(point.id, point.payload, companion_id)
-            age_days = max(0.0, (now - record.created_at).total_seconds() / 86400.0)
+            age_days = _age_days(record.created_at, now)
             score = combined_score(
                 float(point.score),
                 age_days,
@@ -206,3 +218,38 @@ class QdrantWarmStore(WarmMemoryStore):
             if offset is None:
                 break
         return records
+
+    def mark_recalled(self, companion_id: str, memory_ids: list[str]) -> int:
+        """批量刷新 payload 中的 last_recalled_at（单次请求，不逐条往返）。"""
+        if not memory_ids:
+            return 0
+        name = self._collection_name(companion_id)
+        if not self._client.collection_exists(name):
+            return 0
+        self._client.set_payload(
+            collection_name=name,
+            payload={"last_recalled_at": datetime.now().isoformat()},
+            points=list(memory_ids),
+        )
+        return len(memory_ids)
+
+    def purge_expired(
+        self, companion_id: str, *, ttl_days: float, now: datetime | None = None
+    ) -> list[str]:
+        """删除超过 TTL 未被召回的记忆（详见接口文档）。
+
+        Qdrant 不支持按「两个时间字段取大者」过滤，故先拉取全量记录在应用层
+        判定。清理是低频操作（上层最多每日一次），全量扫描可以接受。
+        """
+        now = now or datetime.now()
+        name = self._collection_name(companion_id)
+        if not self._client.collection_exists(name):
+            return []
+        expired = [
+            record.memory_id
+            for record in self.list_records(companion_id)
+            if _age_days(record.last_recalled_at or record.created_at, now) > ttl_days
+        ]
+        if expired:
+            self._client.delete(collection_name=name, points_selector=expired)
+        return expired

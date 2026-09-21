@@ -53,11 +53,13 @@ class InMemoryWarmStore(WarmMemoryStore):
         created_at: datetime | None = None,
     ) -> str:
         mid = memory_id or uuid.uuid4().hex
+        created = created_at or datetime.now()
         record = MemoryRecord(
             memory_id=mid,
             companion_id=companion_id,
             text=text,
-            created_at=created_at or datetime.now(),
+            created_at=created,
+            last_recalled_at=created,   # 新记忆视为「刚被召回」，不会一入库就被淘汰
             metadata=dict(metadata or {}),
             vector=self._provider.embed(text),
         )
@@ -112,3 +114,33 @@ class InMemoryWarmStore(WarmMemoryStore):
 
     def list_records(self, companion_id: str) -> list[MemoryRecord]:
         return list(self._collection(companion_id).values())
+
+    def mark_recalled(self, companion_id: str, memory_ids: list[str]) -> int:
+        """刷新命中记忆的 last_recalled_at（召回后由上层调用）。"""
+        if not memory_ids:
+            return 0
+        now = datetime.now()
+        collection = self._collection(companion_id)
+        updated = 0
+        for mid in memory_ids:
+            record = collection.get(mid)
+            if record is not None:
+                record.last_recalled_at = now
+                updated += 1
+        return updated
+
+    def purge_expired(
+        self, companion_id: str, *, ttl_days: float, now: datetime | None = None
+    ) -> list[str]:
+        """删除超过 TTL 未被召回的记忆（详见接口文档）。"""
+        now = now or datetime.now()
+        collection = self._collection(companion_id)
+        expired = [
+            mid
+            for mid, record in collection.items()
+            if self._age_days(record.last_recalled_at or record.created_at, now)
+            > ttl_days
+        ]
+        for mid in expired:
+            del collection[mid]
+        return expired

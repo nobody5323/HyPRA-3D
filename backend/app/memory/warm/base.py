@@ -24,6 +24,10 @@ class MemoryRecord:
     companion_id: str
     text: str
     created_at: datetime
+    #: 最近一次被召回的时间（淘汰依据）。新增时等于 created_at。
+    #: 判定记忆价值用的是「是否仍在被需要」而非「有多新」——
+    #: 一条六个月前写下但每周都会被召回的记忆，不该被淘汰。
+    last_recalled_at: datetime | None = None
     metadata: dict = field(default_factory=dict)
     vector: list[float] = field(default_factory=list, repr=False)
 
@@ -90,4 +94,30 @@ class WarmMemoryStore(ABC):
 
         用途：构建本地 BM25 稀疏索引（需要看到全部文本才能算 IDF）。
         这是全量读取，**不要**在每轮对话的召回路径上调用——上层应缓存索引。
+        """
+
+    @abstractmethod
+    def mark_recalled(self, companion_id: str, memory_ids: list[str]) -> int:
+        """把指定记忆的 last_recalled_at 刷新为当前时间，返回实际更新条数。
+
+        由上层在召回命中后调用。**这是记忆淘汰机制的前提**：
+        没有这个信号，「哪些记忆还有用」就无从判断。
+        """
+
+    @abstractmethod
+    def purge_expired(
+        self,
+        companion_id: str,
+        *,
+        ttl_days: float,
+        now: datetime | None = None,
+    ) -> list[str]:
+        """删除超过 ttl_days 未被召回的记忆，返回被删除的 memory_id 列表。
+
+        判定依据是 `max(last_recalled_at, created_at)`。
+
+        ⚠️ TTL 必须**远大于**时间衰减半衰期：衰减会压低旧记忆分数、使其难以
+        进入 top_k，若不留出重新召回的窗口，就会形成「衰减 → 不被召回 →
+        被删除」的正反馈，把所有旧记忆清空。另见本文档 CANDIDATE_FACTOR 的说明。
+        now 参数仅供测试注入时间。
         """

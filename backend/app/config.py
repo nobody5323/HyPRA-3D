@@ -57,6 +57,11 @@ class Settings(BaseSettings):
     memory_decay_exponent: float = 1.0
     # 同情绪记忆的召回分加权系数（参照⑤）
     memory_emotion_boost: float = 1.25
+    # 情景记忆淘汰 TTL（天）：超过该时长未被**召回**的记忆会被删除。
+    # ⚠️ 必须远大于 memory_half_life_days：衰减会压低旧记忆分数、使其难以
+    # 进入 top_k，若不留出重新召回的窗口，会形成「衰减 → 不被召回 → 被删除」
+    # 的正反馈，把所有旧记忆清空。
+    memory_recall_ttl_days: float = 180.0
     # ---- 混合检索（BM25 稀疏 + 稠密向量 → RRF 融合）----
     memory_hybrid_enabled: bool = True   # 关闭则退化为纯向量召回
     memory_candidate_n: int = 10         # 各通道候选条数（应远大于 memory_top_k）

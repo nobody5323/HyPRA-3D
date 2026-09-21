@@ -143,6 +143,7 @@ def get_memory_store() -> MemoryStore:
             half_life_days=settings.memory_half_life_days,
             decay_exponent=settings.memory_decay_exponent,
             emotion_boost=settings.memory_emotion_boost,
+            recall_ttl_days=settings.memory_recall_ttl_days,
             extractor=create_extractor(
                 settings.memory_extractor, llm_provider=_safe_llm_provider()
             ),

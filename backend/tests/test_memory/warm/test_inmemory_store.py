@@ -81,6 +81,79 @@ def test_top_k_limits_results() -> None:
     assert len(results) == 3
 
 
+# ---------- 记忆淘汰（last_recalled_at + TTL）----------
+
+
+def test_add_sets_last_recalled_at() -> None:
+    """新记忆的 last_recalled_at 应等于 created_at，否则一入库就会被淘汰。"""
+    store = _store()
+    created = datetime.now() - timedelta(days=400)
+    store.add("therapist", "很久以前说过的话", created_at=created)
+
+    record = store.list_records("therapist")[0]
+    assert record.last_recalled_at == created
+
+
+def test_mark_recalled_refreshes_timestamp() -> None:
+    store = _store()
+    created = datetime.now() - timedelta(days=400)
+    mid = store.add("therapist", "小林喜欢下雨天", created_at=created)
+
+    assert store.mark_recalled("therapist", [mid]) == 1
+    assert store.list_records("therapist")[0].last_recalled_at > created
+
+
+def test_mark_recalled_ignores_unknown_ids() -> None:
+    store = _store()
+    assert store.mark_recalled("therapist", []) == 0
+    assert store.mark_recalled("therapist", ["不存在"]) == 0
+
+
+def test_purge_expired_removes_only_stale() -> None:
+    store = _store()
+    now = datetime.now()
+    old = store.add("therapist", "很久以前", created_at=now - timedelta(days=400))
+    store.add("therapist", "最近", created_at=now - timedelta(days=10))
+
+    removed = store.purge_expired("therapist", ttl_days=180)
+
+    assert removed == [old]
+    assert store.count("therapist") == 1
+
+
+def test_purge_keeps_recently_recalled_old_memory() -> None:
+    """关键：旧记忆只要**最近被召回过**就不该被删。
+
+    否则会形成「时间衰减 → 排不进 top_k → 不被召回 → 时间戳不刷新 → 被删除」的
+    正反馈，把所有旧记忆逐步清空——包括那些依然重要、只是暂时没被提起的。
+    这也是 TTL（180 天）必须远大于衰减半衰期（30 天）的原因。
+    """
+    store = _store()
+    mid = store.add(
+        "therapist",
+        "半年前说过但一直在被提起的事",
+        created_at=datetime.now() - timedelta(days=400),
+    )
+
+    store.mark_recalled("therapist", [mid])   # 刚刚被召回
+    removed = store.purge_expired("therapist", ttl_days=180)
+
+    assert removed == []
+    assert store.count("therapist") == 1
+
+
+def test_purge_isolated_by_companion() -> None:
+    store = _store()
+    old = datetime.now() - timedelta(days=400)
+    store.add("a", "A 的旧记忆", created_at=old)
+    store.add("b", "B 的旧记忆", created_at=old)
+
+    store.purge_expired("a", ttl_days=180)
+
+    assert store.count("a") == 0
+    assert store.count("b") == 1
+
+
 def test_search_uses_candidate_pool() -> None:
     """候选池按**原始相似度**取 CANDIDATE_FACTOR × top_k 条，再施加衰减重排。
 

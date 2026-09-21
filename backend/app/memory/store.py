@@ -38,6 +38,8 @@ DEFAULT_RRF_K = 60                # RRF 平滑常数
 DEFAULT_MIN_SIMILARITY = 0.0      # 稠密通道相似度阈值（融合前过滤，0=不过滤）
 DEFAULT_HALF_LIFE_DAYS = 30.0     # 时间衰减半衰期（天）
 DEFAULT_DECAY_EXPONENT = 1.0      # 衰减强度（0=不衰减，>1=更强地让位于近期）
+DEFAULT_RECALL_TTL_DAYS = 180.0   # 记忆淘汰 TTL（须远大于衰减半衰期，见 base.py）
+DEFAULT_PURGE_INTERVAL_SECONDS = 86400.0  # 惰性清理节流：同一对象每天最多一次
 DEFAULT_EMOTION_BOOST = 1.25      # 同情绪记忆的召回分加权系数（参照⑤）
 
 
@@ -86,6 +88,8 @@ class MemoryStore:
         half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
         decay_exponent: float = DEFAULT_DECAY_EXPONENT,
         emotion_boost: float = DEFAULT_EMOTION_BOOST,
+        recall_ttl_days: float = DEFAULT_RECALL_TTL_DAYS,
+        purge_interval_seconds: float = DEFAULT_PURGE_INTERVAL_SECONDS,
         extractor: TurnExtractor | None = None,
     ) -> None:
         self.cold = cold
@@ -101,6 +105,9 @@ class MemoryStore:
         self.half_life_days = half_life_days
         self.decay_exponent = decay_exponent
         self.emotion_boost = emotion_boost
+        self.recall_ttl_days = recall_ttl_days
+        self.purge_interval_seconds = purge_interval_seconds
+        self._last_purge: dict[str, datetime] = {}
         self.extractor = extractor or RuleBasedExtractor()
         # 稀疏（BM25）索引按陪伴对象惰性构建并缓存：语料是全量读取的，
         # 不能每轮重建
@@ -139,6 +146,11 @@ class MemoryStore:
         if emotion:
             memories = self._boost_memories_by_emotion(memories, emotion)
             facts = self._boost_facts_by_emotion(facts, emotion)
+
+        # 惰性维护：清理超期记忆。必须在**召回之后**——先刷新本轮命中记忆的
+        # 时间戳，再清理未命中的；若放在召回之前，会把本轮本可命中的记忆
+        # 先删掉（测试曾捕获这个竞态）。
+        self._maybe_purge(companion_id)
 
         return MemoryContext(
             facts=facts,
@@ -254,7 +266,67 @@ class MemoryStore:
                 )
             )
         results.sort(key=lambda r: r.score, reverse=True)
-        return results[: self.memory_top_k]
+        top = results[: self.memory_top_k]
+        # 刷新命中记忆的「最近被召回时间」——这是淘汰机制唯一的正向信号
+        self._mark_recalled(companion_id, top)
+        return top
+
+    def _mark_recalled(
+        self, companion_id: str, results: list[SearchResult]
+    ) -> None:
+        """把本次命中召回的记忆标记为「仍被需要」。
+
+        失败不影响召回结果——丢一次淘汰信号只是让记忆多活一阵，不伤对话。
+        """
+        if not results:
+            return
+        try:
+            self.warm.mark_recalled(
+                companion_id, [item.record.memory_id for item in results]
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _maybe_purge(self, companion_id: str) -> None:
+        """惰性清理超期记忆：同一陪伴对象最多每 24 小时检查一次。
+
+        不在进程启动时统一清理的原因：启动时并不知道有哪些 companion_id
+        （它们都是随对话懒加载的）；而每轮都全量扫描又太浪费。按天节流是折中。
+        """
+        now = datetime.now()
+        last = self._last_purge.get(companion_id)
+        if (
+            last is not None
+            and (now - last).total_seconds() < self.purge_interval_seconds
+        ):
+            return
+        self._last_purge[companion_id] = now
+
+        try:
+            self.purge_expired_memories(companion_id)
+        except Exception:  # noqa: BLE001 - 清理失败不影响对话
+            pass
+
+    def purge_expired_memories(self, companion_id: str) -> list[str]:
+        """立即清理该陪伴对象中超期未被召回的记忆，返回被删的 memory_id。
+
+        公开方法（而非仅内部调用）：测试与运维（管理脚本、将来的人工清理入口）
+        需要能绕过节流直接触发。
+
+        必须同时从本地**稀疏索引**移除——否则 BM25 仍会召回已删除的记忆。
+        """
+        removed = self.warm.purge_expired(
+            companion_id, ttl_days=self.recall_ttl_days
+        )
+        if not removed:
+            return []
+
+        view = self._lexical.get(companion_id)
+        if view is not None:
+            for memory_id in removed:
+                view.index.remove(memory_id)
+                view.records.pop(memory_id, None)
+        return removed
 
     @staticmethod
     def _boost_facts_by_emotion(facts: list[Fact], emotion: str) -> list[Fact]:

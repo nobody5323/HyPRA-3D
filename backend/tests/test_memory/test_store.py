@@ -60,6 +60,12 @@ class _BrokenWarmStore(WarmMemoryStore):
     def list_records(self, companion_id):  # pragma: no cover - 不使用
         raise RuntimeError("模拟 Qdrant 连接失败")
 
+    def mark_recalled(self, companion_id, memory_ids):  # pragma: no cover
+        raise RuntimeError("模拟 Qdrant 连接失败")
+
+    def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
+        raise RuntimeError("模拟 Qdrant 连接失败")
+
 
 # ---------- 召回聚合 ----------
 
@@ -154,6 +160,12 @@ class _SpyWarmStore(WarmMemoryStore):
         return 0
 
     def list_records(self, companion_id):  # pragma: no cover - 不使用
+        return []
+
+    def mark_recalled(self, companion_id, memory_ids):  # pragma: no cover
+        return 0
+
+    def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
         return []
 
 
@@ -299,6 +311,70 @@ def test_update_failure_does_not_block_writes(cold, warm) -> None:
     stats = store.remember_turn("therapist", "我最近总是失眠", "…", turn_index=1)
     assert stats["updates"] == 0     # 失败被吞掉
     assert stats["memory"] == 1      # 情景记忆仍写入
+
+
+# ---------- 记忆淘汰（惰性清理 + 正反馈防护）----------
+
+
+def test_recall_marks_hit_memories(cold, warm) -> None:
+    """召回命中的记忆应刷新 last_recalled_at——这是淘汰机制唯一的正向信号。"""
+    old = datetime.now() - timedelta(days=100)
+    warm.add("therapist", "小林喜欢下雨天", created_at=old)
+    MemoryStore(cold, warm).recall("therapist", "下雨天")
+
+    assert warm.list_records("therapist")[0].last_recalled_at > old
+
+
+def test_recalled_old_memory_survives_purge(cold, warm) -> None:
+    """端到端：旧记忆只要被召回过，就不该被淘汰（防止正反馈误杀）。"""
+    warm.add(
+        "therapist",
+        "小林喜欢下雨天",
+        created_at=datetime.now() - timedelta(days=400),
+    )
+    store = MemoryStore(cold, warm, recall_ttl_days=180)
+
+    store.recall("therapist", "下雨天")            # 命中并刷新时间戳
+    removed = store.purge_expired_memories("therapist")
+
+    assert removed == []
+    assert warm.count("therapist") == 1
+
+
+def test_purge_removes_expired_and_syncs_sparse_index(cold, warm) -> None:
+    """淘汰必须同时清理 BM25 索引，否则已删除的记忆仍会被召回。"""
+    warm.add(
+        "therapist",
+        "很久以前说过的话",
+        created_at=datetime.now() - timedelta(days=400),
+    )
+    store = MemoryStore(cold, warm, recall_ttl_days=180)
+
+    view = store._lexical_view("therapist")   # 直接建索引（不经召回，不刷新时间戳）
+    assert len(view.index) == 1
+
+    removed = store.purge_expired_memories("therapist")
+
+    assert removed
+    assert warm.count("therapist") == 0
+    assert len(view.index) == 0        # 索引同步移除
+    assert view.records == {}
+
+
+def test_purge_is_throttled_per_day(cold) -> None:
+    """按天节流：多次召回只触发一次全量清理（不每轮扫描）。"""
+    calls: list[str] = []
+
+    class _CountingWarm(InMemoryWarmStore):
+        def purge_expired(self, companion_id, *, ttl_days, now=None):
+            calls.append(companion_id)
+            return super().purge_expired(companion_id, ttl_days=ttl_days, now=now)
+
+    store = MemoryStore(cold, _CountingWarm())
+    for i in range(3):
+        store.recall("therapist", f"第 {i} 次")
+
+    assert calls == ["therapist"]      # 只清理一次
 
 
 # ---------- 容错降级 ----------

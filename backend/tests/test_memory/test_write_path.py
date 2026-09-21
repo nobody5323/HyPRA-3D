@@ -87,6 +87,12 @@ def test_remember_turn_survives_warm_failure(cold) -> None:
         def list_records(self, companion_id):  # pragma: no cover - 不使用
             return []
 
+        def mark_recalled(self, companion_id, memory_ids):  # pragma: no cover
+            return 0
+
+        def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
+            return []
+
     store = MemoryStore(cold, _BrokenWarm())
     stats = store.remember_turn("therapist", "我喜欢猫", "…", turn_index=1)
     assert stats["memory"] == 0          # 温层失败
