@@ -2,7 +2,12 @@
 
 import pytest
 
-from app.memory.cold.extractor import RuleBasedExtractor, create_extractor
+from app.llm.mock import MockLLMProvider
+from app.memory.cold.extractor import (
+    LLMExtractor,
+    RuleBasedExtractor,
+    create_extractor,
+)
 from app.memory.cold.models import FactType
 
 
@@ -76,9 +81,52 @@ def test_factory_rule() -> None:
     assert isinstance(create_extractor(""), RuleBasedExtractor)
 
 
-def test_factory_llm_not_implemented() -> None:
-    with pytest.raises(NotImplementedError):
-        create_extractor("llm")
+def test_rule_extractor_touches_identical_fact(
+    extractor: RuleBasedExtractor,
+) -> None:
+    """与已有事实三元组完全相同时不新增，改为 touch（零成本去重）。
+
+    这一步刻意交给规则而非 LLM：完全一致的三元组无需语义理解，
+    规则判定零成本、零误判、可单测。
+    """
+    from app.memory.cold.models import Fact
+
+    existing = Fact(
+        type=FactType.PREFERENCE,
+        subject="用户",
+        predicate="喜欢",
+        object="下雨天",
+    )
+    existing.fact_id = "f1"
+
+    result = extractor.extract(
+        "我喜欢下雨天", "…", companion_id="c", known_facts=[existing]
+    )
+
+    assert not any(f.object == "下雨天" for f in result.facts)
+    assert len(result.updates) == 1
+    assert result.updates[0].fact_id == "f1"
+    assert result.updates[0].action == "touch"
+
+
+def test_rule_extractor_without_known_facts_still_adds(
+    extractor: RuleBasedExtractor,
+) -> None:
+    """没有已知事实时仍正常新增。"""
+    result = extractor.extract("我喜欢下雨天", "…", companion_id="c")
+    assert any(f.object == "下雨天" for f in result.facts)
+    assert result.updates == []
+
+
+def test_factory_llm_without_provider_falls_back() -> None:
+    """未提供 provider 时退回规则版（而非抛错阻断启动）。"""
+    assert isinstance(create_extractor("llm"), RuleBasedExtractor)
+
+
+def test_factory_llm_with_provider() -> None:
+    extractor = create_extractor("llm", llm_provider=MockLLMProvider())
+    assert isinstance(extractor, LLMExtractor)
+    assert extractor.name == "llm"
 
 
 def test_factory_unknown_raises() -> None:

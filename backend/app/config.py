@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     # 稠密通道相似度阈值：在**融合前**过滤（RRF 分数无绝对含义，无法事后设阈）
     # 注意：依 embedding 模型而异，需实测校准（参考世界书 vector_threshold 的做法）
     memory_min_similarity: float = 0.0
-    memory_extractor: str = "rule"  # 回复后抽取器：rule（无 key）| llm（待接入）
+    memory_extractor: str = "rule"  # 回复后抽取器：rule（零依赖）| llm（覆盖率更高，失败自动降级）
 
     # ---- PromptManager 预算（分层组装）----
     worldbook_budget: int = 400       # 世界书注入块预算

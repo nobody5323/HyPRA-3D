@@ -46,7 +46,7 @@ class ColdMemoryStore(ABC):
 
     @abstractmethod
     def touch(self, companion_id: str, fact_id: str) -> bool:
-        """印证事实（刷新 last_seen_at），返回是否成功。"""
+        """印证事实（刷新 last_seen_at 并提升 confidence），返回是否成功。"""
 
     @abstractmethod
     def delete_fact(self, companion_id: str, fact_id: str) -> bool:

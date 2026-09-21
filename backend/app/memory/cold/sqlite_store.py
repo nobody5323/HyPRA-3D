@@ -215,11 +215,18 @@ class SqliteColdStore(ColdMemoryStore):
         return affected > 0
 
     def touch(self, companion_id: str, fact_id: str) -> bool:
+        """印证事实：刷新 last_seen_at 并提升 confidence（上限 1.0）。
+
+        「被反复提到的事更可信」——这提供了 importance 之外的第二个权重维度，
+        用于弥补规则抽取器 importance 按类型取常量带来的失真。
+        """
         companion_id = _valid_companion_id(companion_id)
         with self._connect() as conn:
             self._ensure_table(conn, companion_id)
             cur = conn.execute(
-                f"UPDATE {_table(companion_id)} SET last_seen_at = ? WHERE fact_id = ?",
+                f"""UPDATE {_table(companion_id)}
+                    SET last_seen_at = ?, confidence = MIN(1.0, confidence + 0.1)
+                    WHERE fact_id = ?""",
                 (self._ts(datetime.now()), fact_id),
             )
             affected = cur.rowcount

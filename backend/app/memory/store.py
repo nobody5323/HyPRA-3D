@@ -16,8 +16,12 @@ warning 并降级，不阻断对话；稀疏通道不可用时自动退化为纯
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from app.memory.cold.extractor import RuleBasedExtractor, TurnExtractor
-from app.memory.cold.models import Fact
+from app.memory.cold.extractor import (
+    FactUpdate,
+    RuleBasedExtractor,
+    TurnExtractor,
+)
+from app.memory.cold.models import Fact, FactStatus
 from app.memory.cold.store import ColdMemoryStore
 from app.memory.warm.base import MemoryRecord, SearchResult, WarmMemoryStore
 from app.memory.warm.decay import combined_score
@@ -258,6 +262,70 @@ class MemoryStore:
 
     # ---------- 写入（回复后事件驱动，参照③④）----------
 
+    def _recall_known_facts(
+        self, companion_id: str, query: str, *, limit: int = 8
+    ) -> list[Fact]:
+        """召回与本轮相关的现有事实，供抽取器判定冲突与闭环。
+
+        用 BM25 在事实文本上检索（事实是短句，关键词匹配已足够，不值得
+        再为它建一套向量索引）；命中不足时用高 importance 的**锚点事实**
+        补齐——身份/关系类信息始终应该被抽取器看到。
+        """
+        try:
+            facts = self.cold.list_facts(companion_id, limit=200)
+        except Exception:
+            return []
+        if not facts:
+            return []
+
+        index = BM25Index()
+        for fact in facts:
+            index.add(fact.fact_id, fact.summary_text)
+        by_id = {fact.fact_id: fact for fact in facts}
+        picked = [
+            by_id[doc_id]
+            for doc_id, _score in index.search(query, top_k=limit)
+            if doc_id in by_id
+        ]
+
+        if len(picked) < limit:
+            chosen = {fact.fact_id for fact in picked}
+            for fact in facts:  # list_facts 已按 importance 降序
+                if len(picked) >= limit:
+                    break
+                if fact.anchor and fact.fact_id not in chosen:
+                    picked.append(fact)
+        return picked[:limit]
+
+    def _apply_fact_updates(
+        self, companion_id: str, updates: list[FactUpdate]
+    ) -> int:
+        """执行抽取器给出的事实状态变更，返回成功条数。
+
+        这是事实状态机**唯一**的触发入口——在此之前 `status` 恒为 active、
+        `last_seen_at` 恒为空，三态状态机形同虚设。任一变更失败只跳过该条，
+        不影响其余。
+        """
+        applied = 0
+        for update in updates:
+            try:
+                if update.action == "touch":
+                    ok = self.cold.touch(companion_id, update.fact_id)
+                else:
+                    status = (
+                        FactStatus.STALE
+                        if update.action == "stale"
+                        else FactStatus.RESOLVED
+                    )
+                    ok = self.cold.update_status(companion_id, update.fact_id, status)
+            except Exception:  # noqa: BLE001 - 单条失败不阻断其余
+                continue
+            # 存储层对「未命中任何行」返回 False 而非抛错，必须据此计数，
+            # 否则 stats 会把未生效的指令也算成成功
+            if ok:
+                applied += 1
+        return applied
+
     def remember_turn(
         self,
         companion_id: str,
@@ -269,17 +337,20 @@ class MemoryStore:
         subject: str = "用户",
         emotion: str | None = None,
     ) -> dict[str, int]:
-        """回复完成后的一次写入：抽取事实 → 向量入库 → 摘要增量并入。
+        """回复完成后的一次写入：抽取事实 → 向量入库 → 事实状态变更。
 
         参数:
             emotion: 本轮情绪标签（英文）；写入事实的 emotion_tag 与向量的
                 metadata，供后续按情绪加权召回（参照⑤）。
 
-        返回写入统计（facts / memory），异常降级不阻断。
+        返回写入统计（facts / updates / memory），异常降级不阻断。
         """
-        stats = {"facts": 0, "memory": 0}
+        stats = {"facts": 0, "updates": 0, "memory": 0}
 
-        # ① 事件驱动抽取（结构化事实 + 摘要行）
+        # ① 事件驱动抽取（新事实 + 对已有事实的状态变更指令）
+        #    先把相关现有事实召回给抽取器：否则它无法判断「换工作了」
+        #    取代了哪一条旧事实。
+        known = self._recall_known_facts(companion_id, user_text)
         try:
             result = self.extractor.extract(
                 user_text,
@@ -287,11 +358,12 @@ class MemoryStore:
                 companion_id=companion_id,
                 source=source,
                 subject=subject,
+                known_facts=known,
             )
         except Exception:  # 抽取失败不影响对话
             result = None
 
-        # ② 冷层：事实入库（带上本轮情绪标签）
+        # ② 语义记忆：新事实入库（带上本轮情绪标签）
         if result is not None:
             for fact in result.facts:
                 try:
@@ -302,7 +374,11 @@ class MemoryStore:
                 except Exception:
                     break
 
-        # ③ 温层：本轮用户话语向量化入库（供后续混合召回 + 情绪加权）
+        # ③ 语义记忆：执行状态变更（stale / resolved / touch）
+        if result is not None and result.updates:
+            stats["updates"] = self._apply_fact_updates(companion_id, result.updates)
+
+        # ④ 情景记忆：本轮用户话语向量化入库（供后续混合召回 + 情绪加权）
         try:
             memory_id = self.warm.add(
                 companion_id,

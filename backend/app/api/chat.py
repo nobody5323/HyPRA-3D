@@ -104,8 +104,21 @@ def set_embedding_provider(provider: EmbeddingProvider | None) -> None:
     _chat_graph = None
 
 
+def _safe_llm_provider() -> LLMProvider | None:
+    """给 LLM 抽取器取 provider；不可用时返回 None（抽取器自动退回规则版）。
+
+    LLM 抽取属于「铺上添花」：缺 key 或 provider 构造失败时，记忆功能本身
+    不该受影响（与温层/冷层异常的降级策略一致）。
+    """
+    try:
+        return get_llm_provider()
+    except Exception as exc:  # noqa: BLE001 - 配置问题不应阻断记忆
+        logger.warning("LLM provider 不可用，抽取器退回规则版：%s", exc)
+        return None
+
+
 def get_memory_store() -> MemoryStore:
-    """懒加载记忆门面（冷层 SQLite + 温层 memory/qdrant + 规则抽取器）。"""
+    """懒加载记忆门面（冷层 SQLite + 温层 memory/qdrant + 抽取器）。"""
     global _memory_store
     if _memory_store is None:
         settings = get_settings()
@@ -128,7 +141,9 @@ def get_memory_store() -> MemoryStore:
             half_life_days=settings.memory_half_life_days,
             decay_exponent=settings.memory_decay_exponent,
             emotion_boost=settings.memory_emotion_boost,
-            extractor=create_extractor(settings.memory_extractor),
+            extractor=create_extractor(
+                settings.memory_extractor, llm_provider=_safe_llm_provider()
+            ),
         )
     return _memory_store
 

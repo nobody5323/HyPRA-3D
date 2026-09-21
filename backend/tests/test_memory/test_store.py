@@ -4,7 +4,12 @@ from datetime import datetime, timedelta
 
 import pytest
 
-from app.memory.cold.models import Fact, FactType
+from app.memory.cold.extractor import (
+    ExtractionResult,
+    FactUpdate,
+    TurnExtractor,
+)
+from app.memory.cold.models import Fact, FactStatus, FactType
 from app.memory.cold.sqlite_store import SqliteColdStore
 from app.memory.store import MemoryContext, MemoryStore
 from app.memory.warm.base import SearchResult, WarmMemoryStore
@@ -164,6 +169,106 @@ def test_emotion_boost_is_configurable(cold, warm) -> None:
 
     assert neutral.memories and boosted.memories
     assert boosted.memories[0].score > neutral.memories[0].score
+
+
+# ---------- 事实状态机（步骤 ④：接通 update_status / touch）----------
+
+
+class _ScriptedExtractor(TurnExtractor):
+    """返回预设抽取结果的假抽取器，并记录收到的 known_facts。"""
+
+    name = "scripted"
+
+    def __init__(self, result: ExtractionResult) -> None:
+        self.result = result
+        self.seen_known: list[Fact] = []
+
+    def extract(
+        self,
+        user_text: str,
+        assistant_text: str,
+        *,
+        companion_id: str,
+        source: str = "",
+        subject: str = "用户",
+        known_facts: list[Fact] | None = None,
+    ) -> ExtractionResult:
+        self.seen_known = list(known_facts or [])
+        return self.result
+
+
+def test_stale_update_removes_fact_from_recall(cold, warm) -> None:
+    """stale 指令应真正改掉事实状态——这是状态机唯一的触发入口。"""
+    fact_id = cold.save_fact("therapist", _fact(object="在 A 公司工作"))
+    extractor = _ScriptedExtractor(
+        ExtractionResult(updates=[FactUpdate(fact_id=fact_id, action="stale")])
+    )
+    store = MemoryStore(cold, warm, extractor=extractor)
+
+    stats = store.remember_turn("therapist", "我换到 B 公司了", "…", turn_index=1)
+
+    assert stats["updates"] == 1
+    assert cold.list_facts("therapist") == []                    # 退出召回
+    assert cold.list_facts("therapist", status=FactStatus.STALE)  # 但记录保留
+
+
+def test_resolved_update_sets_status(cold, warm) -> None:
+    """resolved 表示事件闭环（不是被否定，而是有结局了）。"""
+    fact_id = cold.save_fact("therapist", _fact(object="打算和老板谈加薪"))
+    extractor = _ScriptedExtractor(
+        ExtractionResult(updates=[FactUpdate(fact_id=fact_id, action="resolved")])
+    )
+    MemoryStore(cold, warm, extractor=extractor).remember_turn(
+        "therapist", "加薪的事谈成了", "…", turn_index=1
+    )
+
+    assert cold.list_facts("therapist") == []
+    assert cold.list_facts("therapist", status=FactStatus.RESOLVED)
+
+
+def test_touch_refreshes_and_boosts_confidence(cold, warm) -> None:
+    """touch 应刷新 last_seen_at 并提升 confidence（反复印证更可信）。"""
+    fact_id = cold.save_fact("therapist", _fact(object="喜欢下雨天"))
+    before = cold.get_fact("therapist", fact_id)
+    assert before is not None and before.last_seen_at is None
+
+    extractor = _ScriptedExtractor(
+        ExtractionResult(updates=[FactUpdate(fact_id=fact_id, action="touch")])
+    )
+    MemoryStore(cold, warm, extractor=extractor).remember_turn(
+        "therapist", "我还是喜欢下雨天", "…", turn_index=1
+    )
+
+    after = cold.get_fact("therapist", fact_id)
+    assert after is not None
+    assert after.last_seen_at is not None
+    assert after.confidence > before.confidence
+
+
+def test_extractor_receives_related_known_facts(cold, warm) -> None:
+    """抽取器应收到与本轮相关的已有事实（否则判断不了语义冲突）。"""
+    cold.save_fact("therapist", _fact(predicate="在…工作", object="A公司", importance=4))
+    cold.save_fact("therapist", _fact(predicate="喜欢", object="下雨天", importance=2))
+
+    extractor = _ScriptedExtractor(ExtractionResult())
+    MemoryStore(cold, warm, extractor=extractor).remember_turn(
+        "therapist", "A公司那边最近怎么样", "…", turn_index=1
+    )
+
+    assert extractor.seen_known
+    assert any("A公司" in fact.object for fact in extractor.seen_known)
+
+
+def test_update_failure_does_not_block_writes(cold, warm) -> None:
+    """指向不存在 fact_id 的更新指令应静默失败，不影响本轮其它写入。"""
+    extractor = _ScriptedExtractor(
+        ExtractionResult(updates=[FactUpdate(fact_id="不存在", action="stale")])
+    )
+    store = MemoryStore(cold, warm, extractor=extractor)
+
+    stats = store.remember_turn("therapist", "我最近总是失眠", "…", turn_index=1)
+    assert stats["updates"] == 0     # 失败被吞掉
+    assert stats["memory"] == 1      # 情景记忆仍写入
 
 
 # ---------- 容错降级 ----------
