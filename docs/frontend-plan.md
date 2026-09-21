@@ -188,6 +188,8 @@ type ChatResponse = {
   speak: { ssml: string; display_text: string; voice: string;
            ka_action: string; tone: string; intensity: number };
   memory_counts: { memories: number; facts: number };
+  // 记忆写入已改为后台执行：响应只给「已调度」标记，不再返回写入统计
+  memory_scheduled: boolean;
   style: { style_id: string; style_name: string; examples: number; sampling: object };
   worldbook_hits: string[];
   warnings: string[];

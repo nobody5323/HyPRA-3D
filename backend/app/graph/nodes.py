@@ -310,6 +310,9 @@ class ChatNodes:
         """抽取新事实与状态变更指令 → 写入语义记忆；情景记忆同步入库（参照③）。
 
         本轮情绪作为 emotion_tag 随事实与向量一同落库，供后续加权召回。
+
+        注意：本方法**已不再作为图节点**（图以 generate_reply 结尾）——
+        写入由路由层后台调用，避免抽取延迟阻塞用户。保留此方法供显式调用与测试。
         """
         emotion = state.get("emotion")
         writes = self.memory.remember_turn(

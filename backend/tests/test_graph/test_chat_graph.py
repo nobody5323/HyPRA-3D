@@ -111,14 +111,17 @@ def test_write_memory_writes_layers(nodes: ChatNodes, memory: MemoryStore) -> No
 
 
 def test_graph_node_sequence_defined() -> None:
-    """编排顺序应与人设→世界书→记忆→组装→生成→写入一致。"""
+    """编排顺序：人设 → 世界书 → 记忆 → 组装 → 生成。
+
+    记忆写入**不在图中**：抽取（LLM 版）需 1–3 秒，改由路由层在响应发出后
+    后台执行，避免用户等待。
+    """
     assert NODE_SEQUENCE == [
         "load_persona",
         "worldbook_recall",
         "memory_recall",
         "assemble_prompt",
         "generate_reply",
-        "write_memory",
     ]
 
 
@@ -128,10 +131,10 @@ def test_graph_end_to_end(graph) -> None:
     assert result["reply"]
     assert "[角色人设]" in result["system_prompt"]
     assert result["messages"][-1] == {"role": "user", "content": "我最近总是失眠"}
-    # 写入链路生效
-    assert result["writes"]["memory"] == 1
     # 状态变量进入人设
     assert "小林" in result["persona_text"]
+    # 记忆写入已移出图（改为路由层后台执行），因此图输出中不含 writes
+    assert "writes" not in result
 
 
 def test_graph_worldbook_and_memory_in_prompt(graph) -> None:
@@ -141,14 +144,18 @@ def test_graph_worldbook_and_memory_in_prompt(graph) -> None:
     assert "[场景补充]" in prompt
 
 
-def test_graph_memory_cross_turn(graph) -> None:
-    """第一轮写入的记忆，第二轮应被召回进 prompt（闭环）。"""
-    graph.invoke(_state(user_input="我最怕打雷，会躲进被子", turn_index=1))
+def test_graph_memory_cross_turn(graph, nodes: ChatNodes) -> None:
+    """第一轮写入的记忆，第二轮应被召回进 prompt（闭环）。
+
+    写入已移出图（改为路由层后台执行），此处显式触发以完成闭环。
+    """
+    first = graph.invoke(_state(user_input="我最怕打雷，会躲进被子", turn_index=1))
+    nodes.write_memory(first)
+
     second = graph.invoke(_state(user_input="今天又打雷了", turn_index=2))
 
     assert "[记忆回忆]" in second["system_prompt"]
     assert "打雷" in second["system_prompt"]
-    assert second["writes"]["memory"] == 1
 
 
 def test_graph_history_included_in_messages(graph) -> None:

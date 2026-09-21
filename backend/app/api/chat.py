@@ -11,9 +11,10 @@ POST /chat 的完整链路由 LangGraph 节点图驱动：
     ③ 历史追加 user/assistant 两轮
 """
 
+import asyncio
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -251,6 +252,53 @@ def get_chat_graph():
     return _chat_graph
 
 
+# ---------- 记忆写入：后台执行 ----------
+
+#: 同一陪伴对象的写入串行化。同一会话连续两轮时两次写入不得并发——
+#: 事实去重与状态机依赖「读旧事实 → 写新事实」的先后顺序。
+_write_locks: dict[str, asyncio.Lock] = {}
+
+
+def _write_lock(companion_id: str) -> asyncio.Lock:
+    lock = _write_locks.get(companion_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _write_locks[companion_id] = lock
+    return lock
+
+
+async def _write_memory_job(
+    companion_id: str,
+    user_text: str,
+    assistant_text: str,
+    *,
+    turn_index: int = 0,
+    source: str = "",
+    subject: str = "用户",
+    emotion: str | None = None,
+) -> None:
+    """后台写入本轮记忆（在响应发出后执行，用户无感知）。
+
+    抽取（LLM 版需 1–3 秒）被移出请求路径；失败只记日志——
+    已经发给用户的回复不该因为记忆写入失败而受影响。
+    """
+    async with _write_lock(companion_id):
+        store = get_memory_store()
+        try:
+            await asyncio.to_thread(
+                store.remember_turn,
+                companion_id,
+                user_text,
+                assistant_text,
+                turn_index=turn_index,
+                source=source,
+                subject=subject,
+                emotion=emotion,
+            )
+        except Exception as exc:  # noqa: BLE001 - 后台失败不影响对话
+            logger.warning("后台记忆写入失败（已忽略）：%s", exc)
+
+
 # ---------- 请求 / 响应模型 ----------
 
 
@@ -289,8 +337,9 @@ class ChatResponse(BaseModel):
     memory_counts: dict[str, int] = Field(
         default_factory=dict, description="本轮召回的记忆数：memories/facts"
     )
-    remembered: dict[str, int] = Field(
-        default_factory=dict, description="本轮写入的记忆数：facts/memory"
+    memory_scheduled: bool = Field(
+        default=False,
+        description="本轮记忆写入已提交后台（响应时尚未落库；失败只记日志）",
     )
     warnings: list[str]
     estimated_tokens: int
@@ -339,7 +388,7 @@ def list_chat_presets() -> dict:
 
 
 @router.post("", response_model=ChatResponse)
-def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     """一轮完整对话（LangGraph 编排）。"""
     if req.persona_id not in _presets:
         raise HTTPException(status_code=404, detail=f"未知人设：{req.persona_id}")
@@ -374,7 +423,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         "warnings": [],
     }
 
-    # ③ 执行编排图（召回 → 组装 → 生成+情绪 → 写入）
+    # ③ 执行编排图（召回 → 组装 → 生成）；记忆写入不在此图内
     result = get_chat_graph().invoke(initial_state)
     reply = result.get("reply", "")
     emotion = result.get("emotion")
@@ -424,6 +473,19 @@ def chat(req: ChatRequest) -> ChatResponse:
             "profile": sampling.profile_id if sampling else "",
         }
 
+    # ⑦ 记忆写入提交后台：抽取（LLM 版需 1–3 秒）不应让用户等待。
+    #    此处不阻塞响应，失败只记日志（见 _write_memory_job）。
+    background.add_task(
+        _write_memory_job,
+        req.persona_id,
+        req.text,
+        reply,
+        turn_index=initial_state["turn_index"],
+        source=session.session_id,
+        subject=session.user_name,
+        emotion=emotion.emotion.value if emotion is not None else None,
+    )
+
     return ChatResponse(
         session_id=session.session_id,
         persona_id=req.persona_id,
@@ -446,7 +508,7 @@ def chat(req: ChatRequest) -> ChatResponse:
         worldbook_hits=[e.id for e in result.get("worldbook_hits", [])],
         skipped=[e.id for e in result.get("worldbook_skipped", [])],
         memory_counts=memory_counts,
-        remembered=result.get("writes", {}),
+        memory_scheduled=True,
         warnings=result.get("warnings", []),
         estimated_tokens=estimate_tokens(system_prompt),
         style=style_meta,

@@ -4,22 +4,21 @@
        ↓
    load_persona          渲染人设（状态变量替换）
        ↓
-   worldbook_recall      关键词/正则触发 + 注入编排
+   worldbook_recall      世界书三通道触发 + 注入编排
        ↓
-   memory_recall         温层语义召回 + 冷层事实 + 摘要
+   memory_recall         情景记忆混合召回 + 语义事实
        ↓
    assemble_prompt       PromptManager 分层组装（固定顺序 + 预算）
        ↓
-   generate_reply        LLM 生成回复
-       ↓
-   write_memory          事件驱动写入（事实/向量/摘要）
+   generate_reply        LLM 生成回复（含情绪与工具循环）
        ↓
       END
 
 设计取舍：
-- 图为**无状态纯编排**：会话读写由 chat 路由负责，节点只做计算与记忆写入；
+- 图为**无状态纯编排**：会话读写由 chat 路由负责，节点只做计算；
 - 依赖（人设/世界书/记忆/LLM）经 ChatNodes 注入，便于测试与替换；
-- 节点粒度对齐设计参照①的装配顺序，M4 情绪节点可直接插在 generate 前后。
+- **记忆写入不在图内**：抽取（尤其 LLM 版）需要 1–3 秒，放在图里会让用户
+  等待；现由 chat 路由在响应发出后后台执行（见 api/chat.py 的 _write_memory_job）。
 """
 
 from langgraph.graph import END, START, StateGraph
@@ -33,7 +32,6 @@ NODE_WORLDBOOK = "worldbook_recall"
 NODE_MEMORY = "memory_recall"
 NODE_ASSEMBLE = "assemble_prompt"
 NODE_GENERATE = "generate_reply"
-NODE_WRITE_MEMORY = "write_memory"
 
 # 节点执行顺序
 NODE_SEQUENCE = [
@@ -42,7 +40,6 @@ NODE_SEQUENCE = [
     NODE_MEMORY,
     NODE_ASSEMBLE,
     NODE_GENERATE,
-    NODE_WRITE_MEMORY,
 ]
 
 
@@ -55,11 +52,10 @@ def build_chat_graph(nodes: ChatNodes):
     builder.add_node(NODE_MEMORY, nodes.memory_recall)
     builder.add_node(NODE_ASSEMBLE, nodes.assemble_prompt)
     builder.add_node(NODE_GENERATE, nodes.generate_reply)
-    builder.add_node(NODE_WRITE_MEMORY, nodes.write_memory)
 
     builder.add_edge(START, NODE_LOAD_PERSONA)
     for current, nxt in zip(NODE_SEQUENCE, NODE_SEQUENCE[1:]):
         builder.add_edge(current, nxt)
-    builder.add_edge(NODE_WRITE_MEMORY, END)
+    builder.add_edge(NODE_GENERATE, END)
 
     return builder.compile()

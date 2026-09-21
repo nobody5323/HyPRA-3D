@@ -196,17 +196,25 @@ def test_preset_enable_thinking_reaches_provider() -> None:
     assert provider.last_enable_thinking is False
 
 
-def test_graph_emotion_written_to_facts(graph, memory: MemoryStore) -> None:
-    """本轮情绪应作为 emotion_tag 落到冷层事实。"""
-    graph.invoke(_state(user_input="我最近总是失眠，很焦虑"))
+def test_graph_emotion_written_to_facts(
+    graph, nodes: ChatNodes, memory: MemoryStore
+) -> None:
+    """本轮情绪应作为 emotion_tag 落到语义记忆（写入已移出图，显式触发）。"""
+    result = graph.invoke(_state(user_input="我最近总是失眠，很焦虑"))
+    nodes.write_memory(result)
+
     facts = memory.cold.list_facts(PERSONA_ID)
     assert facts
     assert any(f.emotion_tag == "anxious" for f in facts)
 
 
-def test_graph_emotion_written_to_warm_metadata(graph, memory: MemoryStore) -> None:
-    """温层向量 metadata 应带情绪标签（供后续加权）。"""
-    graph.invoke(_state(user_input="我最近总是失眠"))
+def test_graph_emotion_written_to_warm_metadata(
+    graph, nodes: ChatNodes, memory: MemoryStore
+) -> None:
+    """情景记忆的 metadata 应带情绪标签（供后续加权）。"""
+    result = graph.invoke(_state(user_input="我最近总是失眠"))
+    nodes.write_memory(result)
+
     results = memory.warm.search(PERSONA_ID, "失眠", top_k=5)
     assert results
     assert results[0].record.metadata.get("emotion") == "anxious"

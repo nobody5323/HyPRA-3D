@@ -35,6 +35,36 @@ def test_chat_continuation_keeps_history() -> None:
     assert contents[-1] == "今天还是难受"
 
 
+def test_chat_schedules_memory_write_in_background() -> None:
+    """记忆写入提交后台：响应只标记「已调度」，不返回写入统计。
+
+    生产环境下 Starlette 的 Response.__call__ 是
+    `send(response) → await background()`，即响应字节先发出、后台任务后执行，
+    因此抽取（LLM 版需 1–3 秒）不会阻塞用户拿到回复。
+    """
+    resp = client.post("/chat", json={"text": "我叫小林，喜欢下雨天"})
+    assert resp.status_code == 200
+    body = resp.json()
+
+    assert body["memory_scheduled"] is True
+    assert "remembered" not in body          # 旧字段已移除
+
+
+def test_chat_memory_written_by_background_job() -> None:
+    """后台写入确实生效：续聊时上一轮内容能被召回进 prompt。
+
+    TestClient 会等待 background tasks 完成，所以可直接断言结果。
+    """
+    first = client.post("/chat", json={"text": "我最怕打雷，会躲进被子"})
+    sid = first.json()["session_id"]
+
+    second = client.post("/chat", json={"text": "今天又打雷了", "session_id": sid})
+    body = second.json()
+
+    assert body["memory_counts"]["memories"] >= 1
+    assert "打雷" in body["system_prompt"]
+
+
 def test_chat_unknown_persona_404() -> None:
     resp = client.post("/chat", json={"text": "hi", "persona_id": "no-such-persona"})
     assert resp.status_code == 404
