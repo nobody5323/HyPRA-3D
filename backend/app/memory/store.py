@@ -29,7 +29,9 @@ from app.rag.retrieval.bm25 import BM25Index
 from app.rag.retrieval.hybrid import reciprocal_rank_fusion
 
 # 默认参数（均可经 config 覆盖）
-DEFAULT_FACT_LIMIT = 5            # 语义事实召回条数
+DEFAULT_FACT_LIMIT = 5            # 语义记忆召回总条数上限
+DEFAULT_FACT_ANCHOR_N = 3         # 其中：高 importance 锚点保底条数
+DEFAULT_FACT_RELEVANT_N = 2       # 其中：按 query 相关性补充的条数
 DEFAULT_MEMORY_TOP_K = 3          # 情景记忆最终召回条数
 DEFAULT_CANDIDATE_N = 10          # 混合检索各通道候选数（应远大于 final top_k）
 DEFAULT_RRF_K = 60                # RRF 平滑常数
@@ -74,6 +76,8 @@ class MemoryStore:
         warm: WarmMemoryStore,
         *,
         fact_limit: int = DEFAULT_FACT_LIMIT,
+        fact_anchor_n: int = DEFAULT_FACT_ANCHOR_N,
+        fact_relevant_n: int = DEFAULT_FACT_RELEVANT_N,
         memory_top_k: int = DEFAULT_MEMORY_TOP_K,
         hybrid_enabled: bool = True,
         candidate_n: int = DEFAULT_CANDIDATE_N,
@@ -87,6 +91,8 @@ class MemoryStore:
         self.cold = cold
         self.warm = warm
         self.fact_limit = fact_limit
+        self.fact_anchor_n = fact_anchor_n
+        self.fact_relevant_n = fact_relevant_n
         self.memory_top_k = memory_top_k
         self.hybrid_enabled = hybrid_enabled
         self.candidate_n = candidate_n
@@ -123,10 +129,9 @@ class MemoryStore:
         except Exception as exc:  # 存储不可用不应阻断对话
             warnings.append(f"情景记忆召回失败（已降级）：{exc}")
 
-        # ② 冷层事实（SQL 已按 importance 排序，此处再排为防御性兜底）
+        # ② 语义记忆：锚点保底 + 相关性补充（两部分职责不同，缺一不可）
         try:
-            facts = self.cold.list_facts(companion_id, limit=self.fact_limit)
-            facts.sort(key=lambda f: (f.importance, f.created_at), reverse=True)
+            facts = self._recall_facts(companion_id, query)
         except Exception as exc:
             warnings.append(f"事实读取失败（已降级）：{exc}")
 
@@ -262,15 +267,15 @@ class MemoryStore:
 
     # ---------- 写入（回复后事件驱动，参照③④）----------
 
-    def _recall_known_facts(
-        self, companion_id: str, query: str, *, limit: int = 8
+    def _relevant_facts(
+        self, companion_id: str, query: str, *, limit: int
     ) -> list[Fact]:
-        """召回与本轮相关的现有事实，供抽取器判定冲突与闭环。
+        """用 BM25 从现有事实中检索与 query 相关的事实（按相关性降序）。
 
-        用 BM25 在事实文本上检索（事实是短句，关键词匹配已足够，不值得
-        再为它建一套向量索引）；命中不足时用高 importance 的**锚点事实**
-        补齐——身份/关系类信息始终应该被抽取器看到。
+        事实是短句，关键词匹配已足够，不值得再为它建一套向量索引。
         """
+        if limit <= 0:
+            return []
         try:
             facts = self.cold.list_facts(companion_id, limit=200)
         except Exception:
@@ -282,19 +287,60 @@ class MemoryStore:
         for fact in facts:
             index.add(fact.fact_id, fact.summary_text)
         by_id = {fact.fact_id: fact for fact in facts}
-        picked = [
+        return [
             by_id[doc_id]
             for doc_id, _score in index.search(query, top_k=limit)
             if doc_id in by_id
         ]
 
-        if len(picked) < limit:
-            chosen = {fact.fact_id for fact in picked}
-            for fact in facts:  # list_facts 已按 importance 降序
-                if len(picked) >= limit:
-                    break
-                if fact.anchor and fact.fact_id not in chosen:
-                    picked.append(fact)
+    def _recall_facts(self, companion_id: str, query: str) -> list[Fact]:
+        """语义记忆召回：锚点保底 + 相关性补充。
+
+        两部分职责不同，缺一不可：
+        - **锚点**（importance 高）：保证人设一致性——「用户是谁」不应因为
+          本轮话题不相关就消失；
+        - **相关**（BM25 命中 query）：保证当前话题接得上——只给锚点会让
+          AI 接不上用户刚提到的事。
+
+        旧实现只按 importance 取 top N，与本轮输入完全无关，导致「重要但不新」
+        的事实在事实表长大后逐渐挤不进召回（P6）。
+        """
+        picked = self.cold.list_facts(companion_id, limit=self.fact_anchor_n)
+        if self.fact_relevant_n <= 0:
+            return picked[: self.fact_limit]
+
+        chosen = {fact.fact_id for fact in picked}
+        for fact in self._relevant_facts(
+            companion_id, query, limit=self.fact_relevant_n
+        ):
+            if fact.fact_id not in chosen:
+                picked.append(fact)
+                chosen.add(fact.fact_id)
+        return picked[: self.fact_limit]
+
+    def _recall_known_facts(
+        self, companion_id: str, query: str, *, limit: int = 8
+    ) -> list[Fact]:
+        """抽取器用的相关事实：**相关性优先**，锚点补齐。
+
+        与 `_recall_facts` 的取舍相反——抽取器要判断「本轮是否与某条旧事实
+        冲突」，因此相关内容比锚点更重要；不足时再用锚点事实兜底。
+        """
+        picked = self._relevant_facts(companion_id, query, limit=limit)
+        if len(picked) >= limit:
+            return picked[:limit]
+
+        chosen = {fact.fact_id for fact in picked}
+        try:
+            anchors = self.cold.list_facts(companion_id, limit=200)
+        except Exception:
+            anchors = []
+        for fact in anchors:  # 已按 importance 降序
+            if len(picked) >= limit:
+                break
+            if fact.anchor and fact.fact_id not in chosen:
+                picked.append(fact)
+                chosen.add(fact.fact_id)
         return picked[:limit]
 
     def _apply_fact_updates(

@@ -44,7 +44,9 @@ class Settings(BaseSettings):
     cold_db_path: str = "data/memory.db"
 
     # ---- 记忆召回参数（分层聚合）----
-    memory_fact_limit: int = 5      # 语义记忆（事实）召回条数
+    memory_fact_limit: int = 5      # 语义记忆（事实）召回总条数上限
+    memory_fact_anchor_n: int = 3   # 其中：高 importance 锚点保底条数
+    memory_fact_relevant_n: int = 2 # 其中：按 query 相关性补充条数
     memory_top_k: int = 3           # 情景记忆（温层）召回条数
     # 各记忆层共用的层内 token 预算（PromptManager 按层分别应用，
     # 而非整个记忆块的总额度）

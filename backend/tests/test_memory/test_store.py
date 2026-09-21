@@ -90,6 +90,36 @@ def test_facts_sorted_by_importance(cold, warm) -> None:
     assert ctx.facts[0].object == "核心事实"  # 高 importance 优先
 
 
+def test_facts_recall_keeps_anchors_and_adds_relevant(cold, warm) -> None:
+    """事实召回 = 锚点保底 + 相关性补充（P6 回归测试）。
+
+    回归点：旧实现只按 importance 取 top N，与本轮输入完全无关——
+    当事实表长大到超过 limit 时，「相关但 importance 一般」的事实
+    永远挤不进召回，导致 AI 接不上用户刚提到的事。
+    """
+    # 7 条与 query 无关的高/中 importance 事实（会把旧实现的 limit 名额占满）
+    cold.save_fact("therapist", _fact(object="身份A", importance=5))
+    cold.save_fact("therapist", _fact(object="身份B", importance=4))
+    cold.save_fact("therapist", _fact(object="关系C", importance=4))
+    cold.save_fact("therapist", _fact(object="偏好D", importance=4))
+    for i in range(3):
+        cold.save_fact("therapist", _fact(object=f"闲聊E{i}", importance=3))
+    # 1 条 importance 低但与 query 高度相关
+    cold.save_fact("therapist", _fact(predicate="喜欢", object="美式咖啡", importance=2))
+
+    store = MemoryStore(cold, warm)  # fact_limit=5 / anchor_n=3 / relevant_n=2
+    ctx = store.recall("therapist", "美式咖啡怎么样")
+    objects = [f.object for f in ctx.facts]
+
+    assert len(objects) <= 5
+    assert "美式咖啡" in objects      # 相关性补充：旧实现拿不到这条
+    assert "身份A" in objects         # 锚点保底：「用户是谁」仍在
+
+    # 验证回归测试确实能捕获旧行为
+    anchors_only = [f.object for f in cold.list_facts("therapist", limit=5)]
+    assert "美式咖啡" not in anchors_only
+
+
 def test_companion_isolation_via_store(cold, warm) -> None:
     warm.add("companion_a", "A 的独家记忆：怕黑")
     cold.save_fact("companion_a", _fact(object="A 的猫"))

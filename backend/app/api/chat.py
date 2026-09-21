@@ -133,6 +133,8 @@ def get_memory_store() -> MemoryStore:
             cold,
             warm,
             fact_limit=settings.memory_fact_limit,
+            fact_anchor_n=settings.memory_fact_anchor_n,
+            fact_relevant_n=settings.memory_fact_relevant_n,
             memory_top_k=settings.memory_top_k,
             hybrid_enabled=settings.memory_hybrid_enabled,
             candidate_n=settings.memory_candidate_n,
