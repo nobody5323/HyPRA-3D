@@ -9,6 +9,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 
+#: 召回候选倍数：先按**原始相似度**取 top_k × N 条候选，再施加时间衰减重排。
+#: 两个存储后端必须使用同一个值，否则开发（memory）与评审（qdrant）环境的
+#: 召回结果会不一致。时间衰减会压低旧记忆分数，故候选集必须远大于最终条数，
+#: 否则「先截断、后衰减」会让排序失真。
+CANDIDATE_FACTOR = 5
+
 
 @dataclass
 class MemoryRecord:
@@ -46,8 +52,13 @@ class WarmMemoryStore(ABC):
         *,
         metadata: dict | None = None,
         memory_id: str | None = None,
+        created_at: datetime | None = None,
     ) -> str:
-        """入库一条记忆（内部完成 embedding），返回 memory_id。"""
+        """入库一条记忆（内部完成 embedding），返回 memory_id。
+
+        created_at 可选（缺省为当前时间）：显式传入供导入历史数据与测试
+        注入时间使用——两个存储后端必须都支持，否则时间衰减行为无法验证。
+        """
 
     @abstractmethod
     def search(
@@ -72,3 +83,11 @@ class WarmMemoryStore(ABC):
     @abstractmethod
     def count(self, companion_id: str) -> int:
         """某陪伴对象当前的记忆条数。"""
+
+    @abstractmethod
+    def list_records(self, companion_id: str) -> list[MemoryRecord]:
+        """列出该陪伴对象的**全量**记忆记录。
+
+        用途：构建本地 BM25 稀疏索引（需要看到全部文本才能算 IDF）。
+        这是全量读取，**不要**在每轮对话的召回路径上调用——上层应缓存索引。
+        """

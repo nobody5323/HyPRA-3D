@@ -43,10 +43,25 @@ class Settings(BaseSettings):
     # 数据库文件位置（相对 backend 运行目录；默认 backend/data/memory.db）
     cold_db_path: str = "data/memory.db"
 
-    # ---- 记忆召回参数（三层聚合）----
-    memory_fact_limit: int = 5      # 冷层事实召回条数
-    memory_top_k: int = 3           # 温层语义召回条数
-    memory_block_budget: int = 300  # 记忆块 token 预算
+    # ---- 记忆召回参数（分层聚合）----
+    memory_fact_limit: int = 5      # 语义记忆（事实）召回条数
+    memory_top_k: int = 3           # 情景记忆（温层）召回条数
+    # 各记忆层共用的层内 token 预算（PromptManager 按层分别应用，
+    # 而非整个记忆块的总额度）
+    memory_layer_budget: int = 300
+    # 时间衰减：权重 = 0.5 ** (年龄天数 / 半衰期天数)；指数控制衰减强度
+    # （0=不衰减，1=标准半衰期，>1 更强地让位于近期记忆）
+    memory_half_life_days: float = 30.0
+    memory_decay_exponent: float = 1.0
+    # 同情绪记忆的召回分加权系数（参照⑤）
+    memory_emotion_boost: float = 1.25
+    # ---- 混合检索（BM25 稀疏 + 稠密向量 → RRF 融合）----
+    memory_hybrid_enabled: bool = True   # 关闭则退化为纯向量召回
+    memory_candidate_n: int = 10         # 各通道候选条数（应远大于 memory_top_k）
+    memory_rrf_k: int = 60               # RRF 平滑常数（原论文推荐值）
+    # 稠密通道相似度阈值：在**融合前**过滤（RRF 分数无绝对含义，无法事后设阈）
+    # 注意：依 embedding 模型而异，需实测校准（参考世界书 vector_threshold 的做法）
+    memory_min_similarity: float = 0.0
     memory_extractor: str = "rule"  # 回复后抽取器：rule（无 key）| llm（待接入）
 
     # ---- PromptManager 预算（M3 分层组装）----

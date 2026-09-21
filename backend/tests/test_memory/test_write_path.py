@@ -98,6 +98,9 @@ def test_remember_turn_survives_warm_failure(cold) -> None:
         def count(self, companion_id):  # pragma: no cover
             return 0
 
+        def list_records(self, companion_id):  # pragma: no cover - 不使用
+            return []
+
     store = MemoryStore(cold, _BrokenWarm())
     stats = store.remember_turn("therapist", "我喜欢猫", "…", turn_index=1)
     assert stats["memory"] == 0          # 温层失败

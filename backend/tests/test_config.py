@@ -22,9 +22,17 @@ def test_defaults_budgets() -> None:
     """PromptManager 预算默认值。"""
     settings = Settings(_env_file=None)
     assert settings.worldbook_budget > 0
-    assert settings.memory_block_budget > 0
+    assert settings.memory_layer_budget > 0
     assert settings.prompt_history_budget > 0
     assert settings.prompt_total_budget > 0
+
+
+def test_defaults_memory_recall_params() -> None:
+    """记忆召回参数默认值（时间衰减与情绪加权均为可调项）。"""
+    settings = Settings(_env_file=None)
+    assert settings.memory_half_life_days > 0
+    assert settings.memory_decay_exponent >= 0
+    assert settings.memory_emotion_boost >= 1.0
 
 
 def test_env_var_override(monkeypatch) -> None:

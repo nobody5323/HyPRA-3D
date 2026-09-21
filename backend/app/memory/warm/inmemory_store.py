@@ -7,7 +7,12 @@
 import uuid
 from datetime import datetime
 
-from app.memory.warm.base import MemoryRecord, SearchResult, WarmMemoryStore
+from app.memory.warm.base import (
+    CANDIDATE_FACTOR,
+    MemoryRecord,
+    SearchResult,
+    WarmMemoryStore,
+)
 from app.memory.warm.decay import combined_score
 from app.memory.warm.embedding import (
     DeterministicEmbeddingProvider,
@@ -45,13 +50,14 @@ class InMemoryWarmStore(WarmMemoryStore):
         *,
         metadata: dict | None = None,
         memory_id: str | None = None,
+        created_at: datetime | None = None,
     ) -> str:
         mid = memory_id or uuid.uuid4().hex
         record = MemoryRecord(
             memory_id=mid,
             companion_id=companion_id,
             text=text,
-            created_at=datetime.now(),
+            created_at=created_at or datetime.now(),
             metadata=dict(metadata or {}),
             vector=self._provider.embed(text),
         )
@@ -70,16 +76,30 @@ class InMemoryWarmStore(WarmMemoryStore):
     ) -> list[SearchResult]:
         now = now or datetime.now()
         query_vec = self._provider.embed(query)
-        results: list[SearchResult] = []
-        for record in self._collection(companion_id).values():
-            sim = cosine_similarity(query_vec, record.vector)
-            score = combined_score(
-                sim,
-                self._age_days(record.created_at, now),
-                half_life_days=half_life_days,
-                decay_exponent=decay_exponent,
+
+        # ① 先按**原始相似度**取候选（与 QdrantWarmStore 保持同一策略：
+        #    时间衰减只在候选内重排，若先衰减再截断会让排序失真）
+        scored = [
+            (cosine_similarity(query_vec, record.vector), record)
+            for record in self._collection(companion_id).values()
+        ]
+        scored.sort(key=lambda item: item[0], reverse=True)
+        candidates = scored[: max(top_k * CANDIDATE_FACTOR, top_k)]
+
+        # ② 对候选施加时间衰减后重排
+        results: list[SearchResult] = [
+            SearchResult(
+                record=record,
+                score=combined_score(
+                    similarity,
+                    self._age_days(record.created_at, now),
+                    half_life_days=half_life_days,
+                    decay_exponent=decay_exponent,
+                ),
+                raw_similarity=similarity,
             )
-            results.append(SearchResult(record=record, score=score, raw_similarity=sim))
+            for similarity, record in candidates
+        ]
         results.sort(key=lambda r: r.score, reverse=True)
         return results[:top_k]
 
@@ -89,3 +109,6 @@ class InMemoryWarmStore(WarmMemoryStore):
 
     def count(self, companion_id: str) -> int:
         return len(self._collection(companion_id))
+
+    def list_records(self, companion_id: str) -> list[MemoryRecord]:
+        return list(self._collection(companion_id).values())

@@ -29,7 +29,7 @@ class ColdMemoryStore(ABC):
         status: FactStatus = FactStatus.ACTIVE,
         limit: int = 50,
     ) -> list[Fact]:
-        """按条件列出事实（默认仅活跃），按 created_at 倒序。"""
+        """按条件列出事实（默认仅活跃），按 importance 优先、created_at 次之降序。"""
 
     @abstractmethod
     def get_fact(self, companion_id: str, fact_id: str) -> Fact | None:

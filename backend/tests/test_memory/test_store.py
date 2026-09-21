@@ -52,6 +52,9 @@ class _BrokenWarmStore(WarmMemoryStore):
     def count(self, companion_id):  # pragma: no cover
         return 0
 
+    def list_records(self, companion_id):  # pragma: no cover - 不使用
+        raise RuntimeError("模拟 Qdrant 连接失败")
+
 
 # ---------- 召回聚合 ----------
 
@@ -59,7 +62,6 @@ class _BrokenWarmStore(WarmMemoryStore):
 def test_recall_empty(store: MemoryStore) -> None:
     ctx = store.recall("therapist", "随便聊聊")
     assert ctx.empty is True
-    assert ctx.to_prompt_block() == ""
 
 
 def test_recall_aggregates_three_layers(cold, warm) -> None:
@@ -96,48 +98,74 @@ def test_companion_isolation_via_store(cold, warm) -> None:
     assert ctx_b.empty is True
 
 
-# ---------- 记忆块拼接 ----------
+# ---------- 配置接线（P3）----------
 
 
-def test_prompt_block_order(cold, warm) -> None:
-    """块内顺序：相关回忆 > 已知事实 > 会话摘要（对齐参照①）。"""
-    warm.add("therapist", "小林喜欢下雨天")
-    cold.save_fact("therapist", _fact(object="猫"))
-    cold.append_summary("therapist", scope_end=10, new_content="小林近期压力大。")
-    store = MemoryStore(cold, warm)
+class _SpyWarmStore(WarmMemoryStore):
+    """记录 search 收到的参数（验证配置是否真正传到温层）。"""
 
-    block = store.recall("therapist", "下雨").to_prompt_block()
-    assert block.startswith("[记忆回忆]")
-    assert block.index("相关回忆") < block.index("已知事实") < block.index("会话摘要")
+    def __init__(self) -> None:
+        self.search_kwargs: dict = {}
 
+    def add(self, companion_id, text, **kw):  # pragma: no cover - 不使用
+        return ""
 
-def test_prompt_block_budget_truncates(cold, warm) -> None:
-    """预算不足时只装入高优先部分（回忆优先，事实被裁）。"""
-    warm.add("therapist", "小林喜欢下雨天")
-    cold.save_fact("therapist", _fact(object="很长的细节描述" * 20))
-    store = MemoryStore(cold, warm)
+    def search(self, companion_id, query, **kw):
+        self.search_kwargs = kw
+        return []
 
-    ctx = store.recall("therapist", "下雨")
-    small = ctx.to_prompt_block(budget=25)
-    assert "相关回忆" in small
-    assert "已知事实" not in small  # 预算耗尽后不再追加低优先内容
+    def delete(self, companion_id, memory_id):  # pragma: no cover
+        return False
 
+    def count(self, companion_id):  # pragma: no cover
+        return 0
 
-def test_prompt_block_too_small_returns_empty(cold, warm) -> None:
-    """预算连一条都装不下时返回空串（不注入只有标题的空块）。"""
-    warm.add("therapist", "小林喜欢下雨天" * 20)
-    store = MemoryStore(cold, warm)
-    ctx = store.recall("therapist", "下雨")
-    assert ctx.to_prompt_block(budget=5) == ""
+    def list_records(self, companion_id):  # pragma: no cover - 不使用
+        return []
 
 
-def test_prompt_block_omits_empty_sections(cold, warm) -> None:
-    warm.add("therapist", "小林喜欢下雨天")
-    store = MemoryStore(cold, warm)
-    block = store.recall("therapist", "下雨").to_prompt_block()
-    assert "相关回忆" in block
-    assert "已知事实" not in block
-    assert "会话摘要" not in block
+def test_recall_uses_candidate_pool_without_pre_decay(cold) -> None:
+    """稠密通道取候选时**不施加衰减**，且候选数为 candidate_n。
+
+    衰减必须移到 RRF 融合之后：若在候选阶段就衰减，旧记忆会在进入融合前
+    被滤掉，导致 BM25 无法把它救回来。
+    """
+    spy = _SpyWarmStore()
+    store = MemoryStore(cold, spy, candidate_n=7)
+    store.recall("therapist", "下雨")
+
+    assert spy.search_kwargs["top_k"] == 7
+    assert spy.search_kwargs["decay_exponent"] == 0.0
+
+
+def test_half_life_affects_final_score(cold, warm) -> None:
+    """半衰期参数应作用于融合后的分数：老记忆在短半衰期下得分更低（P3）。"""
+    warm.add(
+        "therapist",
+        "小林喜欢下雨天",
+        created_at=datetime.now() - timedelta(days=100),
+    )
+
+    short = MemoryStore(cold, warm, half_life_days=10.0).recall("therapist", "下雨天")
+    long = MemoryStore(cold, warm, half_life_days=3650.0).recall("therapist", "下雨天")
+
+    assert short.memories and long.memories
+    assert long.memories[0].score > short.memories[0].score
+
+
+def test_emotion_boost_is_configurable(cold, warm) -> None:
+    """同情绪记忆的加权系数应可配置（默认 1.25），放大后得分更高。"""
+    warm.add("therapist", "小林说下雨天让他很安心", metadata={"emotion": "calm"})
+
+    neutral = MemoryStore(cold, warm, emotion_boost=1.0).recall(
+        "therapist", "下雨天", emotion="calm"
+    )
+    boosted = MemoryStore(cold, warm, emotion_boost=10.0).recall(
+        "therapist", "下雨天", emotion="calm"
+    )
+
+    assert neutral.memories and boosted.memories
+    assert boosted.memories[0].score > neutral.memories[0].score
 
 
 # ---------- 容错降级 ----------
@@ -151,7 +179,7 @@ def test_warm_failure_degrades_gracefully(cold) -> None:
     ctx = store.recall("therapist", "猫")
     assert ctx.facts  # 冷层仍可用
     assert ctx.memories == []
-    assert any("温层召回失败" in w for w in ctx.warnings)
+    assert any("情景记忆召回失败" in w for w in ctx.warnings)
 
 
 def test_memory_context_empty_flag() -> None:

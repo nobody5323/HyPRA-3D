@@ -17,7 +17,10 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY app ./app
 
-# pip 源可经构建参数覆盖（国内评审网络可 --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple）
+# pip 源可经构建参数覆盖。
+# ⚠️ 清华镜像（pypi.tuna.tsinghua.edu.cn）缺少 jieba 的源码分发（只有 sdist），
+#    用它构建会以 “No matching distribution found for jieba” 失败；
+#    国内网络请改用阿里云镜像，或保持默认官方源（始终可用）。
 ARG PIP_INDEX_URL=https://pypi.org/simple
 
 # 安装运行时依赖（非 editable，装进 site-packages）

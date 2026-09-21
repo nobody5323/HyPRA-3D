@@ -121,7 +121,13 @@ def get_memory_store() -> MemoryStore:
             warm,
             fact_limit=settings.memory_fact_limit,
             memory_top_k=settings.memory_top_k,
-            block_budget=settings.memory_block_budget,
+            hybrid_enabled=settings.memory_hybrid_enabled,
+            candidate_n=settings.memory_candidate_n,
+            rrf_k=settings.memory_rrf_k,
+            min_similarity=settings.memory_min_similarity,
+            half_life_days=settings.memory_half_life_days,
+            decay_exponent=settings.memory_decay_exponent,
+            emotion_boost=settings.memory_emotion_boost,
             extractor=create_extractor(settings.memory_extractor),
         )
     return _memory_store
@@ -210,7 +216,7 @@ def get_chat_graph():
             llm_provider=provider,
             prompt_manager=PromptManager(
                 worldbook_budget=settings.worldbook_budget,
-                memory_budget=settings.memory_block_budget,
+                memory_budget=settings.memory_layer_budget,
                 history_budget=settings.prompt_history_budget,
                 total_budget=settings.prompt_total_budget,
                 style_budget=settings.prompt_style_budget,

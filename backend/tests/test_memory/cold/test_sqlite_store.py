@@ -1,6 +1,7 @@
 """冷层 SQLite 存储测试（使用临时文件，不污染真实 data 目录）。"""
 
 import uuid
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -151,3 +152,26 @@ def test_anchor_property() -> None:
 def test_summary_text_render() -> None:
     fact = _fact(occurred_at="上周三")
     assert fact.summary_text == "小林 喜欢 下雨天 （上周三）"
+
+
+def test_list_facts_importance_wins_over_recency(store: SqliteColdStore) -> None:
+    """高 importance 但创建较早的事实不能被时间截断排除（P1 回归测试）。
+
+    回归点：旧实现是 `ORDER BY created_at DESC LIMIT n`，再在应用层按
+    importance 排序——「先截断、后排序」会让重要但不新的事实永远进不了召回。
+    """
+    now = datetime.now()
+    store.save_fact(
+        "therapist",
+        _fact(object="母亲患高血压", importance=5, created_at=now - timedelta(days=100)),
+    )
+    # 填充足够多的新事实，把 limit 名额占满
+    for i in range(10):
+        store.save_fact(
+            "therapist",
+            _fact(object=f"闲聊细节{i}", importance=2, created_at=now - timedelta(days=i)),
+        )
+
+    facts = store.list_facts("therapist", limit=5)
+    assert len(facts) == 5
+    assert facts[0].object == "母亲患高血压"

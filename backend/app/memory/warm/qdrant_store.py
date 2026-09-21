@@ -17,14 +17,17 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
-from app.memory.warm.base import MemoryRecord, SearchResult, WarmMemoryStore
+from app.memory.warm.base import (
+    CANDIDATE_FACTOR,
+    MemoryRecord,
+    SearchResult,
+    WarmMemoryStore,
+)
 from app.memory.warm.decay import combined_score
 from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provider
 
 # collection 名前缀（按陪伴对象隔离）
 COLLECTION_PREFIX = "memory_"
-# 召回候选倍数：取 top_k × N 条候选再按时间衰减重排，避免衰减后排序失真
-_CANDIDATE_FACTOR = 3
 
 
 class QdrantWarmStore(WarmMemoryStore):
@@ -140,7 +143,7 @@ class QdrantWarmStore(WarmMemoryStore):
         response = self._client.query_points(
             collection_name=name,
             query=self._provider.embed(query),
-            limit=max(top_k * _CANDIDATE_FACTOR, top_k),
+            limit=max(top_k * CANDIDATE_FACTOR, top_k),
             with_payload=True,
         )
 
@@ -175,3 +178,31 @@ class QdrantWarmStore(WarmMemoryStore):
         if not self._client.collection_exists(name):
             return 0
         return self._client.count(collection_name=name).count
+
+    def list_records(self, companion_id: str) -> list[MemoryRecord]:
+        """滚动拉取全量记录（供构建 BM25 稀疏索引）。
+
+        Qdrant 只提供向量与 payload，无法在其内部做 BM25，因此需要把文本
+        拉回应用层建镜像索引。上层会缓存索引，本方法仅在首次召回时调用。
+        """
+        name = self._collection_name(companion_id)
+        if not self._client.collection_exists(name):
+            return []
+
+        records: list[MemoryRecord] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                collection_name=name,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            records.extend(
+                self._payload_to_record(point.id, point.payload, companion_id)
+                for point in points
+            )
+            if offset is None:
+                break
+        return records

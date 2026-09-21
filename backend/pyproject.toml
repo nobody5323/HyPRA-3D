@@ -16,6 +16,8 @@ dependencies = [
     "openai>=1.54",
     "langgraph>=1.0",
     "mcp>=1.28,<2",
+    # 中文分词（BM25 稀疏检索通道）；缺失时代码自动降级为字符 bigram
+    "jieba>=0.42.1",
 ]
 
 [project.optional-dependencies]

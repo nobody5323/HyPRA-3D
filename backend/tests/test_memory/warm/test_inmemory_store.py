@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 
-from app.memory.warm.base import MemoryRecord
+from app.memory.warm.base import CANDIDATE_FACTOR, MemoryRecord
 from app.memory.warm.inmemory_store import InMemoryWarmStore
 
 
@@ -79,3 +79,29 @@ def test_top_k_limits_results() -> None:
         store.add("therapist", f"小林今天做了第 {i} 件事")
     results = store.search("therapist", "小林今天做了事", top_k=3)
     assert len(results) == 3
+
+
+def test_search_uses_candidate_pool() -> None:
+    """候选池按**原始相似度**取 CANDIDATE_FACTOR × top_k 条，再施加衰减重排。
+
+    与 QdrantWarmStore 保持同一策略。若退化为「全量参与衰减重排」，
+    最新写入的第 20 条会胜出；有候选池时只有最早的 5 条参与竞争。
+    """
+    store = _store()
+    base = datetime(2025, 1, 1)
+    total = CANDIDATE_FACTOR * 4  # 20 条，远多于候选池大小
+    for i in range(total):
+        store.add(
+            "therapist",
+            "完全相同的一段文本",
+            created_at=base + timedelta(days=i),
+        )
+
+    results = store.search(
+        "therapist",
+        "完全相同的一段文本",
+        top_k=1,
+        now=base + timedelta(days=total),
+    )
+    # 候选池 = 相似度相同的前 5 条（day 0..4），其中最新者（day 4）居首
+    assert results[0].record.created_at == base + timedelta(days=CANDIDATE_FACTOR - 1)

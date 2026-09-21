@@ -195,7 +195,9 @@ class SqliteColdStore(ColdMemoryStore):
         if type is not None:
             query += " AND type = ?"
             params.append(type.value)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        # 排序键必须在 SQL 内生效：若先按 created_at 截断，高 importance 但创建
+        # 较早的事实会被永久排除在召回之外，Python 侧再排序无法补救。
+        query += " ORDER BY importance DESC, created_at DESC LIMIT ?"
         params.append(limit)
 
         with self._connect() as conn:
