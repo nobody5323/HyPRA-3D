@@ -3,6 +3,7 @@
 from app.rag.prompt_manager import (
     LAYER_FACTS,
     LAYER_HISTORY,
+    LAYER_KNOWLEDGE,
     LAYER_PERSONA,
     LAYER_USER,
     LAYER_WARM,
@@ -46,6 +47,60 @@ def test_memory_block_inner_order() -> None:
     )
     block = result.memory_block
     assert block.index("相关回忆") < block.index("已知事实")
+
+
+def test_knowledge_layer_order_in_system_prompt() -> None:
+    """system 内顺序：人设 → 世界书 → 参考资料 → 记忆回忆。"""
+    pm = PromptManager()
+    result = pm.build(
+        persona_text="你是苏澄。",
+        user_input="咨询室在哪里",
+        worldbook_text="[深夜倾听模式]\n深夜时苏澄声音更轻。",
+        knowledge_lines=["咨询室在老城区一栋二层小楼里。"],
+        warm_lines=["小林说过怕打雷"],
+    )
+    prompt = result.system_prompt
+
+    assert (
+        prompt.index("[角色人设]")
+        < prompt.index("[场景补充]")
+        < prompt.index("[参考资料]")
+        < prompt.index("[记忆回忆]")
+    )
+
+
+def test_knowledge_layer_omitted_when_empty() -> None:
+    """无知识库内容时不注入空块。"""
+    result = PromptManager().build(persona_text="人设", user_input="x")
+
+    assert "[参考资料]" not in result.system_prompt
+    assert result.layers[LAYER_KNOWLEDGE].empty
+
+
+def test_knowledge_dropped_before_worldbook() -> None:
+    """总量不足时按优先级裁剪：知识库(70) 先于世界书(80) 被裁。"""
+    pm = PromptManager(total_budget=60)
+    result = pm.build(
+        persona_text="人设",
+        user_input="问",
+        worldbook_text="世界书内容" * 10,
+        knowledge_lines=["参考资料内容" * 10],
+    )
+
+    assert LAYER_KNOWLEDGE in result.dropped_layers
+    assert LAYER_WORLDBOOK not in result.dropped_layers
+
+
+def test_knowledge_budget_truncates_lines() -> None:
+    """层内预算生效：超长内容被截断并标记。"""
+    pm = PromptManager(knowledge_budget=20)
+    result = pm.build(
+        persona_text="人设",
+        user_input="问",
+        knowledge_lines=["参考资料" * 50],
+    )
+
+    assert result.layers[LAYER_KNOWLEDGE].truncated
 
 
 def test_messages_structure() -> None:

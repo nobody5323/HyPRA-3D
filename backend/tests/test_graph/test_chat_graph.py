@@ -9,6 +9,8 @@ from app.graph.chat_graph import (
 from app.graph.nodes import ChatNodes
 from app.llm.mock import MockLLMProvider
 from app.memory.cold.sqlite_store import SqliteColdStore
+from app.memory.knowledge.inmemory_store import InMemoryKnowledgeStore
+from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.inmemory_store import InMemoryWarmStore
 from app.prompts.persona.loader import load_builtin_presets
@@ -119,6 +121,7 @@ def test_graph_node_sequence_defined() -> None:
     assert NODE_SEQUENCE == [
         "load_persona",
         "worldbook_recall",
+        "knowledge_recall",
         "memory_recall",
         "assemble_prompt",
         "generate_reply",
@@ -135,6 +138,73 @@ def test_graph_end_to_end(graph) -> None:
     assert "小林" in result["persona_text"]
     # 记忆写入已移出图（改为路由层后台执行），因此图输出中不含 writes
     assert "writes" not in result
+
+
+def test_knowledge_recall_without_retriever_is_empty(nodes: ChatNodes) -> None:
+    """未注入检索器时该层为空（功能可关，不阻断对话）。"""
+    out = nodes.knowledge_recall(_state())
+
+    assert out["knowledge_lines"] == []
+
+
+def test_knowledge_recall_populates_lines(memory: MemoryStore) -> None:
+    """注入检索器后，用户上传的语料应进入该层。"""
+    store = InMemoryKnowledgeStore()
+    store.add_document(
+        PERSONA_ID, title="咨询室资料", chunks=["咨询室的茶几上常年放着一壶茉莉花茶。"]
+    )
+    nodes = ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=memory,
+        knowledge=KnowledgeRetriever(store),
+        llm_provider=MockLLMProvider(),
+    )
+
+    out = nodes.knowledge_recall(_state(user_input="茶几上放着什么"))
+
+    assert out["knowledge_lines"]
+    assert "茉莉花茶" in out["knowledge_lines"][0]
+
+
+def test_knowledge_recall_degrades_on_failure(memory: MemoryStore) -> None:
+    """检索异常时记 warning 并降级，不抛异常。"""
+
+    class _BrokenRetriever(KnowledgeRetriever):
+        def retrieve(self, companion_id, query, *, top_k=None):  # noqa: ARG002
+            raise RuntimeError("模拟知识库不可用")
+
+    nodes = ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=memory,
+        knowledge=_BrokenRetriever(InMemoryKnowledgeStore()),
+        llm_provider=MockLLMProvider(),
+    )
+
+    out = nodes.knowledge_recall(_state())
+
+    assert out["knowledge_lines"] == []
+    assert any("知识库检索失败" in w for w in out["warnings"])
+
+
+def test_knowledge_lines_reach_system_prompt(memory: MemoryStore) -> None:
+    """端到端：参考资料应拼进 system prompt。"""
+    store = InMemoryKnowledgeStore()
+    store.add_document(PERSONA_ID, title="资料", chunks=["咨询室的茶几上放着茉莉花茶。"])
+    nodes = ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=memory,
+        knowledge=KnowledgeRetriever(store),
+        llm_provider=MockLLMProvider(),
+    )
+
+    recalled = nodes.knowledge_recall(_state(user_input="茶几上放着什么"))
+    assembled = nodes.assemble_prompt({**_state(), **recalled})
+
+    assert "[参考资料]" in assembled["system_prompt"]
+    assert "茉莉花茶" in assembled["system_prompt"]
 
 
 def test_graph_worldbook_and_memory_in_prompt(graph) -> None:

@@ -10,6 +10,7 @@
 
 from app.llm.base import ChatMessage, LLMProvider
 from app.llm.profiles import ModelProfile, ResolvedSampling, resolve_sampling
+from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider
 from app.prompts.assemble import assemble_worldbook_section
@@ -42,6 +43,7 @@ class ChatNodes:
         presets: dict[str, PersonaPreset],
         entries: list[WorldBookEntry],
         memory_store: MemoryStore,
+        knowledge: KnowledgeRetriever | None = None,
         embedding_provider: EmbeddingProvider | None = None,
         llm_provider: LLMProvider,
         prompt_manager: PromptManager | None = None,
@@ -57,6 +59,8 @@ class ChatNodes:
         self.presets = presets
         self.entries = entries
         self.memory = memory_store
+        # 个人记忆检索器：未注入时该层为空（功能可关，不阻断对话）
+        self.knowledge = knowledge
         # 世界书语义向量索引：构造时一次性编码全部条目；provider 为 None 时
         # 索引为空，向量通道静默关闭（关键词/正则通道不受影响）。
         self.worldbook_index = WorldBookVectorIndex(entries, embedding_provider)
@@ -107,6 +111,32 @@ class ChatNodes:
             "worldbook_skipped": skipped,
             "worldbook_text": text,
         }
+
+    # ---------- ②′ 个人记忆检索 ----------
+
+    def knowledge_recall(self, state: ChatState) -> dict:
+        """个人记忆检索（混合检索：BM25 + 稠密向量 → RRF）。
+
+        与情景记忆共用检索底座，但**不做时间衰减、不做情绪加权**——
+        知识不老化，且是客观的。这层是「用户给过我的资料」，
+        与「我们一起经历过什么」（情景记忆）职责不同。
+        """
+        if self.knowledge is None:
+            return {"knowledge_lines": []}
+
+        companion_id = state.get("companion_id", state.get("persona_id", ""))
+        try:
+            hits = self.knowledge.retrieve(
+                companion_id, state.get("user_input", "")
+            )
+        except Exception as exc:  # noqa: BLE001 - 知识库不可用不应阻断对话
+            return {
+                "knowledge_lines": [],
+                "warnings": self._merge_warnings(
+                    state, [f"知识库检索失败（已降级）：{exc}"]
+                ),
+            }
+        return {"knowledge_lines": [hit.chunk.text for hit in hits]}
 
     # ---------- ③ 三层记忆召回 ----------
     def memory_recall(self, state: ChatState) -> dict:
@@ -178,6 +208,7 @@ class ChatNodes:
             persona_text=state.get("persona_text", ""),
             user_input=state.get("user_input", ""),
             worldbook_text=state.get("worldbook_text", ""),
+            knowledge_lines=state.get("knowledge_lines", []),
             warm_lines=state.get("warm_lines", []),
             fact_lines=state.get("fact_lines", []),
             history=state.get("history", []),

@@ -22,6 +22,7 @@ from app.session.context import ChatTurn
 # ---- 层标识 ----
 LAYER_PERSONA = "persona"        # 角色人设（必留）
 LAYER_WORLDBOOK = "worldbook"    # 世界书命中
+LAYER_KNOWLEDGE = "knowledge"    # 个人记忆（用户上传的语料）
 LAYER_WARM = "warm_recall"       # 温层向量召回
 LAYER_FACTS = "cold_facts"       # 冷层结构化事实
 LAYER_HISTORY = "history"        # 滚动窗口（可裁最旧）
@@ -31,10 +32,12 @@ LAYER_STYLE = "style"            # 表达风格（M5，放 system 末尾：越�
 # ---- 段落标题 ----
 ROLE_DEF_SECTION = "角色人设"
 WORLDBOOK_SECTION = "场景补充"
+KNOWLEDGE_SECTION = "参考资料"   # 个人记忆独立成块，不并入「记忆回忆」
 MEMORY_SECTION = "记忆回忆"
 
 # ---- 默认预算 ----
 DEFAULT_WORLDBOOK_BUDGET = 400
+DEFAULT_KNOWLEDGE_BUDGET = 900   # 个人记忆是用户主动提供的，给足预算
 DEFAULT_MEMORY_BUDGET = 400
 DEFAULT_HISTORY_BUDGET = 700
 DEFAULT_TOTAL_BUDGET = 4000
@@ -46,6 +49,7 @@ _LAYER_PRIORITY = {
     LAYER_USER: 100,
     LAYER_STYLE: 90,      # 表达风格很重要，但在总量不足时仍可裁（排在必留层之后）
     LAYER_WORLDBOOK: 80,
+    LAYER_KNOWLEDGE: 70,  # 用户主动上传 > AI 自动记录的对话回忆
     LAYER_WARM: 60,
     LAYER_FACTS: 55,
     LAYER_HISTORY: 20,
@@ -110,12 +114,14 @@ class PromptManager:
         self,
         *,
         worldbook_budget: int = DEFAULT_WORLDBOOK_BUDGET,
+        knowledge_budget: int = DEFAULT_KNOWLEDGE_BUDGET,
         memory_budget: int = DEFAULT_MEMORY_BUDGET,
         history_budget: int = DEFAULT_HISTORY_BUDGET,
         total_budget: int = DEFAULT_TOTAL_BUDGET,
         style_budget: int = DEFAULT_STYLE_BUDGET,
     ) -> None:
         self.worldbook_budget = worldbook_budget
+        self.knowledge_budget = knowledge_budget
         self.memory_budget = memory_budget
         self.history_budget = history_budget
         self.total_budget = total_budget
@@ -169,6 +175,7 @@ class PromptManager:
         persona_text: str,
         user_input: str,
         worldbook_text: str = "",
+        knowledge_lines: list[str] | None = None,
         warm_lines: list[str] | None = None,
         fact_lines: list[str] | None = None,
         history: list[ChatTurn] | None = None,
@@ -201,6 +208,9 @@ class PromptManager:
 
         # ---- ① 层内预算 ----
         wb_body, wb_cut = self._fit_text(worldbook_text, self.worldbook_budget)
+        knowledge_lines, knowledge_cut = self._fit_lines(
+            list(knowledge_lines or []), self.knowledge_budget
+        )
         warm_lines, warm_cut = self._fit_lines(list(warm_lines or []), self.memory_budget)
         fact_lines, fact_cut = self._fit_lines(list(fact_lines or []), self.memory_budget)
         history, history_cut = self._fit_history(history, self.history_budget)
@@ -214,6 +224,11 @@ class PromptManager:
             LAYER_WORLDBOOK: PromptLayer(
                 key=LAYER_WORLDBOOK, title=WORLDBOOK_SECTION, body=wb_body,
                 priority=_LAYER_PRIORITY[LAYER_WORLDBOOK], truncated=wb_cut,
+            ),
+            LAYER_KNOWLEDGE: PromptLayer(
+                key=LAYER_KNOWLEDGE, title="参考资料：",
+                body="\n".join(f"- {x}" for x in knowledge_lines),
+                priority=_LAYER_PRIORITY[LAYER_KNOWLEDGE], truncated=knowledge_cut,
             ),
             LAYER_WARM: PromptLayer(
                 key=LAYER_WARM, title="相关回忆：",
@@ -256,7 +271,7 @@ class PromptManager:
             layers[LAYER_HISTORY].tokens = sum(estimate_tokens(t.text) for t in history)
             layers[LAYER_HISTORY].truncated = True
         # 2b) 再按优先级从低到高裁剪（摘要 → 事实 → 召回 → 世界书 → 风格）
-        for key in (LAYER_FACTS, LAYER_WARM, LAYER_WORLDBOOK, LAYER_STYLE):
+        for key in (LAYER_FACTS, LAYER_WARM, LAYER_KNOWLEDGE, LAYER_WORLDBOOK, LAYER_STYLE):
             if _total() <= self.total_budget:
                 break
             layer = layers[key]
@@ -277,6 +292,8 @@ class PromptManager:
         sections: list[str] = [f"[{ROLE_DEF_SECTION}]\n{layers[LAYER_PERSONA].body}"]
         if not layers[LAYER_WORLDBOOK].empty:
             sections.append(f"[{WORLDBOOK_SECTION}]\n{layers[LAYER_WORLDBOOK].body}")
+        if not layers[LAYER_KNOWLEDGE].empty:
+            sections.append(f"[{KNOWLEDGE_SECTION}]\n{layers[LAYER_KNOWLEDGE].body}")
         memory_block = _render_memory_block(layers)
         if memory_block:
             sections.append(memory_block)

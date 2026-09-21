@@ -102,6 +102,11 @@ class Settings(BaseSettings):
     # 存储后端：留空则**跟随温层**（memory | qdrant）——评审只需配一处
     knowledge_backend: str = ""
     knowledge_max_file_mb: float = 5.0        # 单文件大小上限
+    # 检索注入：条数 / 各通道候选数 / RRF 常数 / 注入 prompt 的 token 预算
+    knowledge_top_k: int = 3
+    knowledge_candidate_n: int = 10
+    knowledge_rrf_k: int = 60
+    knowledge_context_budget: int = 900
     # 分块参数（字符）：target 聚合目标 / max 单块硬上限 / overlap 句级回退
     knowledge_chunk_target: int = 400
     knowledge_chunk_max: int = 600

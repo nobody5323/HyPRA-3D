@@ -27,6 +27,7 @@ from app.llm.profiles import list_presets, load_model_profiles, resolve_profile
 from app.memory.cold.extractor import create_extractor
 from app.memory.cold.mood_log import SqliteMoodLogStore
 from app.memory.cold.sqlite_store import SqliteColdStore
+from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provider
 from app.memory.warm.factory import create_warm_store
@@ -116,6 +117,24 @@ def _safe_llm_provider() -> LLMProvider | None:
     except Exception as exc:  # noqa: BLE001 - 配置问题不应阻断记忆
         logger.warning("LLM provider 不可用，抽取器退回规则版：%s", exc)
         return None
+
+
+def _build_knowledge_retriever(settings) -> KnowledgeRetriever | None:
+    """构造个人记忆检索器；未启用时返回 None（该层为空，不阻断对话）。
+
+    这里**延迟导入** `app.api.knowledge`：那个模块反过来依赖本模块的
+    `get_embedding_provider`，模块级导入会形成循环。
+    """
+    if not settings.knowledge_enabled:
+        return None
+    from app.api.knowledge import get_knowledge_store  # noqa: PLC0415
+
+    return KnowledgeRetriever(
+        get_knowledge_store(),
+        top_k=settings.knowledge_top_k,
+        candidate_n=settings.knowledge_candidate_n,
+        rrf_k=settings.knowledge_rrf_k,
+    )
 
 
 def get_memory_store() -> MemoryStore:
@@ -231,10 +250,12 @@ def get_chat_graph():
             presets=_presets,
             entries=_entries,
             memory_store=get_memory_store(),
+            knowledge=_build_knowledge_retriever(settings),
             embedding_provider=get_embedding_provider(),
             llm_provider=provider,
             prompt_manager=PromptManager(
                 worldbook_budget=settings.worldbook_budget,
+                knowledge_budget=settings.knowledge_context_budget,
                 memory_budget=settings.memory_layer_budget,
                 history_budget=settings.prompt_history_budget,
                 total_budget=settings.prompt_total_budget,

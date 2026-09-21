@@ -6,6 +6,8 @@
        ↓
    worldbook_recall      世界书三通道触发 + 注入编排
        ↓
+   knowledge_recall      个人记忆混合检索（BM25 + 向量 → RRF）
+       ↓
    memory_recall         情景记忆混合召回 + 语义事实
        ↓
    assemble_prompt       PromptManager 分层组装（固定顺序 + 预算）
@@ -29,6 +31,7 @@ from app.graph.state import ChatState
 # 节点名（与 ChatNodes 方法一一对应）
 NODE_LOAD_PERSONA = "load_persona"
 NODE_WORLDBOOK = "worldbook_recall"
+NODE_KNOWLEDGE = "knowledge_recall"
 NODE_MEMORY = "memory_recall"
 NODE_ASSEMBLE = "assemble_prompt"
 NODE_GENERATE = "generate_reply"
@@ -37,6 +40,7 @@ NODE_GENERATE = "generate_reply"
 NODE_SEQUENCE = [
     NODE_LOAD_PERSONA,
     NODE_WORLDBOOK,
+    NODE_KNOWLEDGE,
     NODE_MEMORY,
     NODE_ASSEMBLE,
     NODE_GENERATE,
@@ -49,6 +53,7 @@ def build_chat_graph(nodes: ChatNodes):
 
     builder.add_node(NODE_LOAD_PERSONA, nodes.load_persona)
     builder.add_node(NODE_WORLDBOOK, nodes.worldbook_recall)
+    builder.add_node(NODE_KNOWLEDGE, nodes.knowledge_recall)
     builder.add_node(NODE_MEMORY, nodes.memory_recall)
     builder.add_node(NODE_ASSEMBLE, nodes.assemble_prompt)
     builder.add_node(NODE_GENERATE, nodes.generate_reply)

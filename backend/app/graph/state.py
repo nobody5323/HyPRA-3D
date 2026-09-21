@@ -33,6 +33,7 @@ class ChatState(TypedDict, total=False):
     worldbook_hits: list[WorldBookEntry]
     worldbook_skipped: list[WorldBookEntry]
     worldbook_text: str
+    knowledge_lines: list[str]   # 个人记忆（知识库）召回文本行
     memory_context: MemoryContext | None
     warm_lines: list[str]        # 情景记忆召回文本行
     fact_lines: list[str]        # 语义记忆（事实）文本行
