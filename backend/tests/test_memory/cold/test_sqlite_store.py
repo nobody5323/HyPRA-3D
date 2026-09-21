@@ -108,33 +108,8 @@ def test_kebab_case_companion_id(store: SqliteColdStore) -> None:
     store.save_fact(cid, _fact(object="猫"))
     assert len(store.list_facts(cid)) == 1
 
-    store.append_summary(cid, scope_end=3, new_content="摘要内容")
-    summary = store.get_summary(cid)
-    assert summary is not None and summary.scope_end == 3
-
     # 与相似命名的其它对象不混淆
     assert store.list_facts("therapist_elder_sister") == []
-
-
-def test_summary_append_incremental(store: SqliteColdStore) -> None:
-    """摘要应滚动增量并入，而非覆盖。"""
-    assert store.get_summary("therapist") is None
-    s1 = store.append_summary("therapist", scope_end=10, new_content="小林提到工作压力大。")
-    assert s1.content == "小林提到工作压力大。"
-    assert s1.scope_end == 10
-
-    s2 = store.append_summary("therapist", scope_end=20, new_content="后来开始养猫缓解压力。")
-    assert "工作压力大" in s2.content
-    assert "养猫缓解压力" in s2.content
-    assert s2.scope_end == 20
-    assert s2.scope_start == s1.scope_start  # 起点保持
-
-
-def test_summary_isolated_by_companion(store: SqliteColdStore) -> None:
-    store.append_summary("therapist", scope_end=5, new_content="甲摘要")
-    assert store.get_summary("other") is None
-    other = store.append_summary("other", scope_end=3, new_content="乙摘要")
-    assert "甲摘要" not in other.content
 
 
 def test_invalid_companion_id_rejected(store: SqliteColdStore) -> None:

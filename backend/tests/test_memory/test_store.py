@@ -64,17 +64,15 @@ def test_recall_empty(store: MemoryStore) -> None:
     assert ctx.empty is True
 
 
-def test_recall_aggregates_three_layers(cold, warm) -> None:
+def test_recall_aggregates_layers(cold, warm) -> None:
     warm.add("therapist", "小林说他喜欢下雨天，听着雨声很放松")
     cold.save_fact("therapist", _fact(object="猫"))
-    cold.append_summary("therapist", scope_end=10, new_content="小林近期工作压力较大。")
 
     store = MemoryStore(cold, warm)
     ctx = store.recall("therapist", "下雨")
 
     assert len(ctx.memories) >= 1
     assert len(ctx.facts) == 1
-    assert ctx.summary is not None
     assert ctx.empty is False
 
 

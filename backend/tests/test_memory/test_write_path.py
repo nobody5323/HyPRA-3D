@@ -30,24 +30,11 @@ def test_remember_turn_writes_all_layers(store: MemoryStore, cold, warm) -> None
         turn_index=1,
         source="sess-1",
     )
-    assert stats["facts"] >= 1      # 冷层事实
-    assert stats["memory"] == 1     # 温层向量入库
-    assert stats["summary"] == 1    # 冷层摘要增量
+    assert stats["facts"] >= 1      # 语义记忆：事实
+    assert stats["memory"] == 1     # 情景记忆：向量入库
 
     assert cold.list_facts("therapist")
     assert warm.count("therapist") == 1
-    summary = cold.get_summary("therapist")
-    assert summary is not None and summary.scope_end == 1
-
-
-def test_remember_turn_summary_accumulates(store: MemoryStore, cold) -> None:
-    """摘要应滚动增量并入（参照④），而非覆盖。"""
-    store.remember_turn("therapist", "我最近失眠", "…", turn_index=1)
-    store.remember_turn("therapist", "今天去看了医生", "…", turn_index=2)
-    summary = cold.get_summary("therapist")
-    assert summary is not None
-    assert summary.scope_end == 2
-    assert "失眠" in summary.content and "看了医生" in summary.content
 
 
 def test_remember_turn_then_recall(store: MemoryStore) -> None:
@@ -69,7 +56,7 @@ def test_remember_turn_isolated_by_companion(store: MemoryStore, cold) -> None:
 
 
 def test_remember_turn_plain_text() -> None:
-    """无事实可抽取的普通闲聊：仍写入温层与摘要，但不产生事实。"""
+    """无事实可抽取的普通闲聊：仍写入情景记忆，但不产生事实。"""
     import tempfile
     from pathlib import Path
 
@@ -78,7 +65,6 @@ def test_remember_turn_plain_text() -> None:
     stats = store.remember_turn("therapist", "嗯嗯好的", "…", turn_index=1)
     assert stats["facts"] == 0
     assert stats["memory"] == 1
-    assert stats["summary"] == 1
 
 
 def test_remember_turn_survives_warm_failure(cold) -> None:

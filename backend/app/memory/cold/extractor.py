@@ -1,7 +1,7 @@
-"""回复后事件驱动抽取（设计参照③④）。
+"""回复后事件驱动抽取（设计参照③）。
 
 时机：**一轮回复完成后**触发（非定时全量重扫，参照③）。
-产出：结构化事实（写入冷层）+ 一行摘要（滚动增量并入，参照④）。
+产出：结构化事实（写入冷层）。
 
 本模块提供：
 - TurnExtractor        抽取器抽象
@@ -27,7 +27,6 @@ class ExtractionResult:
     """一轮对话的抽取结果。"""
 
     facts: list[Fact] = field(default_factory=list)
-    summary_line: str = ""      # 本轮摘要（滚动并入冷层摘要）
     keywords: list[str] = field(default_factory=list)
 
 
@@ -87,11 +86,6 @@ class RuleBasedExtractor(TurnExtractor):
                 return word
         return None
 
-    def _first_sentence(self, text: str) -> str:
-        """取首个短句（摘要行用）。"""
-        parts = re.split(r"[。！？；\n]", text.strip())
-        return next((p.strip() for p in parts if p.strip()), "")
-
     def extract(
         self,
         user_text: str,
@@ -136,12 +130,8 @@ class RuleBasedExtractor(TurnExtractor):
                     )
                 )
 
-        first = self._first_sentence(user_text)
-        summary_line = f"{subject}提到：{first[:40]}" if first else ""
-
         return ExtractionResult(
             facts=facts,
-            summary_line=summary_line,
             keywords=[f.object for f in facts],
         )
 

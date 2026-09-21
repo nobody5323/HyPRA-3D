@@ -34,9 +34,8 @@ class ChatState(TypedDict, total=False):
     worldbook_skipped: list[WorldBookEntry]
     worldbook_text: str
     memory_context: MemoryContext | None
-    warm_lines: list[str]        # 温层召回文本行
-    fact_lines: list[str]        # 冷层事实文本行
-    summary_text: str            # 冷层摘要
+    warm_lines: list[str]        # 情景记忆召回文本行
+    fact_lines: list[str]        # 语义记忆（事实）文本行
     system_prompt: str
     messages: list[dict[str, str]]
 

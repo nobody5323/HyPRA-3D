@@ -2,7 +2,7 @@
 
 设计参照①的固定组装顺序与优先级（高 → 低）：
 
-    人设 > 世界书命中 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口 > 本次输入
+    人设 > 世界书命中 > 向量召回 > 结构化事实 > 滚动窗口 > 本次输入
 
 预算策略（两级）：
 1. 层内预算：世界书块、记忆块、历史窗口各自独立预算，超出即截断；
@@ -24,7 +24,6 @@ LAYER_PERSONA = "persona"        # 角色人设（必留）
 LAYER_WORLDBOOK = "worldbook"    # 世界书命中
 LAYER_WARM = "warm_recall"       # 温层向量召回
 LAYER_FACTS = "cold_facts"       # 冷层结构化事实
-LAYER_SUMMARY = "summary"        # 冷层摘要
 LAYER_HISTORY = "history"        # 滚动窗口（可裁最旧）
 LAYER_USER = "user_input"        # 本次输入（必留）
 LAYER_STYLE = "style"            # 表达风格（M5，放 system 末尾：越靠近输入影响越强）
@@ -36,10 +35,10 @@ MEMORY_SECTION = "记忆回忆"
 
 # ---- 默认预算 ----
 DEFAULT_WORLDBOOK_BUDGET = 400
-DEFAULT_MEMORY_BUDGET = 300
-DEFAULT_HISTORY_BUDGET = 800
-DEFAULT_TOTAL_BUDGET = 2000
-DEFAULT_STYLE_BUDGET = 500     # 风格块预算（含示例对话）
+DEFAULT_MEMORY_BUDGET = 400
+DEFAULT_HISTORY_BUDGET = 700
+DEFAULT_TOTAL_BUDGET = 4000
+DEFAULT_STYLE_BUDGET = 400     # 风格块预算（含示例对话）
 
 # 层优先级（数字越大越重要，裁剪时从最小开始）
 _LAYER_PRIORITY = {
@@ -49,18 +48,17 @@ _LAYER_PRIORITY = {
     LAYER_WORLDBOOK: 80,
     LAYER_WARM: 60,
     LAYER_FACTS: 55,
-    LAYER_SUMMARY: 50,
     LAYER_HISTORY: 20,
 }
 
 
 def _render_memory_block(layers: dict[str, "PromptLayer"]) -> str:
-    """渲染记忆块（相关回忆 > 已知事实 > 会话摘要，参照①）。
+    """渲染记忆块（相关回忆 > 已知事实）。
 
     唯一实现：BuiltPrompt.memory_block 与 build() 均调用本函数，避免不一致。
     """
     parts: list[str] = []
-    for key in (LAYER_WARM, LAYER_FACTS, LAYER_SUMMARY):
+    for key in (LAYER_WARM, LAYER_FACTS):
         layer = layers.get(key)
         if layer is not None and not layer.empty:
             parts.append(f"{layer.title}\n{layer.body}")
@@ -173,7 +171,6 @@ class PromptManager:
         worldbook_text: str = "",
         warm_lines: list[str] | None = None,
         fact_lines: list[str] | None = None,
-        summary_text: str = "",
         history: list[ChatTurn] | None = None,
         style_text: str = "",
         examples: list[tuple[str, str]] | None = None,
@@ -206,7 +203,6 @@ class PromptManager:
         wb_body, wb_cut = self._fit_text(worldbook_text, self.worldbook_budget)
         warm_lines, warm_cut = self._fit_lines(list(warm_lines or []), self.memory_budget)
         fact_lines, fact_cut = self._fit_lines(list(fact_lines or []), self.memory_budget)
-        summary_text, summary_cut = self._fit_text(summary_text, self.memory_budget // 2)
         history, history_cut = self._fit_history(history, self.history_budget)
         style_text, style_cut = self._fit_text(style_text, self.style_budget)
 
@@ -228,10 +224,6 @@ class PromptManager:
                 key=LAYER_FACTS, title="已知事实：",
                 body="\n".join(f"- {x}" for x in fact_lines),
                 priority=_LAYER_PRIORITY[LAYER_FACTS], truncated=fact_cut,
-            ),
-            LAYER_SUMMARY: PromptLayer(
-                key=LAYER_SUMMARY, title="会话摘要：", body=summary_text,
-                priority=_LAYER_PRIORITY[LAYER_SUMMARY], truncated=summary_cut,
             ),
             LAYER_HISTORY: PromptLayer(
                 key=LAYER_HISTORY, title="对话历史",
@@ -264,7 +256,7 @@ class PromptManager:
             layers[LAYER_HISTORY].tokens = sum(estimate_tokens(t.text) for t in history)
             layers[LAYER_HISTORY].truncated = True
         # 2b) 再按优先级从低到高裁剪（摘要 → 事实 → 召回 → 世界书 → 风格）
-        for key in (LAYER_SUMMARY, LAYER_FACTS, LAYER_WARM, LAYER_WORLDBOOK, LAYER_STYLE):
+        for key in (LAYER_FACTS, LAYER_WARM, LAYER_WORLDBOOK, LAYER_STYLE):
             if _total() <= self.total_budget:
                 break
             layer = layers[key]

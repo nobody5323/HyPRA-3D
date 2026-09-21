@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from app.memory.cold.extractor import RuleBasedExtractor, TurnExtractor
-from app.memory.cold.models import Fact, Summary
+from app.memory.cold.models import Fact
 from app.memory.cold.store import ColdMemoryStore
 from app.memory.warm.base import MemoryRecord, SearchResult, WarmMemoryStore
 from app.memory.warm.decay import combined_score
@@ -41,14 +41,12 @@ class MemoryContext:
 
     facts: list[Fact] = field(default_factory=list)
     memories: list[SearchResult] = field(default_factory=list)
-    summary: Summary | None = None
     warnings: list[str] = field(default_factory=list)
 
     @property
     def empty(self) -> bool:
-        """三层皆无有效内容。"""
-        has_summary = bool(self.summary and self.summary.content.strip())
-        return not (self.facts or self.memories or has_summary)
+        """各层皆无有效内容。"""
+        return not (self.facts or self.memories)
 
 
 @dataclass
@@ -114,7 +112,6 @@ class MemoryStore:
         warnings: list[str] = []
         memories: list[SearchResult] = []
         facts: list[Fact] = []
-        summary: Summary | None = None
 
         # ① 情景记忆混合召回（BM25 + 向量 → RRF → 时间衰减）
         try:
@@ -122,18 +119,12 @@ class MemoryStore:
         except Exception as exc:  # 存储不可用不应阻断对话
             warnings.append(f"情景记忆召回失败（已降级）：{exc}")
 
-        # ② 冷层事实 + ③ 摘要
+        # ② 冷层事实（SQL 已按 importance 排序，此处再排为防御性兜底）
         try:
             facts = self.cold.list_facts(companion_id, limit=self.fact_limit)
-            # importance 优先，其次按时间新近
             facts.sort(key=lambda f: (f.importance, f.created_at), reverse=True)
         except Exception as exc:
-            warnings.append(f"冷层事实读取失败（已降级）：{exc}")
-
-        try:
-            summary = self.cold.get_summary(companion_id)
-        except Exception as exc:
-            warnings.append(f"冷层摘要读取失败（已降级）：{exc}")
+            warnings.append(f"事实读取失败（已降级）：{exc}")
 
         # ④ 情绪加权（参照⑤）
         if emotion:
@@ -143,7 +134,6 @@ class MemoryStore:
         return MemoryContext(
             facts=facts,
             memories=memories,
-            summary=summary,
             warnings=warnings,
         )
 
@@ -285,9 +275,9 @@ class MemoryStore:
             emotion: 本轮情绪标签（英文）；写入事实的 emotion_tag 与向量的
                 metadata，供后续按情绪加权召回（参照⑤）。
 
-        返回写入统计（facts / memory / summary），异常降级不阻断。
+        返回写入统计（facts / memory），异常降级不阻断。
         """
-        stats = {"facts": 0, "memory": 0, "summary": 0}
+        stats = {"facts": 0, "memory": 0}
 
         # ① 事件驱动抽取（结构化事实 + 摘要行）
         try:
@@ -323,13 +313,5 @@ class MemoryStore:
             stats["memory"] = 1
         except Exception:
             pass
-
-        # ④ 冷层：摘要滚动增量并入（设计参照④）
-        if result is not None and result.summary_line:
-            try:
-                self.cold.append_summary(companion_id, turn_index, result.summary_line)
-                stats["summary"] = 1
-            except Exception:
-                pass
 
         return stats

@@ -7,7 +7,7 @@
 
 from abc import ABC, abstractmethod
 
-from app.memory.cold.models import Fact, FactStatus, FactType, Summary
+from app.memory.cold.models import Fact, FactStatus, FactType
 
 
 class ColdMemoryStore(ABC):
@@ -51,16 +51,3 @@ class ColdMemoryStore(ABC):
     @abstractmethod
     def delete_fact(self, companion_id: str, fact_id: str) -> bool:
         """删除一条事实（误抽取纠正用）。"""
-
-    @abstractmethod
-    def get_summary(self, companion_id: str) -> Summary | None:
-        """取该陪伴对象的当前摘要（无则 None）。"""
-
-    @abstractmethod
-    def append_summary(
-        self,
-        companion_id: str,
-        scope_end: int,
-        new_content: str,
-    ) -> Summary:
-        """增量并入摘要：把新内容追加到既有摘要尾部，推进 scope_end。"""

@@ -48,7 +48,7 @@ class Settings(BaseSettings):
     memory_top_k: int = 3           # 情景记忆（温层）召回条数
     # 各记忆层共用的层内 token 预算（PromptManager 按层分别应用，
     # 而非整个记忆块的总额度）
-    memory_layer_budget: int = 300
+    memory_layer_budget: int = 400
     # 时间衰减：权重 = 0.5 ** (年龄天数 / 半衰期天数)；指数控制衰减强度
     # （0=不衰减，1=标准半衰期，>1 更强地让位于近期记忆）
     memory_half_life_days: float = 30.0
@@ -64,11 +64,11 @@ class Settings(BaseSettings):
     memory_min_similarity: float = 0.0
     memory_extractor: str = "rule"  # 回复后抽取器：rule（无 key）| llm（待接入）
 
-    # ---- PromptManager 预算（M3 分层组装）----
+    # ---- PromptManager 预算（分层组装）----
     worldbook_budget: int = 400       # 世界书注入块预算
-    prompt_history_budget: int = 800  # 滚动窗口预算
-    prompt_total_budget: int = 2000   # 提示词总量预算（超出按优先级裁剪）
-    prompt_style_budget: int = 500    # 表达风格块预算（含示例对话）
+    prompt_history_budget: int = 700  # 滚动窗口预算
+    prompt_total_budget: int = 4000   # 提示词总量预算（超出按优先级裁剪）
+    prompt_style_budget: int = 400    # 表达风格块预算（含示例对话）
 
     # ---- 文风预设（M5 风格系统）----
     # 与人设正交：人设管「是谁」，文风管「怎么说话」

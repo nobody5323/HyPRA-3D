@@ -187,7 +187,7 @@ type ChatResponse = {
              confidence: number; facial_expression: string; source: string };
   speak: { ssml: string; display_text: string; voice: string;
            ka_action: string; tone: string; intensity: number };
-  memory_counts: { memories: number; facts: number; summary: number };
+  memory_counts: { memories: number; facts: number };
   style: { style_id: string; style_name: string; examples: number; sampling: object };
   worldbook_hits: string[];
   warnings: string[];

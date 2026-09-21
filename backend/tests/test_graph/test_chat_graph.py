@@ -80,12 +80,11 @@ def test_memory_recall_empty_initially(nodes: ChatNodes) -> None:
     out = nodes.memory_recall(_state())
     assert out["warm_lines"] == []
     assert out["fact_lines"] == []
-    assert out["summary_text"] == ""
 
 
 def test_assemble_prompt_fixed_order(nodes: ChatNodes) -> None:
     state = {**_state(), "persona_text": "人设", "worldbook_text": "世界书内容",
-             "warm_lines": ["回忆"], "fact_lines": ["事实"], "summary_text": "摘要"}
+             "warm_lines": ["回忆"], "fact_lines": ["事实"]}
     out = nodes.assemble_prompt(state)
     prompt = out["system_prompt"]
     assert prompt.index("[角色人设]") < prompt.index("[场景补充]") < prompt.index("[记忆回忆]")
@@ -103,9 +102,8 @@ def test_generate_reply_uses_llm(nodes: ChatNodes) -> None:
 
 def test_write_memory_writes_layers(nodes: ChatNodes, memory: MemoryStore) -> None:
     out = nodes.write_memory({**_state(), "reply": "我听着呢"})
-    assert out["writes"]["memory"] == 1      # 温层入库
-    assert out["writes"]["facts"] >= 1       # 冷层事实（失眠）
-    assert out["writes"]["summary"] == 1     # 冷层摘要
+    assert out["writes"]["memory"] == 1      # 情景记忆入库
+    assert out["writes"]["facts"] >= 1       # 语义记忆（事实）
     assert memory.cold.list_facts(PERSONA_ID)
 
 
@@ -132,7 +130,6 @@ def test_graph_end_to_end(graph) -> None:
     assert result["messages"][-1] == {"role": "user", "content": "我最近总是失眠"}
     # 写入链路生效
     assert result["writes"]["memory"] == 1
-    assert result["writes"]["summary"] == 1
     # 状态变量进入人设
     assert "小林" in result["persona_text"]
 

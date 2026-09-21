@@ -17,16 +17,17 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 - **世界书（World Info）动态注入**：JSON/YAML 条目 + **关键词 / 正则 / 语义向量三通道**触发
   （任一命中即注入），按 priority 与 token 预算拼入上下文；向量通道复用 embedding 做语义匹配，
   能捕捉关键词覆盖不到的同义改写（如「翻来覆去睡不着」→「深夜倾听模式」条目）。
-- **混合记忆引擎（热 / 温 / 冷三层）**：
-  - 热层：上下文滚动窗口，保留最近 N 轮；
-  - 温层：Qdrant 向量库（本地 Docker / 云双模式），对话 Embedding 入库与语义检索（含时间衰减）——
-    即**记忆侧的 RAG 检索（Memory RAG）**；
-  - 冷层：SQLite/JSON 结构化事实表，回复后由 LLM 自动抽取并更新关键事实（时间、地点、人物关系）+ 增量摘要。
+- **混合记忆引擎（认知心理学四层框架）**——设计见 [`docs/memory-architecture.md`](docs/memory-architecture.md)：
+  - **工作记忆**：上下文滚动窗口，逐字保留最近 N 轮；
+  - **情景记忆**：Qdrant 向量库（本地 Docker / 云双模式），每轮对话向量入库；召回走
+    **BM25 + 稠密向量 → RRF 融合**的混合检索，再施加时间衰减与情绪加权（即 **Memory RAG**）；
+  - **语义记忆**：SQLite 结构化事实表（三元组 + importance + 生命周期状态），
+    回复后事件驱动抽取写入，按重要性常驻。
 - **RAG + 推理编排**：LangChain / LangGraph 组装。检索分**两条线**，共用同一套 embedding 与 prompt
   注入层，最终按固定优先级拼装：
-  **① 记忆检索（Memory RAG）**＝温层语义召回 + 冷层结构化事实 + 摘要；
+  **① 记忆检索（Memory RAG）**＝混合检索（BM25 + 向量 + RRF）的情景回忆 + 语义事实；
   **② 知识检索（World Info）**＝世界书三通道触发。
-  注入顺序：世界书触发 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口。
+  注入顺序：世界书触发 > 情景记忆 > 语义事实 > 滚动窗口。
 - **全链路 function calling + MCP 工具生态**：LLM 回复强制走 **function calling** 结构化输出
   **8 类情绪标签**（正则仅作兜底）→ 情绪驱动 **3D 表情映射**与**记忆召回加权**；并通过
   **MCP 协议**把外部 MCP server 的工具接入 Agent 行动层（`mcp__<服务器>__<工具>`），

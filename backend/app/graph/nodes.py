@@ -130,7 +130,6 @@ class ChatNodes:
             "memory_context": ctx,
             "warm_lines": [r.record.text for r in ctx.memories],
             "fact_lines": [f.summary_text for f in ctx.facts],
-            "summary_text": ctx.summary.content if ctx.summary else "",
             "warnings": self._merge_warnings(state, list(ctx.warnings)),
         }
 
@@ -181,7 +180,6 @@ class ChatNodes:
             worldbook_text=state.get("worldbook_text", ""),
             warm_lines=state.get("warm_lines", []),
             fact_lines=state.get("fact_lines", []),
-            summary_text=state.get("summary_text", ""),
             history=state.get("history", []),
             style_text=style_text,
             examples=examples,

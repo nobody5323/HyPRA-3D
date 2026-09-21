@@ -61,12 +61,6 @@ def test_dedup_same_turn(extractor: RuleBasedExtractor) -> None:
     assert len(keys) == len(set(keys))
 
 
-def test_summary_line_generated(extractor: RuleBasedExtractor) -> None:
-    result = extractor.extract("最近工作压力很大。也不知道怎么办。", "…", companion_id="c")
-    assert result.summary_line
-    assert "最近工作压力很大" in result.summary_line
-
-
 def test_no_fact_for_plain_text(extractor: RuleBasedExtractor) -> None:
     result = extractor.extract("嗯嗯，好的", "…", companion_id="c")
     assert result.facts == []

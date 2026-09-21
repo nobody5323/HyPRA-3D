@@ -67,14 +67,3 @@ class Fact(BaseModel):
         if self.occurred_at:
             parts.append(f"（{self.occurred_at}）")
         return " ".join(p for p in parts if p)
-
-
-class Summary(BaseModel):
-    """冷层摘要：每个陪伴对象一份，滚动增量合并（设计参照④）。"""
-
-    companion_id: str = Field(description="陪伴对象标识")
-    scope_start: int = Field(default=0, description="覆盖的消息序号起点")
-    scope_end: int = Field(default=0, description="覆盖的消息序号终点（含）")
-    content: str = Field(default="", description="摘要正文")
-    created_at: datetime = Field(default_factory=datetime.now, description="更新时间")
-    updated_at: datetime = Field(default_factory=datetime.now, description="最近并入时间")

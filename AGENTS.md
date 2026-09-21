@@ -28,10 +28,12 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
           state_vars/   #   动态状态变量定义（如 {{current_mood}}）
         worldbook/      # 世界书条目：JSON/YAML + 关键词/正则/向量触发规则
         memory/
-          hot/          # 上下文滚动窗口（最近 N 轮）
-          warm/         # WarmMemoryStore 接口 + Qdrant 实现（Embedding 入库/语义检索）
-          cold/         # 结构化事实表：回复后 LLM 抽取 时间/地点/人物关系 + 摘要
-        rag/            # 检索拼接与优先级逻辑（PromptManager）
+          hot/          # 工作记忆：上下文滚动窗口（最近 N 轮）
+          warm/         # 情景记忆：WarmMemoryStore 接口 + Qdrant/内存实现
+          cold/         # 语义记忆：结构化事实表（三元组 + importance + 生命周期状态）
+        rag/
+          retrieval/    # 混合检索底座：分词 / BM25 / RRF 融合（情景记忆与知识库共用）
+          prompt_manager.py  # 分层注入与 token 预算（PromptManager）
         llm/            # 云端模型 API 封装
         tools/          # function calling 工具（情绪/记忆写入/TTS…）
       mcp/            # MCP Client：外部 MCP server 的工具接入 Agent 行动层
@@ -45,18 +47,22 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
 
 - 提示词工程：System Prompt 分层（全局人设 / 状态变量 / 对话格式），预设内容与代码分离；
   世界书条目用 JSON/YAML，触发机制为关键词 + 正则 + 向量三重触发，注入位置分档并可配 token 预算。
-- 记忆体系：热 / 温 / 冷三层；借鉴 SillyTavern 及其插件生态（官方 Data Bank/Summarize/
-  Chat-vectorization 与社区记忆插件）的写入-召回机制。**具体实现按
+- 记忆体系：**按认知心理学分四层**——工作记忆（滚动窗口）/ 情景记忆（对话片段的混合检索
+  召回）/ 语义记忆（结构化事实常驻）/ 个人记忆（用户上传的私人语料）。
+  设计见 `docs/memory-architecture.md`。借鉴 SillyTavern 及其插件生态（Data Bank /
+  Chat-vectorization 与社区记忆插件）的写入-召回机制，**具体实现按
   `docs/sillytavern-memory-design-reference.md` 的「8 条可落地参照」执行**，
-  要点：回复后事件驱动抽取、摘要滚动增量合并、激活词/情绪加权、向量召回时间衰减、
-  每「陪伴对象」独立 Qdrant collection 实现记忆隔离。
+  要点：回复后事件驱动抽取、混合检索（BM25 + 稠密向量 → RRF 融合）、激活词/情绪加权、
+  时间衰减、每「陪伴对象」独立 Qdrant collection 实现记忆隔离。
+  注意：本项目**未采用** SillyTavern 的 Summarize 扩展机制——评估后认为其职责与
+  工作记忆窗口重叠，改由情景记忆与语义记忆分担（理由见架构文档附录 P7）。
 - **function calling + MCP 双主线（核心技术）**：LLM 回复强制走 function calling 结构化输出
   8 类情绪标签（正则仅作兜底），情绪标签同时驱动 3D 表情映射与记忆召回加权；并通过 MCP 协议
   把外部 MCP server 的工具桥接进 Agent 行动层（命名 `mcp__<服务器>__<工具>`），
   模型可自主调用外部能力「办事」（连接失败不影响启动，协议与传输由官方 SDK 负责）；
   文本 + 情绪标签 → SSML（含 KA 动作）→ 魔珐星云具身驱动 SDK 实时渲染，
   并实现渲染无关的驱动时间轴，可降级接入任意 3D/2D 模型。
-- RAG 拼接优先级（PromptManager 固定顺序）：世界书触发 > 向量召回 > 结构化事实 > 摘要 > 滚动窗口。
+- RAG 拼接优先级（PromptManager 固定顺序）：世界书触发 > 情景记忆召回 > 语义事实 > 滚动窗口。
 
 ## 5. 开发与验证
 

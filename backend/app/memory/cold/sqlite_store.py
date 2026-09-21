@@ -1,7 +1,7 @@
 """冷层 SQLite 实现。
 
 存储文件：backend/data/memory.db（已在 gitignore 排除；路径可经构造参数覆盖）。
-隔离：按 companion_id 分表 —— facts_{companion} / summary_{companion}（参照⑧）。
+隔离：按 companion_id 分表 —— facts_{companion}（参照⑧）。
 安全：companion_id 先做白名单校验，再规范化为合法表名（连字符等 → 下划线），
       防止表名注入与 SQL 语法错误。
 """
@@ -17,7 +17,6 @@ from app.memory.cold.models import (
     Fact,
     FactStatus,
     FactType,
-    Summary,
 )
 from app.memory.cold.store import ColdMemoryStore
 
@@ -35,10 +34,6 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 def _table(companion_id: str) -> str:
     """按陪伴对象生成事实表名（非法字符规范化为下划线）。"""
     return f"facts_{_normalize(companion_id)}"
-
-
-def _summary_table(companion_id: str) -> str:
-    return f"summary_{_normalize(companion_id)}"
 
 
 def _normalize(companion_id: str) -> str:
@@ -97,18 +92,6 @@ class SqliteColdStore(ColdMemoryStore):
                 emotion_tag   TEXT,
                 keywords      TEXT NOT NULL DEFAULT '[]',
                 source        TEXT NOT NULL DEFAULT ''
-            )
-            """
-        )
-        conn.execute(
-            f"""
-            CREATE TABLE IF NOT EXISTS {_summary_table(companion_id)} (
-                companion_id TEXT PRIMARY KEY,
-                scope_start   INTEGER NOT NULL DEFAULT 0,
-                scope_end     INTEGER NOT NULL DEFAULT 0,
-                content       TEXT NOT NULL DEFAULT '',
-                created_at    TEXT NOT NULL,
-                updated_at    TEXT NOT NULL
             )
             """
         )
@@ -252,64 +235,3 @@ class SqliteColdStore(ColdMemoryStore):
             )
             affected = cur.rowcount
         return affected > 0
-
-    # ---------- 摘要操作 ----------
-
-    def get_summary(self, companion_id: str) -> Summary | None:
-        companion_id = _valid_companion_id(companion_id)
-        with self._connect() as conn:
-            self._ensure_table(conn, companion_id)
-            row = conn.execute(
-                f"SELECT * FROM {_summary_table(companion_id)} WHERE companion_id = ?",
-                (companion_id,),
-            ).fetchone()
-        if row is None:
-            return None
-        return Summary(
-            companion_id=row["companion_id"],
-            scope_start=row["scope_start"],
-            scope_end=row["scope_end"],
-            content=row["content"],
-            created_at=self._parse_ts(row["created_at"]),
-            updated_at=self._parse_ts(row["updated_at"]),
-        )
-
-    def append_summary(
-        self,
-        companion_id: str,
-        scope_end: int,
-        new_content: str,
-    ) -> Summary:
-        companion_id = _valid_companion_id(companion_id)
-        now = datetime.now()
-        with self._connect() as conn:
-            self._ensure_table(conn, companion_id)
-            existing = conn.execute(
-                f"SELECT * FROM {_summary_table(companion_id)} WHERE companion_id = ?",
-                (companion_id,),
-            ).fetchone()
-            if existing is None:
-                merged = new_content
-                scope_start = 0
-                created_ts = self._ts(now)
-            else:
-                # 增量并入：既有内容 + 分隔 + 新内容
-                merged = f"{existing['content']}\n{new_content}" if existing["content"] else new_content
-                scope_start = existing["scope_start"]
-                created_ts = existing["created_at"]  # 首次创建时间不变
-            conn.execute(
-                f"""
-                INSERT OR REPLACE INTO {_summary_table(companion_id)} (
-                    companion_id, scope_start, scope_end, content, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    companion_id,
-                    scope_start,
-                    scope_end,
-                    merged,
-                    created_ts,
-                    self._ts(now),
-                ),
-            )
-        return self.get_summary(companion_id)  # type: ignore[return-value]

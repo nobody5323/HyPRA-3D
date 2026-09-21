@@ -4,7 +4,6 @@ from app.rag.prompt_manager import (
     LAYER_FACTS,
     LAYER_HISTORY,
     LAYER_PERSONA,
-    LAYER_SUMMARY,
     LAYER_USER,
     LAYER_WARM,
     LAYER_WORLDBOOK,
@@ -30,7 +29,6 @@ def test_layers_order_in_system_prompt() -> None:
         worldbook_text="[深夜倾听模式]\n深夜时苏澄声音更轻。",
         warm_lines=["小林说过怕打雷"],
         fact_lines=["小林 喜欢 下雨天"],
-        summary_text="小林近期压力较大。",
     )
     prompt = result.system_prompt
     assert prompt.index("[角色人设]") < prompt.index("[场景补充]")
@@ -38,17 +36,16 @@ def test_layers_order_in_system_prompt() -> None:
 
 
 def test_memory_block_inner_order() -> None:
-    """记忆块内部顺序：相关回忆 → 已知事实 → 会话摘要（参照①）。"""
+    """记忆块内部顺序：相关回忆 → 已知事实。"""
     pm = PromptManager()
     result = pm.build(
         persona_text="人设",
         user_input="聊聊",
         warm_lines=["回忆 A"],
         fact_lines=["事实 B"],
-        summary_text="摘要 C",
     )
     block = result.memory_block
-    assert block.index("相关回忆") < block.index("已知事实") < block.index("会话摘要")
+    assert block.index("相关回忆") < block.index("已知事实")
 
 
 def test_messages_structure() -> None:
@@ -90,15 +87,14 @@ def test_history_budget_keeps_recent() -> None:
 
 
 def test_total_budget_drops_low_priority_first() -> None:
-    """总量不足时：先弃摘要，保人设与本次输入。"""
+    """总量不足时：先弃最低优先层（事实），保人设与本次输入。"""
     pm = PromptManager(total_budget=60)
     result = pm.build(
         persona_text="你是苏澄，温柔的心理倾听师。",
         user_input="我想聊聊",
-        summary_text="很长的一段摘要" * 30,
         fact_lines=["事实" * 40],
     )
-    assert LAYER_SUMMARY in result.dropped_layers
+    assert LAYER_FACTS in result.dropped_layers
     # 必留层仍在
     assert result.layers[LAYER_PERSONA].body
     assert result.layers[LAYER_USER].body == "我想聊聊"

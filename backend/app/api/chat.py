@@ -269,10 +269,10 @@ class ChatResponse(BaseModel):
     worldbook_hits: list[str] = Field(description="命中的世界书条目 id")
     skipped: list[str] = Field(description="因预算被跳过的条目 id")
     memory_counts: dict[str, int] = Field(
-        default_factory=dict, description="本轮召回的记忆数：memories/facts/summary"
+        default_factory=dict, description="本轮召回的记忆数：memories/facts"
     )
     remembered: dict[str, int] = Field(
-        default_factory=dict, description="本轮写入的记忆数：facts/memory/summary"
+        default_factory=dict, description="本轮写入的记忆数：facts/memory"
     )
     warnings: list[str]
     estimated_tokens: int
@@ -375,7 +375,6 @@ def chat(req: ChatRequest) -> ChatResponse:
         {
             "memories": len(ctx.memories),
             "facts": len(ctx.facts),
-            "summary": 1 if (ctx.summary and ctx.summary.content.strip()) else 0,
         }
         if ctx is not None
         else {}

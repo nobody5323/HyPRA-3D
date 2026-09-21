@@ -111,4 +111,3 @@ def test_real_llm_full_graph_flow() -> None:
 
     assert result["reply"].strip()
     assert result["writes"]["memory"] == 1
-    assert result["writes"]["summary"] == 1
