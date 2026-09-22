@@ -104,9 +104,11 @@ async function sendMessage(userText, sessionId) {
 |---|---|---|
 | 1 | **`speak` 不能连续调用** | 上一次 `is_end=true` 之后，需先用 `interactive_idle` 切换状态再播下一句 |
 | 2 | **流式播报** | 对接大模型流式输出时：首句 `is_start=true`，末句 `is_end=true`，中间都为 `false`；建议首句积攒一小段内容再发 |
-| 3 | **讲话状态** | `onVoiceStateChange` 会抛出 `voice_start` / `voice_end`，用它判断数字人是否在说话 |
+| 3 | **讲话状态（坑）** | 回调签名为 `onVoiceStateChange(state, duration, client_speak_id)`，但 **`state` 的实际取值是 `"start"` / `"end"`**——官方文档用事件名 `voice_start` / `voice_end` 描述，回调里并不是这两个字符串（源码 `EventDispatcher.dispatch` 的 `voice_state_change` 分支可证）。**只认 `"voice_end"` 会让事件永远匹配不上**，每段播报都只能靠计时兜底收尾，表现为**最后一句被切断、说不完**。建议两种写法都接受 |
 | 4 | **资源释放** | 页面卸载前调用 `avatar.destroy()` |
-| 5 | **状态** | 支持 `idle` / `interactive_idle` / `speak` 等状态切换 |
+| 5 | **状态** | SDK 公开方法为**小写无下划线**：`idle()` / `listen()` / `interactiveidle()` / `interrupt()`（早期文档示例写的 `setState('interactive_idle')` 与实现不符，已纠正） |
+| 6 | **等待超时（坑）** | 若用计时兜底等播报结束，**别按 250ms/字估算**：中文 TTS 稍慢就被误判超时。本项目用 **400ms/字、最小 12s、上限 90s**，并在 `voice_end` 之后留 **600ms 尾音缓冲**再切回待机——`idle()` 内部会 `interrupt` 渲染调度，切太早会削掉尾音 |
+| 7 | **流式 vs 多次独立播报** | `speak(ssml, is_start, is_end)` 中 **`is_start=true` 会先 `renderScheduler.interrupt()`**（源码可证）。因此「多次独立播报」必须靠 `interactive_idle` 过渡；官方推荐的多段流式是「首段 `true,false` → 中间 `false,false` → 末段 `false,true`」的**同一次播报** |
 
 ### 连续多轮对话的正确写法
 
@@ -114,11 +116,37 @@ async function sendMessage(userText, sessionId) {
 async function speakSafely(ssml) {
   // 若正在播报，先打断并回到交互待机，避免 speak 连续调用
   avatar.interrupt?.();
-  avatar.setState?.('interactive_idle');
-  await waitVoiceEnd(avatar);      // 监听 onVoiceStateChange → voice_end
+  avatar.interactiveidle?.();       // 官方公开方法（不是 setState('interactive_idle')）
+  // 状态切换经 WebSocket 下发，需留出时间（实测 400ms 左右）；
+  // 否则紧接着的 speak 会被 SDK 静默丢弃
+  await new Promise((resolve) => setTimeout(resolve, 400));
   avatar.speak(ssml, true, true);
+  await waitVoiceEnd(avatar);       // 监听 onVoiceStateChange → voice_end
+}
+
+// 分段播报（赛题表达层的「流式分段」）：
+// 逐段调用 speak，每段之间同样需要 interactive_idle 过渡。
+// 分段 SSML 由后端 /media/speak（streaming=true）的 ssml_chunks 给出，前端不自拼标签。
+async function speakChunks(ssmlChunks) {
+  for (let i = 0; i < ssmlChunks.length; i += 1) {
+    if (i > 0) {
+      avatar.interactiveidle?.();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+    avatar.speak(ssmlChunks[i], true, true);
+    await waitVoiceEnd(avatar);
+  }
 }
 ```
+
+> 真实实现见 `frontend/hooks/useAvatar.ts` 的 `speakOnce` / `speak` / `speakChunks`
+> （含 voice_end 丢失时的超时兜底，避免 await 永久挂起）。
+
+### 断线重连
+
+`onError` 不应直接永久降级：网络抖动或服务重启后应能自恢复。
+本项目按**指数退避**重建 SDK（1s → 2s → 4s，最多 3 次），
+期间界面显示 `reconnecting` 状态；重连用尽才降级为浏览器原生 TTS。
 
 ---
 
@@ -126,10 +154,17 @@ async function speakSafely(ssml) {
 
 | 接口 | 用途 | 说明 |
 |---|---|---|
-| `POST /chat` | 完整对话 | 返回 `reply` / `emotion` / `speak` / `memory_counts` / `style` |
-| `POST /media/speak` | 仅生成播报指令 | 参数：`text` / `emotion` / `intensity` / `voice` / `streaming` |
+| `POST /chat` | 完整对话 | 返回 `reply` / `emotion` / `speak` / `memory_counts` / `knowledge_hits` / `memory_scheduled` / `worldbook_hits` / `style` / `preset` / `tools_used` |
+| `GET /chat/presets` | 模型适配档清单 | 界面「模型预设」选择器数据源 |
+| `GET /chat/personas` | 人设（陪伴对象）清单 | 人设 id 即记忆命名空间 `companion_id` |
+| `GET /chat/styles` | 文风清单 | 界面「文风」选择器数据源 |
+| `POST /media/speak` | 仅生成播报指令 | 参数：`text` / `emotion` / `intensity` / `voice` / `streaming` / `max_chars`；`streaming=true` 时额外返回 `chunks`（纯文本分段）与 `ssml_chunks`（逐段 SSML） |
 | `POST /media/avatar` | **扩展路径**：口型/表情/动作**时间轴** | 供自研渲染使用（见下节） |
 | `GET /media/audio/{file}` | 音频文件 | 仅扩展路径产生音频时有值 |
+| `POST /knowledge/upload` | 上传个人记忆 | multipart：`file` 或 `text`；query `companion_id`；form `title` / `force`；判重命中返回 409 + 判重详情 |
+| `GET /knowledge/list` | 个人记忆文档列表 | query `companion_id` |
+| `DELETE /knowledge/{doc_id}` | 删除文档及其分块 | query `companion_id` |
+| `GET /health` | 健康检查 + 行动层状态 | 含 `mcp` 各服务器连接状态与工具清单 |
 
 ---
 

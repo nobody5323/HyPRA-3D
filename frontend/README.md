@@ -14,6 +14,28 @@ npm run dev                       # http://localhost:3000
 > 需要先启动后端（`cd backend && ../.venv/Scripts/python -m uvicorn app.main:app --reload`），
 > 页面顶部会显示「后端在线 / 未连接」。
 
+## 开发校验
+
+```bash
+npm run typecheck   # tsc --noEmit：与后端接口契约对齐
+npm run lint        # ESLint（--max-warnings=0，当前 0 warning）
+npm test            # vitest：接口契约 / 分段播报 / 退避重连
+npm run build       # Next.js 生产构建（standalone）
+```
+
+测试只覆盖**容易安静出错、且靠手测难以复现**的三处（均有回归用例）：
+
+| 文件 | 覆盖内容 |
+|---|---|
+| `tests/api.test.ts` | 后端用 `{}` 表示「无情绪/无播报」时的规范化、409 判重结构体、multipart 与 query 形状 |
+| `tests/useAvatar.browser.test.ts` | 分段播报：逐段播完 / **被打断后不再出声** / 卸载后停止 / 整段抢占分段 |
+| `tests/useAvatar.xmov.test.ts` | 断线退避重连：1s→2s→4s、**init 期间报错但随后连上不得重建**、重连用尽后降级；**语音事件消费**（SDK 回的 `"start"`/`"end"` 必须被识别，不得退化成靠超时收尾） |
+| `tests/session-store.test.ts` | 本地会话指针与草稿：按陪伴对象分开、`null` = 新建对话、localStorage 不可用时静默降级 |
+
+> 用例设计说明：分段播报的两条路径都用**可控替身**（`speechSynthesis` / `window.XmovAvatar`）
+> 精确控制「一段念完」与「被取消」两种时序——真实环境里这两者都表现为「回到 idle」，
+> 用状态判断就会错，因此必须用测试锁住。
+
 ## Docker 部署（评审一键，推荐）
 
 前端已并入项目根目录的 `docker compose`（详见 [docs/deployment.md](../docs/deployment.md)）：
@@ -44,7 +66,7 @@ cd .. && docker compose up -d --build   # 拉起 qdrant + backend + frontend
 | **具身状态机** | 待机 / 聆听中 / 思考中 / 说话中（`hooks/useAvatar.ts`） |
 | 字幕 | 消费后端 `speak.display_text`（已剥离 SSML 标签） |
 | 情绪视觉 | 情绪标签 + 强度条 + 数字人光效随情绪变化 |
-| 文风切换 | 4 种预设（A/B 对比演示用） |
+| 文风切换 | 清单来自后端 `GET /chat/styles`（预设与代码分离，新增 YAML 无需改前端） |
 | Agent 工具提示 | 展示「✓ 已记录这次心情」等办事结果 |
 | 播报 | 浏览器原生 TTS（零依赖，F1 占位实现） |
 | 打断 | 客户端即时打断（中止请求 + 停止播报） |
@@ -81,8 +103,23 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 
 ## 待实现
 
-- 弱网断线重连演示（当前 SDK 加载失败会超时降级，但不做自动重连）
 - 多模态 Widget 展示（图片 / 字幕组件）
+- 演示脚本逐幕对齐（见 [docs/frontend-plan.md](../docs/frontend-plan.md) 的 F7）
+
+### F4：后端接口对接（个人记忆、人设、可见性、分段播报）
+
+| 能力 | 说明 |
+|---|---|
+| **个人记忆（知识库）** | `KnowledgePanel`：上传文件 / 粘贴文本 → 解析清洗 → MinHash 判重（命中弹「覆盖 / 取消」）→ 分块入库；列表与删除（内联二次确认）。接口：`POST /knowledge/upload`、`GET /knowledge/list`、`DELETE /knowledge/{doc_id}` |
+| **陪伴对象切换** | `PersonaSwitcher`：清单来自 `GET /chat/personas`；人设 id 即记忆命名空间（`companion_id`），切换时开新会话并清空界面记忆计数。仅 ≥2 项时渲染 |
+| **记忆与行动可见性** | `MemoryTrace`：本轮命中世界书条目 / 个人记忆条数 / 情景记忆 / 语义事实 / 是否已后台写入 / 提示词 token；`AgentBadge`：MCP 服务器连接数、工具数、工具清单与错误 |
+| **分段播报（流式分段）** | 对话区「分段播报」开关（**默认关闭**）：走 `POST /media/speak`（`streaming=true`）取 `chunks`（纯文本，字幕随段推进）与 `ssml_chunks`（逐段 SSML，由后端生成，前端不自拼标签），段间自动 `interactiveidle` 过渡 |
+| **断线退避重连** | `avatar.onError` → 指数退避重建 SDK（1s → 2s → 4s，最多 3 次），期间 `stage = "reconnecting"`；重连用尽才降级为浏览器语音 |
+| **契约层** | `lib/types.ts` 与后端响应一一对应；`lib/api.ts` 统一 `ApiError(status, detail)`（知识库 409 需读结构体），并把后端的空对象 `{}` 规范化为 `null` |
+| **会话持久化** | 消息唯一来源是**后端**（会话落 SQLite）；前端只在 localStorage 记「当前会话 id」（`lib/session-store.ts`），刷新后拉历史恢复。`SessionList` 提供历史列表 / 新建对话 / 打开历史会话；输入草稿也按角色本地保留 |
+
+> 分段播报的段间停顿属于真机听感问题（SDK 状态切换经 WebSocket 下发），
+> 因此默认关闭、由界面开关控制，不动已验证的整段播报主路径。
 
 ## 🔑 密钥配置（两种方式）
 
@@ -99,7 +136,11 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 
 ```
 app/          页面（layout / page / globals.css）
-components/   AvatarStage（数字人舞台）/ ChatPanel / SubtitleBar / MoodIndicator / StyleSwitcher
-hooks/        useAvatar（具身状态机 + 播报）/ useChatSession（对话编排）
-lib/          api.ts（后端接口）/ types.ts（类型定义）
+components/   AvatarStage（数字人舞台）/ ChatPanel / SubtitleBar / MoodIndicator
+              MemoryTrace（本轮记忆与行动）/ KnowledgePanel（个人记忆）/ AgentBadge（行动层）
+              PersonaSwitcher / StyleSwitcher / PresetSwitcher / AvatarSettings / StateBadge
+hooks/        useAvatar（具身状态机 + 播报 + 分段播报 + 退避重连）
+              useChatSession（对话编排 + 人设切换）
+              useAvatarCredentials（凭证来源）
+lib/          api.ts（后端接口）/ types.ts（契约类型）/ persona.ts / avatar-config.ts
 ```

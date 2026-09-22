@@ -9,7 +9,12 @@
 """
 
 from app.llm.base import ChatMessage, LLMProvider
-from app.llm.profiles import ModelProfile, ResolvedSampling, resolve_sampling
+from app.llm.profiles import (
+    ModelProfile,
+    ResolvedSampling,
+    resolve_profile,
+    resolve_sampling,
+)
 from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider
@@ -17,6 +22,13 @@ from app.prompts.assemble import assemble_worldbook_section
 from app.prompts.persona.loader import PersonaPreset
 from app.prompts.renderer import render_persona_prompt
 from app.prompts.sanitize import sanitize_reply
+from app.prompts.st_compat import (
+    MARKER_WORLD_INFO_AFTER,
+    MARKER_WORLD_INFO_BEFORE,
+    ParsedPreset,
+    STRenderContext,
+    render_st_preset,
+)
 from app.prompts.style.loader import check_persona_compatibility
 from app.prompts.style.models import StylePreset
 from app.rag.prompt_manager import PromptManager
@@ -32,6 +44,17 @@ from app.tools.registry import ToolRegistry
 from app.worldbook.matcher import match_entries
 from app.worldbook.models import WorldBookEntry
 from app.worldbook.vector_index import WorldBookVectorIndex
+
+#: 能真正透传给 provider 的采样参数。
+#: ST 的 top_k / top_a / min_p / repetition_penalty / seed / n 只保存与展示，
+#: 不透传（国内托管 API 多会拒绝未知参数），界面需标注“当前模型忽略”（契约 §4）。
+_APPLICABLE_SAMPLING = (
+    "temperature",
+    "top_p",
+    "frequency_penalty",
+    "presence_penalty",
+    "max_tokens",
+)
 
 
 class ChatNodes:
@@ -166,10 +189,14 @@ class ChatNodes:
     # ---------- ④ 分层组装 ----------
 
     def _resolve_style(self, state: ChatState) -> tuple[StylePreset | None, list[str]]:
-        """解析本轮风格预设（state.style_id 优先，缺省用默认档），并做一致性校验。"""
-        if not self.styles:
-            return None, []
+        """解析本轮风格预设（state.style_id 优先，缺省用默认档），并做一致性校验。
+
+        `style_id` 取 `"none"` 表示**显式关闭文风层**：文风预设的 sampling 优先级最高，
+        会覆盖预设作者的采样意图；酒馆用户的“纯预设体验”需要能关掉它。
+        """
         style_id = state.get("style_id") or self.default_style_id
+        if style_id == "none" or not self.styles:
+            return None, []
         style = self.styles.get(style_id)
         if style is None:
             return None, [f"未知风格预设「{style_id}」，已跳过风格层"]
@@ -186,7 +213,18 @@ class ChatNodes:
         return "\n\n".join(parts)
 
     def assemble_prompt(self, state: ChatState) -> dict:
-        """用 PromptManager 按固定顺序与预算组装完整提示（含风格层与示例对话）。"""
+        """组装完整提示（两条路径，契约文档 §12）。
+
+        - 本轮选定了导入的 ST 预设 → `_assemble_with_st_preset`（复现 ST 组装语义）；
+        - 否则走内置分层路径 → `_assemble_builtin`（PromptManager 固定顺序 + 预算）。
+        """
+        st_preset: ParsedPreset | None = state.get("st_preset")
+        if st_preset is not None:
+            return self._assemble_with_st_preset(state, st_preset)
+        return self._assemble_builtin(state)
+
+    def _assemble_builtin(self, state: ChatState) -> dict:
+        """内置分层组装：PromptManager 固定顺序 + 层内/总量预算。"""
         style, style_warnings = self._resolve_style(state)
         style_text = ""
         examples: list[tuple[str, str]] = []
@@ -223,6 +261,174 @@ class ChatNodes:
             "example_count": built.example_count,
             "warnings": self._merge_warnings(state, [*style_warnings, *built.warnings]),
         }
+
+    # ---------- ④′ ST 预设组装（导入的酒馆预设）----------
+
+    def _assemble_with_st_preset(self, state: ChatState, st_preset: ParsedPreset) -> dict:
+        """按导入的 ST 预设组装 messages（契约文档 §5–§7）。
+
+        与内置路径的差异：
+        - 消息顺序由预设的 `prompt_order` 决定（含 In-Chat 深度注入）；
+        - HyPRA 的记忆层不再占固定分层，而是作为**扩展注入**参与同层合并（§7）；
+        - 文风层追加到 jailbreak 槽位之后，不覆盖预设正文（§6.6）；
+        - 预设正文里的 ST 宏按会话解析（§11）。
+        """
+        style, style_warnings = self._resolve_style(state)
+        style_text = ""
+        examples: list[tuple[str, str]] = []
+
+        sampling = self._resolve_sampling_with_st(state, style, st_preset)
+
+        if style is not None:
+            style_text = self._compose_style_text(style, sampling.style_hint)
+            examples = [(e.user, e.assistant) for e in style.examples]
+
+        persona = self.presets.get(state["persona_id"])
+        worldbook_before, worldbook_after, worldbook_warnings = self._split_worldbook(
+            state, st_preset
+        )
+
+        context = STRenderContext(
+            persona_text=state.get("persona_text", ""),
+            persona_personality=self._persona_personality(persona),
+            worldbook_before=worldbook_before,
+            worldbook_after=worldbook_after,
+            history=list(state.get("history", [])),
+            examples=examples,
+            user_input=state.get("user_input", ""),
+            memory_text=self._compose_memory_text(state),
+            style_text=style_text,
+            persona_name=persona.name if persona is not None else "",
+            user_name=state.get("user_name", ""),
+            macro_variables=dict(state.get("macro_variables", {})),
+        )
+        rendered = render_st_preset(st_preset, context)
+
+        return {
+            "system_prompt": rendered.system_prompt,
+            "messages": rendered.messages,
+            "sampling": sampling,
+            "style_id": style.id if style else "",
+            "example_count": rendered.example_count,
+            # 宏变量回传：{{setvar::}} 的结果由路由层落库（按会话隔离）
+            "macro_variables": dict(context.macro_variables),
+            "st_preset_meta": {
+                "source_format": st_preset.source_format,
+                "used_markers": rendered.used_markers,
+                "empty_markers": rendered.empty_markers,
+                "unresolved_macros": rendered.unresolved_macros,
+                "in_chat_count": rendered.in_chat_count,
+            },
+            "warnings": self._merge_warnings(
+                state, [*style_warnings, *worldbook_warnings, *rendered.warnings]
+            ),
+        }
+
+    def _resolve_sampling_with_st(
+        self,
+        state: ChatState,
+        style: StylePreset | None,
+        st_preset: ParsedPreset,
+    ) -> ResolvedSampling:
+        """三级采样合并（契约文档 §10）：内置档 → ST 预设 → 文风预设。
+
+        不能直接用 `resolve_sampling`：它只支持「内置 ⊕ 文风」两级，
+        会把文风参数压在 ST 预设之前，与约定的优先级不符。
+        """
+        profile = resolve_profile(
+            self.model_name, self.profiles, state.get("preset_id") or None
+        )
+        merged: dict = {}
+        sources: dict[str, str] = {}
+
+        def _apply(values: dict, source: str) -> None:
+            for key, value in values.items():
+                if value is not None:
+                    merged[key] = value
+                    sources[key] = source
+
+        _apply(profile.sampling, profile.id)
+        _apply(
+            {
+                key: value
+                for key, value in st_preset.preset.sampling.items()
+                if key in _APPLICABLE_SAMPLING
+            },
+            f"st:{state.get('st_preset_id', '')}",
+        )
+        _apply(style.sampling if style is not None else {}, "style")
+
+        # 思考开关：内置档打底；ST 预设给了 show_thoughts 时以它为准
+        thinking = st_preset.preset.enable_thinking
+        if thinking is None:
+            thinking = profile.enable_thinking
+
+        return ResolvedSampling(
+            temperature=float(merged.get("temperature", 0.8)),
+            max_tokens=int(merged["max_tokens"]) if merged.get("max_tokens") else None,
+            top_p=merged.get("top_p"),
+            frequency_penalty=merged.get("frequency_penalty"),
+            presence_penalty=merged.get("presence_penalty"),
+            style_hint=profile.style_hint.strip(),
+            profile_id=profile.id,
+            profile_label=profile.display_name,
+            enable_thinking=thinking,
+            sources=sources,
+        )
+
+    @staticmethod
+    def _persona_personality(persona: PersonaPreset | None) -> str:
+        """人设的「性格」段：本项目 persona 没有独立字段，用定位 + 标签近似。"""
+        if persona is None:
+            return ""
+        parts = [persona.title, "、".join(persona.tags)]
+        return "；".join(part for part in parts if part)
+
+    @staticmethod
+    def _compose_memory_text(state: ChatState) -> str:
+        """把 HyPRA 的记忆层拼成一块文本，作为 ST 扩展注入的内容（契约文档 §7）。
+
+        分节口径与内置路径的 PromptManager 保持一致（`[参考资料]` / `[记忆回忆]`），
+        避免同一份记忆在两条路径下呈现不同结构。
+        """
+        sections: list[str] = []
+
+        knowledge = [line for line in state.get("knowledge_lines", []) if line.strip()]
+        if knowledge:
+            sections.append("[参考资料]\n" + "\n".join(f"- {line}" for line in knowledge))
+
+        memory_parts: list[str] = []
+        warm = [line for line in state.get("warm_lines", []) if line.strip()]
+        if warm:
+            memory_parts.append("相关回忆：\n" + "\n".join(f"- {line}" for line in warm))
+        facts = [line for line in state.get("fact_lines", []) if line.strip()]
+        if facts:
+            memory_parts.append("已知事实：\n" + "\n".join(f"- {line}" for line in facts))
+        if memory_parts:
+            sections.append("[记忆回忆]\n" + "\n".join(memory_parts))
+
+        return "\n\n".join(sections)
+
+    @staticmethod
+    def _split_worldbook(
+        state: ChatState, st_preset: ParsedPreset
+    ) -> tuple[str, str, list[str]]:
+        """世界书内容注入哪个 marker 槽位（返回 before/after 与告警）。
+
+        本项目只有一个世界书块，而 ST 分为 before/after 两个槽位，故择一注入：
+        优先 `worldInfoBefore`（ST 默认顺序里它承载情境补充）；该条目未启用时
+        改投 `worldInfoAfter`；两者都未启用则告警——否则世界书会被静默丢掉。
+        """
+        text = state.get("worldbook_text", "")
+        if not text.strip():
+            return "", "", []
+
+        enabled = {entry.identifier for entry in st_preset.order if entry.enabled}
+        if MARKER_WORLD_INFO_BEFORE in enabled:
+            return text, "", []
+        if MARKER_WORLD_INFO_AFTER in enabled:
+            return "", text, []
+        return "", "", ["预设未启用世界书槽位，本轮世界书命中未注入"]
 
     # ---------- ⑤ LLM 生成 ----------
 

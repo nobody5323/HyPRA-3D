@@ -1,7 +1,8 @@
 name: CI
 
 # 赛题「开源规范 - 工程规范」要求：提交记录规范 + CI/CD 配置。
-# 本工作流在每次 push / PR 时运行后端测试（全离线，无需任何密钥）。
+# 本工作流在每次 push / PR 时运行后端测试与前端类型检查/构建
+# （全离线，无需任何密钥）。
 
 on:
   push:
@@ -43,6 +44,45 @@ jobs:
           s = Settings(_env_file=None)
           print('默认配置加载正常：provider=%s / vector=%s / avatar=%s' % (s.llm_provider, s.warm_backend, s.digital_human_provider))
           "
+
+  frontend-checks:
+    name: 前端检查（lint / 类型 / 测试 / 构建）
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 安装依赖
+        working-directory: frontend
+        run: npm ci
+
+      - name: 类型检查（与后端接口契约对齐）
+        working-directory: frontend
+        run: npm run typecheck
+
+      - name: Lint（ESLint，0 warning 门槛）
+        working-directory: frontend
+        run: npm run lint
+
+      - name: 单元测试（vitest：接口契约 / 分段播报 / 退避重连）
+        working-directory: frontend
+        run: npm test
+
+      # 与 Dockerfile 内的构建同路径：保证 standalone 产物在 CI 即可验证可生成
+      - name: 构建（Next.js standalone）
+        working-directory: frontend
+        run: npm run build
+        env:
+          # 构建期内联的公开变量，这里用与实际部署一致的占位值
+          NEXT_PUBLIC_API_BASE: http://localhost:8000
 
   repo-hygiene:
     name: 仓库卫生（密钥与产物不入库）

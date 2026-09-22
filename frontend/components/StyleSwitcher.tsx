@@ -3,7 +3,8 @@
 /**
  * 文风切换器（A/B 对比演示用）。
  *
- * 四种预设与后端 `backend/app/prompts/style/presets/` 一一对应，
+ * 清单来自后端 `GET /chat/styles`（对应 app/prompts/style/presets/*.yaml）——
+ * 预设内容与代码分离，新增或调整 YAML 不需要改前端代码。
  * 切换后下一轮对话即生效（前端仅传 style_id）。
  *
  * 无障碍要点（审计 A2 / A10）：
@@ -12,26 +13,39 @@
  * - 键盘完整可用：Enter/Space 打开、↑↓ 移动、Home/End 首尾、Esc 关闭并归还焦点、点击外部关闭。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
-const STYLES: { id: string; name: string; hint: string }[] = [
-  { id: "modern-conversational", name: "现代口语", hint: "像熟人聊天，短句 + 语气词" },
-  { id: "brief-direct", name: "简短利落", hint: "一两句，留白" },
-  { id: "classical-elegant", name: "古典雅致", hint: "含蓄，带一点文气" },
-  { id: "gentle-elaborate", name: "细腻长句", hint: "有动作神态描写" },
-];
+import type { StyleCatalog, StyleOption } from "@/lib/types";
 
 const TRIGGER_ID = "style-trigger";
 const LIST_ID = "style-listbox";
 
+/**
+ * 关闭文风层的特殊值（后端约定，见 docs/st-preset-compat.md §10）。
+ *
+ * 为什么需要它：文风预设的 sampling 优先级**最高**，会盖过酒馆预设作者自己的
+ * 采样意图；导入酒馆预设的用户要“纯预设体验”时必须能关掉这一层。
+ */
+const NONE_ID = "none";
+const NONE_OPTION: StyleOption = {
+  id: NONE_ID,
+  name: "不使用文风",
+  description: "完全按预设 / 人设原文组装，不追加任何文风约束",
+  tags: [],
+  examples: 0,
+};
+
 export function StyleSwitcher({
   value,
   onChange,
+  catalog,
   disabled,
 }: {
   value: string;
   onChange: (id: string) => void;
+  /** 后端文风清单；null = 尚未取回（不渲染，避免空选择器） */
+  catalog: StyleCatalog | null;
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -41,10 +55,14 @@ export function StyleSwitcher({
   /** 仅当用键盘打开时才把焦点移入选项（鼠标点击时焦点留在触发器上更自然） */
   const focusOnOpenRef = useRef(false);
 
-  const current = STYLES.find((style) => style.id === value) ?? STYLES[0];
+  const styles = useMemo(
+    () => [NONE_OPTION, ...(catalog?.styles ?? [])],
+    [catalog],
+  );
+  const current = styles.find((style) => style.id === value) ?? styles[0] ?? null;
   const selectedIndex = Math.max(
     0,
-    STYLES.findIndex((style) => style.id === value),
+    styles.findIndex((style) => style.id === value),
   );
 
   /** 在选项之间移动焦点（首尾循环） */
@@ -73,8 +91,9 @@ export function StyleSwitcher({
     if (!open || !focusOnOpenRef.current) return;
     focusOnOpenRef.current = false;
     focusOption(selectedIndex);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+    // selectedIndex 入依赖是安全的：focusOnOpenRef 守卫保证「打开瞬间只跑一次」，
+    // 之后即使 selectedIndex 变化也会在守卫处提前返回
+  }, [open, selectedIndex]);
 
   // Esc 关闭（归还焦点）+ 点击外部关闭
   useEffect(() => {
@@ -99,7 +118,6 @@ export function StyleSwitcher({
       document.removeEventListener("keydown", handleKeyDown);
       document.removeEventListener("pointerdown", handlePointerDown);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
   function handleTriggerKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
@@ -125,12 +143,16 @@ export function StyleSwitcher({
       focusOption(0);
     } else if (event.key === "End") {
       event.preventDefault();
-      focusOption(STYLES.length - 1);
+      focusOption(styles.length - 1);
     } else if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      select(STYLES[index].id);
+      select(styles[index].id);
     }
   }
+
+  // 后端未连接时不渲染（离线时对话本身也跑不起来，留着选择器只会误导；
+  // `current` 的判空同时负责类型收窄）
+  if (!catalog || !current) return null;
 
   return (
     <section aria-labelledby="style-title" className="relative">
@@ -165,7 +187,7 @@ export function StyleSwitcher({
           aria-labelledby={TRIGGER_ID}
           className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-line bg-surface-panel shadow-lg"
         >
-          {STYLES.map((style, index) => {
+          {styles.map((style, index) => {
             const selected = style.id === value;
             return (
               <li
@@ -183,7 +205,7 @@ export function StyleSwitcher({
                 }`}
               >
                 <span className="block">{style.name}</span>
-                <span className="block text-xs text-ink-soft">{style.hint}</span>
+                <span className="block text-xs text-ink-soft">{style.description}</span>
               </li>
             );
           })}

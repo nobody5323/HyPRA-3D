@@ -8,6 +8,7 @@ from typing import TypedDict
 
 from app.llm.profiles import ResolvedSampling
 from app.memory.store import MemoryContext
+from app.prompts.st_compat import ParsedPreset
 from app.session.context import ChatTurn
 from app.tools.emotion import EmotionResult
 from app.worldbook.models import WorldBookEntry
@@ -27,6 +28,9 @@ class ChatState(TypedDict, total=False):
     state_vars: dict[str, str]   # 动态状态变量（current_mood 等）
     style_id: str                # 本轮文风预设 id（缺省用默认档）
     preset_id: str               # 本轮模型预设 id（空串 = 按模型名自动匹配）
+    st_preset_id: str            # 本轮选用的 ST 预设 id（空串 = 走内置分层路径）
+    st_preset: ParsedPreset | None   # 已解析（含覆盖层）的 ST 预设
+    macro_variables: dict[str, str]  # 会话级宏变量（ST 的 {{setvar::}} 存储）
 
     # ---- 中间产物（各节点填充）----
     persona_text: str
@@ -39,6 +43,7 @@ class ChatState(TypedDict, total=False):
     fact_lines: list[str]        # 语义记忆（事实）文本行
     system_prompt: str
     messages: list[dict[str, str]]
+    st_preset_meta: dict         # ST 组装元信息（markers / 未识别宏 / In-Chat 注入数）
 
     # ---- 输出 ----
     reply: str

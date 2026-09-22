@@ -79,12 +79,13 @@ def extract_sampling(data: dict) -> tuple[dict, list[str], dict]:
 def infer_enable_thinking(reasoning: dict) -> bool | None:
     """由推理档位推断本项目的 enable_thinking。
 
-    SillyTavern 的 show_thoughts=false（不展示思考）≈ 我们希望关闭思考链以提速；
+    ST 的 `show_thoughts`（Request model reasoning）= “向模型请求思考过程”，
+    与本项目 `enable_thinking` **同向**（都表达“是否让模型思考”）；
     无相关字段时返回 None（不传该参数，兼容普通模型）。
     """
     if "show_thoughts" not in reasoning:
         return None
-    return not bool(reasoning["show_thoughts"])
+    return bool(reasoning["show_thoughts"])
 
 
 def extract_slots(data: dict) -> list[dict]:

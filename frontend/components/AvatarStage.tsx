@@ -63,7 +63,9 @@ export function AvatarStage({
   const color = MOOD_COLOR[emotion?.label ?? "neutral"] ?? MOOD_COLOR.neutral;
   const intensity = emotion?.intensity ?? 0.5;
   const isXmov = provider === "xmov";
-  const loading = isXmov && (stage === "loading-sdk" || stage === "initializing");
+  // 断线退避重连期间也用同一套「加载中」渲染（状态文本可读且会被播报）
+  const loading =
+    isXmov && (stage === "loading-sdk" || stage === "initializing" || stage === "reconnecting");
 
   // 容器语义：加载中保持普通容器（内部是可读的状态文本 + live region），
   // 就绪后标记为图片型区域（内部只有 SDK canvas，无文本可读）——审计 A6。

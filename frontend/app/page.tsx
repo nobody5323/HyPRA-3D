@@ -15,18 +15,29 @@
 
 import { useEffect, useRef, useState } from "react";
 
+import { AgentBadge } from "@/components/AgentBadge";
 import { AvatarSettings } from "@/components/AvatarSettings";
 import { AvatarStage } from "@/components/AvatarStage";
 import { ChatPanel } from "@/components/ChatPanel";
+import { KnowledgePanel } from "@/components/KnowledgePanel";
+import { MemoryTrace } from "@/components/MemoryTrace";
 import { MoodIndicator } from "@/components/MoodIndicator";
+import { PersonaSwitcher } from "@/components/PersonaSwitcher";
 import { PresetSwitcher } from "@/components/PresetSwitcher";
+import { SessionList } from "@/components/SessionList";
+import { StPresetPanel } from "@/components/StPresetPanel";
 import { StyleSwitcher } from "@/components/StyleSwitcher";
 import { SubtitleBar } from "@/components/SubtitleBar";
 import { useBrowserAvatar, useXmovAvatar } from "@/hooks/useAvatar";
 import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
 import { useChatSession } from "@/hooks/useChatSession";
-import { getHealth, getPresets } from "@/lib/api";
-import type { PresetCatalog } from "@/lib/types";
+import { getHealth, getPersonas, getPresets, getStyles } from "@/lib/api";
+import type {
+  McpServerStatus,
+  PersonaCatalog,
+  PresetCatalog,
+  StyleCatalog,
+} from "@/lib/types";
 
 const CONTAINER_ID = "avatar-container"; // 用于 DOM 元素的 id
 const CONTAINER_SELECTOR = "#avatar-container"; // 传给 SDK 的 CSS 选择器（兜底）
@@ -41,8 +52,14 @@ export default function HomePage() {
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
+  /** MCP 外部服务连接状态（行动层可见性证据） */
+  const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
   /** 模型预设档清单（选择器数据源；后端不可用时为 null，选择器不渲染） */
   const [presetCatalog, setPresetCatalog] = useState<PresetCatalog | null>(null);
+  /** 文风清单（来自 GET /chat/styles，替代原先前端硬编码的 4 项） */
+  const [styleCatalog, setStyleCatalog] = useState<StyleCatalog | null>(null);
+  /** 人设（陪伴对象）清单 */
+  const [personaCatalog, setPersonaCatalog] = useState<PersonaCatalog | null>(null);
   /** SDK 降级标记（记录是哪一版凭证降级的，凭证变化后自动失效） */
   const [degraded, setDegraded] = useState<{ version: string; reason: string } | null>(null);
 
@@ -67,6 +84,34 @@ export default function HomePage() {
 
   const session = useChatSession(avatar);
 
+  /**
+   * 「用户是否手动选过」标记：手动选过之后，后端声明的缺省值不再覆盖用户选择。
+   */
+  const personaTouchedRef = useRef(false);
+  const styleTouchedRef = useRef(false);
+  /** 当前值的最新引用（供只跑一次的回调读取，避免把它写进 effect 依赖） */
+  const personaIdRef = useRef(session.personaId);
+  personaIdRef.current = session.personaId;
+  const styleIdRef = useRef(session.styleId);
+  styleIdRef.current = session.styleId;
+
+  /**
+   * 当前角色名（页面标题用）。
+   * 后端离线时回退到项目默认角色名——这只是首屏兜底，不是硬编码来源：
+   * 一旦 GET /chat/personas 返回，名字就跟着服务端预设文件走。
+   */
+  const personaName =
+    personaCatalog?.personas.find((persona) => persona.id === session.personaId)?.name ?? "苏澄";
+
+  /**
+   * 取出引用稳定的两个 setter。
+   *
+   * `session` 对每次渲染都是新对象（hook 直接返回字面量），直接作为 effect 依赖
+   * 会让 effect 每次渲染都重跑（→ 请求风暴）；而这两个函数分别来自 `useState`
+   * 与 `useCallback([], ...)`，引用是稳定的，单独抽出即可表达真实依赖。
+   */
+  const { setStyleId: changeStyle, setPersonaId: changePersona } = session;
+
   // 后端健康检查：未就绪时每 5s 重试（后端稍后启动也能自动恢复），卸载时停止
   useEffect(() => {
     let cancelled = false;
@@ -77,6 +122,7 @@ export default function HomePage() {
       if (cancelled) return;
       const online = health?.status === "ok";
       setBackendOnline(online);
+      setMcpServers(health?.mcp ?? []);
       if (!online) timer = setTimeout(check, 5000);
     };
     check();
@@ -87,11 +133,42 @@ export default function HomePage() {
     };
   }, []);
 
-  // 模型预设档：后端就绪后拉取一次（列表由服务端配置决定，不会频繁变）
+  // 界面选项清单：后端就绪后各拉一次（清单由服务端预设文件决定，不会频繁变）
   useEffect(() => {
     if (backendOnline !== true) return;
     getPresets().then((catalog) => setPresetCatalog(catalog));
-  }, [backendOnline]);
+    void getStyles().then((catalog) => {
+      setStyleCatalog(catalog);
+      if (!catalog || styleTouchedRef.current) return;
+      // 缺省文风以后端配置为准（前端不再硬编码）；
+      // 配置与清单不一致时退回清单首项——否则会把后端不认识的 style_id 发出去
+      const declared = catalog.default_style_id;
+      const candidate = catalog.styles.some((style) => style.id === declared)
+        ? declared
+        : catalog.styles[0]?.id;
+      if (candidate && candidate !== styleIdRef.current) {
+        changeStyle(candidate);
+      }
+    });
+  }, [backendOnline, changeStyle]);
+
+  // 人设清单：同时把后端声明的缺省人设同步进来（替代前端硬编码常量）
+  useEffect(() => {
+    if (backendOnline !== true) return;
+    void getPersonas().then((catalog) => {
+      setPersonaCatalog(catalog);
+      if (!catalog || personaTouchedRef.current) return;
+      // 同文风：后端声明的缺省人设若不在清单里（配置写错），退回清单首项——
+      // 否则会把一个后端不认识的人设 id 发出去，对话直接 404
+      const declared = catalog.default_persona_id;
+      const candidate = catalog.personas.some((persona) => persona.id === declared)
+        ? declared
+        : catalog.personas[0]?.id;
+      if (candidate && candidate !== personaIdRef.current) {
+        changePersona(candidate);
+      }
+    });
+  }, [backendOnline, changePersona]);
 
   return (
     <main className="mx-auto flex min-h-[100dvh] max-w-6xl flex-col gap-4 p-4 lg:h-[100dvh] lg:min-h-0 lg:overflow-hidden lg:p-6">
@@ -100,7 +177,7 @@ export default function HomePage() {
           <h1 className="text-balance text-lg font-semibold text-ink">
             <span translate="no">HyPRA</span> ·{" "}
             <span translate="no" className="text-accent-text">
-              苏澄
+              {personaName}
             </span>
           </h1>
           <p className="text-xs text-ink-soft">
@@ -108,7 +185,7 @@ export default function HomePage() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="relative flex items-center gap-2">
           <span
             className={`rounded-full px-3 py-1 text-xs ring-1 ${
               provider === "xmov"
@@ -130,6 +207,7 @@ export default function HomePage() {
           >
             {backendOnline === null ? "检测后端…" : backendOnline ? "后端在线" : "后端未连接"}
           </span>
+          <AgentBadge servers={mcpServers} />
           <button
             type="button"
             aria-expanded={settingsOpen}
@@ -192,16 +270,42 @@ export default function HomePage() {
           )}
         </div>
 
-        {/* 右：情绪 + 文风 + 对话 */}
-        <div className="flex min-h-0 flex-col gap-3">
-          <MoodIndicator
-            emotion={session.emotion}
-            tone={session.tone}
+        {/* 右：情绪 + 文风 + 个人记忆 + 对话（内容超高时列内滚动，不裁剪） */}
+        <div className="flex min-h-0 flex-col gap-3 lg:overflow-y-auto">
+          <MoodIndicator emotion={session.emotion} tone={session.tone} />
+          <MemoryTrace
             memoryCounts={session.memoryCounts}
+            knowledgeHits={session.knowledgeHits}
+            worldbookHits={session.worldbookHits}
+            memoryScheduled={session.memoryScheduled}
+            estimatedTokens={session.estimatedTokens}
+            warnings={session.warnings}
+          />
+          <PersonaSwitcher
+            value={session.personaId}
+            onChange={(id) => {
+              personaTouchedRef.current = true;
+              session.setPersonaId(id);
+            }}
+            catalog={personaCatalog}
+            disabled={session.busy}
+          />
+          <SessionList
+            personaId={session.personaId}
+            activeSessionId={session.sessionId}
+            version={session.sessionVersion}
+            disabled={session.busy}
+            onSelect={(id) => void session.openSession(id)}
+            onNew={session.newSession}
+            onRemove={session.removeSession}
           />
           <StyleSwitcher
             value={session.styleId}
-            onChange={session.setStyleId}
+            onChange={(id) => {
+              styleTouchedRef.current = true;
+              session.setStyleId(id);
+            }}
+            catalog={styleCatalog}
             disabled={session.busy}
           />
           <PresetSwitcher
@@ -210,7 +314,15 @@ export default function HomePage() {
             catalog={presetCatalog}
             disabled={session.busy}
           />
-          <div className="min-h-0 flex-1">
+          <StPresetPanel
+            value={session.stPresetId}
+            onChange={session.setStPresetId}
+            disabled={session.busy}
+            lastRun={session.stPresetMeta}
+          />
+          <KnowledgePanel companionId={session.personaId} disabled={session.busy} />
+          {/* min-h 兑底：知识库面板展开时对话区不被压到不可用高度 */}
+          <div className="min-h-[320px] flex-1">
             <ChatPanel
               messages={session.messages}
               toolsUsed={session.toolsUsed}
@@ -218,6 +330,12 @@ export default function HomePage() {
               error={session.error}
               onSend={session.send}
               onInterrupt={session.interrupt}
+              streamingSpeech={session.streamingSpeech}
+              onToggleStreaming={session.setStreamingSpeech}
+              personaId={session.personaId}
+              restoring={session.restoring}
+              historyError={session.historyError}
+              onRetryHistory={() => void session.retryHistory()}
             />
           </div>
         </div>

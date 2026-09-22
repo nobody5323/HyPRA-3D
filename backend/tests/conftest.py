@@ -23,6 +23,8 @@ from app.memory.knowledge.inmemory_store import InMemoryKnowledgeStore
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import DeterministicEmbeddingProvider
 from app.memory.warm.inmemory_store import InMemoryWarmStore
+from app.prompts.st_compat import StPresetStore
+from app.session.sqlite_repository import SqliteSessionRepository
 
 
 @pytest.fixture(autouse=True)
@@ -42,13 +44,22 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     chat_module.set_memory_store(store)
     knowledge_module.set_knowledge_store(InMemoryKnowledgeStore())
     chat_module.set_mood_store(SqliteMoodLogStore(db_path=tmp_path / "mood.db"))
+    # 会话存储：用临时 SQLite（而非默认 backend/data/memory.db），
+    # 同时让 API 测试真实覆盖持久化实现（而非内存版）
+    chat_module.set_session_repository(
+        SqliteSessionRepository(tmp_path / "sessions.db")
+    )
     chat_module.set_llm_provider(MockLLMProvider())
     media_module.set_digital_human_provider(LocalDigitalHumanProvider())
+    # ST 预设存储：指向临时目录（绝不碰 backend/data/presets，也不依赖本机状态）
+    chat_module.set_st_preset_store(StPresetStore(tmp_path / "st_presets"))
     yield store
     chat_module.set_embedding_provider(None)
     chat_module.set_memory_store(None)
     knowledge_module.set_knowledge_store(None)
     chat_module.set_mood_store(None)
+    chat_module.set_session_repository(None)
     chat_module.set_llm_provider(None)
+    chat_module.set_st_preset_store(None)
     media_module.set_digital_human_provider(None)
     set_mcp_manager(None)

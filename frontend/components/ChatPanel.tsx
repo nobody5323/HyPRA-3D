@@ -13,6 +13,7 @@ import { memo, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 
 import type { ChatMessage, ToolUsage } from "@/lib/types";
+import { readDraft, writeDraft } from "@/lib/session-store";
 
 /** 内置工具 → 用户可读提示（体现「能办事」） */
 const TOOL_LABELS: Record<string, string> = {
@@ -114,21 +115,36 @@ const MessageList = memo(function MessageList({
 /** 输入区：draft 状态内聚于此，打字只重渲染本组件（不再牵动整棵消息列表） */
 function ChatComposer({
   busy,
+  restoring,
+  personaId,
   onSend,
   onInterrupt,
 }: {
   busy: boolean;
+  /** 正在恢复历史：允许打字但不发送（否则会落到错误的会话） */
+  restoring?: boolean;
+  /** 陪伴对象 id：草稿按角色分开保存（切换角色不串草稿） */
+  personaId: string;
   onSend: (text: string) => void;
   onInterrupt: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const inputId = useId();
 
+  // 草稿本地持久化：刷新页面后未发送的内容还在。
+  // 写入放在输入事件里（而不是 useEffect）：否则挂载时「先读草稿」与
+  // 「用空串保存」两个 effect 的执行顺序会把已保存的草稿清掉。
+  useEffect(() => {
+    setDraft(readDraft(personaId));
+  }, [personaId]);
+
   function submit() {
     const text = draft.trim();
-    if (!text || busy) return;
+    // 恢复历史期间不发送：此时 sessionId 尚未就绪，发出会新建/写错会话
+    if (!text || busy || restoring) return;
     onSend(text);
     setDraft("");
+    writeDraft(personaId, "");
   }
 
   return (
@@ -142,7 +158,10 @@ function ChatComposer({
           id={inputId}
           name="message"
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
+          onChange={(event) => {
+            setDraft(event.target.value);
+            writeDraft(personaId, event.target.value);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -165,7 +184,7 @@ function ChatComposer({
           <button
             type="button"
             onClick={submit}
-            disabled={!draft.trim()}
+            disabled={!draft.trim() || restoring}
             className={`h-11 shrink-0 rounded-xl bg-accent px-4 text-sm font-medium text-ink-on transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:bg-surface-hover disabled:text-ink-faint ${FOCUS_RING}`}
           >
             发送
@@ -183,6 +202,12 @@ export function ChatPanel({
   error,
   onSend,
   onInterrupt,
+  streamingSpeech,
+  onToggleStreaming,
+  personaId,
+  restoring,
+  historyError,
+  onRetryHistory,
 }: {
   messages: ChatMessage[];
   toolsUsed: ToolUsage[];
@@ -190,6 +215,16 @@ export function ChatPanel({
   error: string | null;
   onSend: (text: string) => void;
   onInterrupt: () => void;
+  /** 分段播报开关（逐段播报；关闭时整段播报） */
+  streamingSpeech: boolean;
+  onToggleStreaming: (on: boolean) => void;
+  /** 当前陪伴对象 id（草稿按角色分开保存） */
+  personaId: string;
+  /** 正在从后端恢复历史（刷新页面 / 打开历史会话） */
+  restoring?: boolean;
+  /** 历史恢复失败的提示（非空时显示 + 提供重试） */
+  historyError?: string | null;
+  onRetryHistory?: () => void;
 }) {
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -216,12 +251,46 @@ export function ChatPanel({
         <h2 id="chat-title" className="text-sm font-medium text-ink">
           对话
         </h2>
-        <span className="tabular-nums text-xs text-ink-soft">
-          {messages.length > 0 ? `${messages.length} 条消息` : "开始聊聊吧"}
-        </span>
+        <div className="flex items-center gap-3">
+          <label className="flex items-center gap-1.5 text-xs text-ink-soft">
+            <input
+              type="checkbox"
+              checked={streamingSpeech}
+              onChange={(event) => onToggleStreaming(event.target.checked)}
+              disabled={busy}
+              title="逐段播报：首段更早出声、字幕随段推进（段间有过渡间隔）"
+              className="focus-ring accent-accent disabled:cursor-not-allowed"
+            />
+            分段播报
+          </label>
+          <span className="tabular-nums text-xs text-ink-soft">
+            {messages.length > 0 ? `${messages.length} 条消息` : "开始聊聊吧"}
+          </span>
+        </div>
       </header>
 
+      {restoring && messages.length === 0 && (
+        <p role="status" className="px-4 py-3 text-xs text-ink-soft">
+          正在恢复历史记录…
+        </p>
+      )}
       <MessageList messages={messages} toolNotes={toolNotes} busy={busy} listRef={listRef} />
+
+      {historyError && (
+        <div
+          role="alert"
+          className="mx-4 mb-2 flex flex-wrap items-center gap-2 rounded-lg bg-warning-soft px-3 py-2 text-xs text-warning-text"
+        >
+          <span className="break-words">历史记录读取失败：{historyError}</span>
+          <button
+            type="button"
+            onClick={onRetryHistory}
+            className={`rounded-md border border-warning/40 px-2 py-0.5 font-medium transition-colors hover:bg-warning/15 ${FOCUS_RING}`}
+          >
+            重试
+          </button>
+        </div>
+      )}
 
       {error && (
         <p
@@ -232,7 +301,13 @@ export function ChatPanel({
         </p>
       )}
 
-      <ChatComposer busy={busy} onSend={onSend} onInterrupt={onInterrupt} />
+      <ChatComposer
+        busy={busy}
+        restoring={restoring}
+        personaId={personaId}
+        onSend={onSend}
+        onInterrupt={onInterrupt}
+      />
     </section>
   );
 }

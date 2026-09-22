@@ -14,7 +14,7 @@ POST /chat 的完整链路由 LangGraph 节点图驱动：
 import asyncio
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
@@ -33,10 +33,13 @@ from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provid
 from app.memory.warm.factory import create_warm_store
 from app.prompts.persona.loader import load_builtin_presets
 from app.prompts.renderer import estimate_tokens
+# ST 预设的存储与路由已抽到 app/api/st_presets.py；此处导入转发，保持对外入口不变
+from app.api.st_presets import get_st_preset_store, set_st_preset_store  # noqa: F401
 from app.prompts.style.loader import load_builtin_styles
 from app.rag.prompt_manager import PromptManager
+from app.session.base import SessionStore
 from app.session.context import ChatTurn
-from app.session.repository import SessionRepository
+from app.session.factory import create_session_store
 from app.tools.builtin_tools import build_default_registry
 from app.mcp.manager import get_mcp_manager
 from app.worldbook.loader import load_builtin_entries
@@ -46,7 +49,27 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/chat", tags=["chat"])
 
 # 进程内单例（内存存储；后续里程碑替换为持久化/独立热层）
-_repository = SessionRepository()
+# 会话存储（懒加载单例；默认 SQLite，刷新页面 / 重启后端后的历史都在）
+_repository: SessionStore | None = None
+
+
+def get_session_repository() -> SessionStore:
+    """懒加载会话存储（测试可经 set_session_repository 注入）。"""
+    global _repository
+    if _repository is None:
+        settings = get_settings()
+        # session_db_path 留空则跟随冷层库文件：同库不同表，只需配一处
+        _repository = create_session_store(
+            settings.session_backend,
+            settings.session_db_path or settings.cold_db_path,
+        )
+    return _repository
+
+
+def set_session_repository(store: SessionStore | None) -> None:
+    """替换/重置会话存储（测试注入用）。"""
+    global _repository
+    _repository = store
 _presets = load_builtin_presets()
 _entries = load_builtin_entries()
 _styles = load_builtin_styles()
@@ -320,6 +343,33 @@ async def _write_memory_job(
             logger.warning("后台记忆写入失败（已忽略）：%s", exc)
 
 
+# ---------- ST 宏变量（按会话隔离的 {{setvar::}} 存储）----------
+
+#: 宏变量在会话状态变量里的前缀：与人设状态变量（如 current_mood）同表但不同名字空间
+_MACRO_VAR_PREFIX = "mv:"
+
+
+def _read_macro_variables(state_vars: dict[str, str]) -> dict[str, str]:
+    """从会话状态变量里取出宏变量（去掉前缀）。"""
+    return {
+        key[len(_MACRO_VAR_PREFIX):]: value
+        for key, value in state_vars.items()
+        if key.startswith(_MACRO_VAR_PREFIX)
+    }
+
+
+def _persist_macro_variables(
+    session_id: str, before: dict[str, str], after: dict[str, str]
+) -> None:
+    """把本轮新增/变更的宏变量落库（只写差异，避免每轮全量写）。"""
+    changed = {key: value for key, value in after.items() if before.get(key) != value}
+    if not changed:
+        return
+    repository = get_session_repository()
+    for key, value in changed.items():
+        repository.set_state_var(session_id, _MACRO_VAR_PREFIX + key, value)
+
+
 # ---------- 请求 / 响应模型 ----------
 
 
@@ -338,6 +388,13 @@ class ChatRequest(BaseModel):
     preset_id: str | None = Field(
         default=None,
         description="模型预设 id（可选，缺省按当前模型名自动匹配；见 GET /chat/presets）",
+    )
+    st_preset_id: str | None = Field(
+        default=None,
+        description=(
+            "已导入的 SillyTavern 预设 id（可选）。指定后本轮按 ST 预设定组装提示词，"
+            "与内置 preset_id 相互独立；见 GET /chat/st-presets"
+        ),
     )
 
 
@@ -362,6 +419,10 @@ class ChatResponse(BaseModel):
         default=False,
         description="本轮记忆写入已提交后台（响应时尚未落库；失败只记日志）",
     )
+    knowledge_hits: int = Field(
+        default=0,
+        description="本轮个人记忆（知识库）召回的文本行数（前端据此展示「用上了你的资料」）",
+    )
     warnings: list[str]
     estimated_tokens: int
     style: dict[str, object] = Field(
@@ -372,6 +433,13 @@ class ChatResponse(BaseModel):
         default_factory=dict,
         description=(
             "本轮模型预设（实际生效）：preset_id/preset_label/采样参数/enable_thinking"
+        ),
+    )
+    st_preset: dict[str, object] = Field(
+        default_factory=dict,
+        description=(
+            "本轮 ST 预设（若启用）：st_preset_id/st_preset_name/source_format/"
+            "unresolved_macros/used_markers/empty_markers/in_chat_count"
         ),
     )
     speak: dict[str, object] = Field(
@@ -408,6 +476,156 @@ def list_chat_presets() -> dict:
     }
 
 
+class SessionSummaryResponse(BaseModel):
+    """会话列表项（界面「历史记录」用）。"""
+
+    session_id: str
+    persona_id: str
+    title: str
+    message_count: int
+    updated_at: str
+
+
+class SessionMessage(BaseModel):
+    """一条历史消息。"""
+
+    role: str
+    text: str
+    created_at: str | None = None
+
+
+class SessionHistoryResponse(BaseModel):
+    """一次会话的历史（刷新页面后恢复界面 + 续聊用）。"""
+
+    session_id: str
+    persona_id: str
+    user_name: str
+    messages: list[SessionMessage]
+
+
+class SessionDeleteResponse(BaseModel):
+    """删除一段对话的结果。"""
+
+    session_id: str
+    removed_turns: int = Field(description="被删除的消息条数")
+
+
+@router.get("/sessions", response_model=list[SessionSummaryResponse])
+def list_chat_sessions(
+    persona_id: str | None = Query(
+        default=None, description="只看某个陪伴对象的会话（记忆与会话均按对象隔离）"
+    ),
+    limit: int = Query(default=20, ge=1, le=100, description="最多返回条数"),
+) -> list[SessionSummaryResponse]:
+    """会话列表（按最近更新倒序）。"""
+    return [
+        SessionSummaryResponse(
+            session_id=item.session_id,
+            persona_id=item.persona_id,
+            title=item.title,
+            message_count=item.message_count,
+            updated_at=item.updated_at,
+        )
+        for item in get_session_repository().list_sessions(
+            persona_id=persona_id, limit=limit
+        )
+    ]
+
+
+@router.get("/sessions/{session_id}/history", response_model=SessionHistoryResponse)
+def get_chat_session_history(session_id: str) -> SessionHistoryResponse:
+    """取一次会话的历史消息。
+
+    返回的是**原始留档**（上限 session_history_limit），不是喂给模型的
+    热层窗口——界面刷新后能恢复较长的对话，而模型上下文仍只取最近若干轮。
+    """
+    settings = get_settings()
+    repository = get_session_repository()
+    session = repository.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
+    turns = repository.list_history(session_id, limit=settings.session_history_limit)
+    return SessionHistoryResponse(
+        session_id=session.session_id,
+        persona_id=session.persona_id,
+        user_name=session.user_name,
+        messages=[
+            SessionMessage(role=turn.role, text=turn.text, created_at=turn.created_at)
+            for turn in turns
+        ],
+    )
+
+
+@router.delete("/sessions/{session_id}", response_model=SessionDeleteResponse)
+def delete_chat_session(
+    session_id: str,
+    persona_id: str = Query(..., description="陪伴对象 id（只能删属于它的会话）"),
+) -> SessionDeleteResponse:
+    """删除一段对话及其全部消息（**不可恢复**）。
+
+    要求 `persona_id` 与会话归属一致：避免误删其它陪伴对象的对话
+    （与 POST /chat 的同属校验、界面的按角色隔离保持一致）。
+    """
+    repository = get_session_repository()
+    session = repository.get(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail=f"会话不存在：{session_id}")
+    if session.persona_id != persona_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"会话 {session_id} 不属于人设 {persona_id}",
+        )
+    removed = repository.delete_session(session_id)
+    logger.info("删除会话：%s（%d 条消息）", session_id, removed)
+    return SessionDeleteResponse(session_id=session_id, removed_turns=removed)
+
+
+@router.get("/personas")
+def list_chat_personas() -> dict:
+    """人设（陪伴对象）清单。
+
+    人设 id 同时是**记忆隔离命名空间**（`companion_id`）：情景记忆 / 语义事实 /
+    个人记忆都按它分库，所以这份清单也是前端「陪伴对象」选择器的数据源。
+    返回 default_persona_id 而不让前端硬编码，避免改预设后界面角色名与实际不符。
+    """
+    return {
+        "default_persona_id": _DEFAULT_PERSONA_ID,
+        "personas": [
+            {
+                "id": preset.id,
+                "name": preset.name,
+                "title": preset.title,
+                "description": preset.description,
+                "tags": preset.tags,
+            }
+            for preset in _presets.values()
+        ],
+    }
+
+
+@router.get("/styles")
+def list_chat_styles() -> dict:
+    """文风预设清单（界面「文风」选择器用）。
+
+    与 persona 同理：预设内容与代码分离，界面从接口取清单，
+    新增/调整 presets/*.yaml 无需改动前端代码。
+    """
+    settings = get_settings()
+    return {
+        "default_style_id": settings.style_preset,
+        "styles": [
+            {
+                "id": preset.id,
+                "name": preset.name,
+                "description": preset.description,
+                "tags": preset.tags,
+                "examples": preset.example_count,
+            }
+            for preset in _styles.values()
+        ],
+    }
+
+
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     """一轮完整对话（LangGraph 编排）。"""
@@ -415,21 +633,53 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
         raise HTTPException(status_code=404, detail=f"未知人设：{req.persona_id}")
 
     settings = get_settings()
+    repository = get_session_repository()
 
     # ① 会话：续聊复用；新聊创建
-    session = _repository.get(req.session_id) if req.session_id else None
+    session = repository.get(req.session_id) if req.session_id else None
+    # 会话必须属于同一个陪伴对象：否则会把 B 角色的轮次写进 A 角色的会话，
+    # 破坏「会话按对象隔离」的契约（前端也会因 persona 不符而清掉指针）。
+    if session is not None and session.persona_id != req.persona_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"会话 {req.session_id} 不属于人设 {req.persona_id}",
+        )
     if session is None:
         state_vars = {"current_mood": req.current_mood} if req.current_mood else {}
-        session = _repository.create(
+        session = repository.create(
             persona_id=req.persona_id,
             user_name=req.user_name,
             state_vars=state_vars,
             session_id=req.session_id,
         )
     elif req.current_mood:
-        session.set_state_var("current_mood", req.current_mood)
+        # 注意两点：
+        # 1) 必须走 repository（而非 session.set_state_var）——后者直接改 dataclass，
+        #    SQLite 后端下不会落库；
+        # 2) 必须**接住返回值**：SQLite 实现返回的是新对象，本地旧快照不含刚写入的
+        #    值，否则本轮 {{current_mood}} 会退化成默认值（并多出一条「未提供」告警）。
+        session = repository.set_state_var(
+            session.session_id, "current_mood", req.current_mood
+        )
+
+    # ①′ 选定的 ST 预设（可选）：不存在/损坏都明确报错，**不静默退回内置路径**
+    #     （静默退回会让用户以为预设生效了，最难排查）
+    st_preset = None
+    st_preset_id = req.st_preset_id or ""
+    if st_preset_id:
+        try:
+            st_preset = get_st_preset_store().load(st_preset_id)
+        except FileNotFoundError as exc:
+            raise HTTPException(
+                status_code=404, detail=f"未知 ST 预设：{st_preset_id}"
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"ST 预设解析失败：{exc}"
+            ) from exc
 
     # ② 组装初始状态（history 为本次输入之前的既有轮次）
+    macro_variables = _read_macro_variables(session.state_vars)
     initial_state = {
         "session_id": session.session_id,
         "companion_id": req.persona_id,  # 记忆按陪伴对象（角色）隔离
@@ -441,6 +691,9 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
         "state_vars": dict(session.state_vars),
         "style_id": req.style_id or settings.style_preset,
         "preset_id": req.preset_id or "",
+        "st_preset_id": st_preset_id,
+        "st_preset": st_preset,
+        "macro_variables": macro_variables,
         "warnings": [],
     }
 
@@ -449,13 +702,27 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     reply = result.get("reply", "")
     emotion = result.get("emotion")
 
+    # ④′ 宏变量回写（ST 的 {{setvar::}} 结果；只写差异，下一轮能读到）
+    _persist_macro_variables(
+        session.session_id, macro_variables, result.get("macro_variables") or {}
+    )
+
     # ④ 情绪回写状态变量：下一轮人设注入 {{current_mood}} 时生效
     if emotion is not None:
-        session.set_state_var("current_mood", emotion.label_zh)
+        # 此处之后的代码不再读 state_vars（下一轮会重新 get），因此无须接住返回值；
+        # 与上面 ① 的分支不同：那里紧接着就要用 state_vars 组装提示词
+        repository.set_state_var(session.session_id, "current_mood", emotion.label_zh)
 
     # ⑤ 会话历史追加 user / assistant
-    _repository.append_turn(session.session_id, ChatTurn(role="user", text=req.text))
-    _repository.append_turn(session.session_id, ChatTurn(role="assistant", text=reply))
+    # 两条消息一个事务：分两次写时若中间失败，库里会留下孤立的用户消息
+    # （界面有气泡、刷新后却没有回复）
+    repository.append_turns(
+        session.session_id,
+        [
+            ChatTurn(role="user", text=req.text),
+            ChatTurn(role="assistant", text=reply),
+        ],
+    )
 
     # ⑥ 召回统计
     ctx = result.get("memory_context")
@@ -471,6 +738,9 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     system_prompt = result.get("system_prompt", "")
     sampling = result.get("sampling")
     used_style_id = result.get("style_id", "")
+    # 个人记忆（知识库）召回行数：与「情景记忆 / 语义事实」分开统计，
+    # 前端需要分别展示各自命中了几条（memory_counts 里没有个人记忆这一层）
+    knowledge_hits = len(result.get("knowledge_lines", []))
 
     # 数字人播报指令：回复 + 本轮情绪 → SSML（供前端 SDK speak() 播报）
     speak_meta: dict[str, object] = {}
@@ -482,6 +752,16 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
             voice=settings.xmov_voice,
         )
         speak_meta = command.to_dict()
+
+    st_meta: dict[str, object] = {}
+    if st_preset_id:
+        st_meta = {
+            "st_preset_id": st_preset_id,
+            "st_preset_name": (
+                get_st_preset_store().get_name(st_preset_id) if st_preset else ""
+            ),
+            **(result.get("st_preset_meta") or {}),
+        }
 
     style_meta: dict[str, object] = {}
     if used_style_id:
@@ -530,15 +810,18 @@ async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
         skipped=[e.id for e in result.get("worldbook_skipped", [])],
         memory_counts=memory_counts,
         memory_scheduled=True,
+        knowledge_hits=knowledge_hits,
         warnings=result.get("warnings", []),
         estimated_tokens=estimate_tokens(system_prompt),
         style=style_meta,
         preset=sampling.to_public_dict() if sampling is not None else {},
+        st_preset=st_meta,
         speak=speak_meta,
         tools_used=result.get("tools_used", []),
         note=(
             f"LangGraph 编排（6 节点）；模型 {get_llm_provider().name}；"
             f"向量库 {settings.warm_backend}；情绪链路已启用；"
-            f"文风 {used_style_id or '未启用'}"
+            f"文风 {used_style_id or '未启用'}；"
+            f"预设 {('酒馆预设 ' + st_preset_id) if st_preset_id else '内置分层'}"
         ),
     )

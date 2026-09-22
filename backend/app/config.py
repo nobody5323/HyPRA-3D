@@ -43,6 +43,16 @@ class Settings(BaseSettings):
     # 数据库文件位置（相对 backend 运行目录；默认 backend/data/memory.db）
     cold_db_path: str = "data/memory.db"
 
+    # ---- 会话存储（多轮对话历史）----
+    # sqlite：落 backend/data（默认）——刷新页面、重启后端后的历史都在；
+    # memory：进程内（测试用，重启即清空）
+    session_backend: str = "sqlite"
+    # 空 = 跟随冷层库文件（cold_db_path），同库不同表
+    session_db_path: str = ""
+    # 历史接口一次最多返回的消息条数（界面「历史记录」用；
+    # 与喂给模型的窗口 max_history_turns 是两回事）
+    session_history_limit: int = 200
+
     # ---- 记忆召回参数（分层聚合）----
     memory_fact_limit: int = 5      # 语义记忆（事实）召回总条数上限
     memory_fact_anchor_n: int = 3   # 其中：高 importance 锚点保底条数
@@ -76,6 +86,11 @@ class Settings(BaseSettings):
     prompt_history_budget: int = 700  # 滚动窗口预算
     prompt_total_budget: int = 4000   # 提示词总量预算（超出按优先级裁剪）
     prompt_style_budget: int = 400    # 表达风格块预算（含示例对话）
+
+    # ---- SillyTavern 预设兼容（见 docs/st-preset-compat.md）----
+    # 导入的 ST 预设存放目录（相对 backend 运行目录；backend/data/ 已被 .gitignore 覆盖）。
+    # 内容属于**用户本地数据**：不进仓库、不随发行物分发。
+    st_presets_dir: str = "data/presets"
 
     # ---- 文风预设（M5 风格系统）----
     # 与人设正交：人设管「是谁」，文风管「怎么说话」

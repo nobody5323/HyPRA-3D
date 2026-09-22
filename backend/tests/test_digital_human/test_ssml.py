@@ -176,6 +176,39 @@ def test_speak_endpoint_streaming_chunks() -> None:
     assert body["chunks"]
     assert "".join(body["chunks"]) == "第一句。第二句。第三句。第四句。"
 
+    # 分段播报需要「逐段的 SSML」：前端不应自行拼标签（会漏 XML 转义与 KA 结构）
+    assert len(body["ssml_chunks"]) == len(body["chunks"])
+    assert all(part.startswith("<speak>") for part in body["ssml_chunks"])
+    # KA 动作只放首段（动作服务于整段表达，避免一句内反复触发）
+    if body["ka_action"]:
+        assert "<ue4event>" in body["ssml_chunks"][0]
+        assert all("<ue4event>" not in part for part in body["ssml_chunks"][1:])
+
+
+def test_speak_endpoint_streaming_drops_blank_chunks() -> None:
+    """纯空白分段必须被滤掉。
+
+    分句正则会把换行单独切成一段；空段的 SSML 会退化为 `<speak></speak>`，
+    若它撞上首段，KA 动作会被包进空段从而完全丢失。
+    """
+    resp = client.post(
+        "/media/speak",
+        json={
+            "text": "甲" * 40 + "\n" + "乙" * 50,
+            "emotion": "anxious",
+            "intensity": 0.9,
+            "streaming": True,
+            "max_chars": 40,
+        },
+    )
+    body = resp.json()
+    assert body["chunks"]
+    assert all(chunk.strip() for chunk in body["chunks"])
+    assert len(body["ssml_chunks"]) == len(body["chunks"])
+    # 首段非空 → KA 动作不会落在空段上
+    assert body["ka_action"]
+    assert "<ue4event>" in body["ssml_chunks"][0]
+
 
 def test_speak_endpoint_requires_text() -> None:
     assert client.post("/media/speak", json={"text": ""}).status_code == 422

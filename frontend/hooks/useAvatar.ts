@@ -27,8 +27,22 @@ export type AvatarInitStage =
   | "unconfigured" // 未配置凭证
   | "loading-sdk" // 正在加载 SDK 脚本
   | "initializing" // SDK 连接/渲染初始化中
+  | "reconnecting" // 连接中断，退避重连中
   | "ready" // 就绪
   | "failed"; // 失败（见 detail）
+
+/**
+ * 分段播报的一段。
+ *
+ * text 与 ssml 成对：SSML 由后端生成（含 XML 转义与 KA 事件结构），
+ * 前端**不得**自行拼标签——字幕用 text，SDK 播报用 ssml。
+ */
+export interface SpeechChunk {
+  /** 纯文本（字幕用） */
+  text: string;
+  /** SSML（SDK speak 用） */
+  ssml: string;
+}
 
 export interface AvatarController {
   state: AvatarState;
@@ -46,6 +60,14 @@ export interface AvatarController {
    * @param ssml SSML（魔珐 SDK 用；含 KA 动作指令）
    */
   speak: (text: string, ssml?: string) => Promise<void>;
+  /**
+   * 分段播报（流式分段：逐段产出，首段可更早出声）。
+   *
+   * 段间自动做 interactive_idle 过渡——SDK 官方约束 speak 不可连续调用。
+   * @param chunks 逐段内容（纯文本给字幕、SSML 给 SDK）
+   * @param onChunk 每段开始前的回调（推进字幕）
+   */
+  speakChunks: (chunks: SpeechChunk[], onChunk?: (index: number) => void) => Promise<void>;
   /** 打断当前播报（客户端即时打断，不等服务端） */
   interrupt: () => void;
   /** SDK 挂载容器 id（仅 xmov 需要） */
@@ -66,6 +88,50 @@ const SDK_LOAD_TIMEOUT_MS = 20_000;
 /** 已失败脚本的标记属性（见 loadXmovSdk 注释） */
 const SDK_FAILED_ATTR = "data-hypra-failed";
 
+/**
+ * 播报状态切换的等待时长（毫秒）。
+ *
+ * interactive_idle 的状态切换经 WebSocket 下发，立即 speak 会被丢弃，
+ * 因此「抢占播报」与「分段播报的段间过渡」都需要留出这段时间。
+ */
+const STATE_SWITCH_DELAY_MS = 400;
+
+/**
+ * 播报等待超时（仅作为 voice_end 丢失时的**兜底**）。
+ *
+ * 原先按「每字 250ms、最小 8s」估算，对中文 TTS 偏紧：稍慢一点就被判超时，
+ * 而超时收尾后调用方紧接着切回待机（`idle()` 内部会 interrupt 渲染调度），
+ * 于是尾音被削掉——表现为「最后一句说不完」。现放宽到每字 400ms / 最小 12s / 上限 90s。
+ */
+const SPEAK_TIMEOUT_PER_CHAR_MS = 400;
+const SPEAK_TIMEOUT_MIN_MS = 12_000;
+const SPEAK_TIMEOUT_MAX_MS = 90_000;
+
+/**
+ * 播报收尾缓冲（毫秒，仅魔珐 SDK 路径）。
+ *
+ * voice_end 之后仍可能有极短的尾音/渲染收尾；调用方紧接着就切回待机，
+ * 留一点缓冲避免把最后一句的尾巴切掉。浏览器 TTS 由 onend 直接告知播放完毕，不需要。
+ */
+const SPEAK_TAIL_MS = 600;
+
+/** 按文本长度估算的播报等待上限（兜底用） */
+function speakTimeoutMs(textLength: number): number {
+  return Math.min(
+    SPEAK_TIMEOUT_MAX_MS,
+    Math.max(SPEAK_TIMEOUT_MIN_MS, textLength * SPEAK_TIMEOUT_PER_CHAR_MS),
+  );
+}
+
+/** 断线自动重连的最大次数（超过后降级为浏览器语音，由用户手动重试） */
+const MAX_RECONNECT_ATTEMPTS = 3;
+
+/** 重连退避基数（毫秒）：1s → 2s → 4s */
+const RECONNECT_BASE_MS = 1_000;
+
+/** 重连退避上限（毫秒） */
+const RECONNECT_MAX_MS = 8_000;
+
 // =============================================================
 // 实现一：浏览器原生 TTS（零依赖，默认）
 // =============================================================
@@ -74,9 +140,19 @@ export function useBrowserAvatar(): AvatarController {
   const [state, setState] = useState<AvatarState>("idle");
   const [ready, setReady] = useState(false);
   const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
+  /**
+   * 播报代次：每次新播报或打断都自增。
+   *
+   * 分段循环必须据此判断「是否已被打断 / 被取代」——**不能用 state 判断**：
+   * 一段正常播完与被打断在 state 上无法区分（两者都会回到 idle）。
+   */
+  const speakGenerationRef = useRef(0);
+  /** 组件是否已卸载：卸载后分段循环必须停（否则音频会在卸载后继续出声） */
+  const mountedRef = useRef(false);
 
   useEffect(() => {
     if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+    mountedRef.current = true;
     const pickVoice = () => {
       const voices = window.speechSynthesis.getVoices();
       voiceRef.current =
@@ -89,6 +165,8 @@ export function useBrowserAvatar(): AvatarController {
     setReady(true);
     window.speechSynthesis.onvoiceschanged = pickVoice;
     return () => {
+      mountedRef.current = false;
+      speakGenerationRef.current += 1; // 作废进行中的分段循环
       // 清理挂在全局单例上的回调：否则组件卸载后仍会被浏览器调用
       if (window.speechSynthesis.onvoiceschanged === pickVoice) {
         window.speechSynthesis.onvoiceschanged = null;
@@ -97,13 +175,15 @@ export function useBrowserAvatar(): AvatarController {
     };
   }, []);
 
-  const speak = useCallback(async (text: string) => {
+  /**
+   * 播一段并等它结束（**不含** cancel）——整段播报与分段播报共用。
+   */
+  const speakUtterance = useCallback(async (text: string) => {
     if (typeof window === "undefined" || !("speechSynthesis" in window) || !text.trim()) return;
-    window.speechSynthesis.cancel();
 
     // 超时兜底：onend / onerror 在部分浏览器上可能不触发，
     // 否则 await 会永久挂起，调用方永远不回到 idle
-    const timeoutMs = Math.min(60_000, Math.max(8_000, text.length * 250));
+    const timeoutMs = speakTimeoutMs(text.length);
     await new Promise<void>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -127,7 +207,40 @@ export function useBrowserAvatar(): AvatarController {
     });
   }, []);
 
+  const speak = useCallback(
+    async (text: string) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window) || !text.trim()) return;
+      speakGenerationRef.current += 1; // 抢占：作废进行中的分段循环
+      window.speechSynthesis.cancel();
+      await speakUtterance(text);
+    },
+    [speakUtterance],
+  );
+
+  /**
+   * 分段播报（浏览器原生 TTS）。
+   *
+   * 逐段朗读并等待段结束（使字幕能随段落推进）；浏览器队列本身会衔接，
+   * 不需要 SDK 那样的 interactive_idle 过渡。
+   */
+  const speakChunks = useCallback(
+    async (chunks: SpeechChunk[], onChunk?: (index: number) => void) => {
+      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
+      const generation = ++speakGenerationRef.current;
+      window.speechSynthesis.cancel();
+      for (let index = 0; index < chunks.length; index += 1) {
+        // 已被打断 / 被新播报取代 / 组件已卸载 → 停止后续分段。
+        // 只挡住字幕不够：循环本身必须停下，否则打断后语音会继续念下去。
+        if (!mountedRef.current || generation !== speakGenerationRef.current) return;
+        onChunk?.(index);
+        await speakUtterance(chunks[index].text);
+      }
+    },
+    [speakUtterance],
+  );
+
   const interrupt = useCallback(() => {
+    speakGenerationRef.current += 1; // 作废分段循环
     if (typeof window !== "undefined" && "speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
@@ -143,6 +256,7 @@ export function useBrowserAvatar(): AvatarController {
     detail: "",
     setState,
     speak,
+    speakChunks,
     interrupt,
   };
 }
@@ -254,6 +368,21 @@ export function useXmovAvatar(
     };
   }, []);
 
+  /**
+   * 断线重连：token 变化触发 effect 重建 SDK（与凭证变更走同一条重建路径）。
+   * 用指数退避而非立即重建：断网瞬间连续重试只会连续失败，还会刷屏错误提示。
+   */
+  const [reconnectToken, setReconnectToken] = useState(0);
+  const reconnectAttemptRef = useRef(0);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * 播报代次：每次新播报或打断都自增。
+   *
+   * 分段循环据此判断「是否已被打断 / 被取代」——**不能用 stateRef 判断**：
+   * 每段正常播完时 voice_end 会把状态置回 idle，与「被打断」无法区分。
+   */
+  const speakGenerationRef = useRef(0);
+
   const updateState = useCallback((next: AvatarState) => {
     stateRef.current = next;
     setState(next);
@@ -263,6 +392,12 @@ export function useXmovAvatar(
   const credentialKey = credentials
     ? `${credentials.appId}:${credentials.appSecret}`
     : "";
+
+  // 凭证 / revision 变化（用户重新保存密钥）→ 重连预算复位。
+  // 刻意**不含** reconnectToken：内部退避重连不应重置预算，否则会变成无限重连。
+  useEffect(() => {
+    reconnectAttemptRef.current = 0;
+  }, [credentialKey, revision]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -279,6 +414,34 @@ export function useXmovAvatar(
     (async () => {
       // 提到 try 外：失败时需销毁实例（超时/鉴权失败等）
       let avatar: any = null;
+
+      /**
+       * 排一次退避重连；返回 true 表示已排程（本次不降级）。
+       *
+       * 必须定义在 try **之外**：`onError` 与「init/脚本加载抛异常」两条路径
+       * 共用它，否则重连过程中初始化超时或脚本加载失败会直接永久降级，
+       * 重连预算形同虚设。
+       */
+      const scheduleReconnect = (reason: string): boolean => {
+        const attempt = reconnectAttemptRef.current;
+        if (attempt >= MAX_RECONNECT_ATTEMPTS) return false;
+        reconnectAttemptRef.current = attempt + 1;
+        const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** attempt);
+        console.warn(`[HyPRA][avatar] ${reason}；${delay}ms 后第 ${attempt + 1} 次重连`);
+        setStage("reconnecting");
+        setDetail(
+          `数字人连接中断：${reason}。${Math.round(delay / 1000)} 秒后自动重连` +
+            `（第 ${attempt + 1}/${MAX_RECONNECT_ATTEMPTS} 次）`,
+        );
+        setReady(false);
+        if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = setTimeout(
+          () => setReconnectToken((count) => count + 1),
+          delay,
+        );
+        return true;
+      };
+
       try {
         setStage("loading-sdk");
         setDetail(`正在加载 SDK 脚本…（${XMOV_SDK_URL.split("/").pop()}）`);
@@ -360,11 +523,30 @@ export function useXmovAvatar(
         avatarRef.current = avatarInstance;
 
         // 语音状态 → 驱动具身状态机（voice_end 后回到交互待机）
-        const handleVoiceState = (event: unknown) => {
-          const name = typeof event === "string" ? event : (event as any)?.state;
-          console.log("[HyPRA][avatar] 语音状态:", name);
-          if (name === "voice_start") updateState("speak");
-          if (name === "voice_end") {
+        //
+        // ⚠️ SDK 回调签名为 `onVoiceStateChange(state, duration, client_speak_id)`（源码
+        // EventDispatcher 的 `voice_state_change` 分支），而 `state` 的**实际取值是
+        // `"start"` / `"end"`**——官方文档里用事件名（voice_start / voice_end）描述，
+        // 但回调参数不是这两个字符串。
+        //
+        // 这里两种写法都接受：若只认 "voice_end"，SDK 回的 "end" 永远匹配不上，
+        // 每段播报都只能靠超时收尾 → 最后一段被紧随其后的 idle() 切断（实测问题）。
+        const handleVoiceState = (...args: unknown[]) => {
+          const first = args[0];
+          const raw = typeof first === "string" ? first : (first as { state?: unknown } | null)?.state;
+          const state = String(raw ?? "").toLowerCase();
+          const speaking = state === "voice_start" || state === "start";
+          const finished = state === "voice_end" || state === "end";
+          console.log(
+            "[HyPRA][avatar] 语音状态:",
+            JSON.stringify(raw),
+            "| duration:",
+            args[1],
+            "| speakId:",
+            args[2],
+          );
+          if (speaking) updateState("speak");
+          if (finished) {
             avatar?.interactiveidle?.(); // SDK 公开方法（小写无下划线）
             updateState("idle");
             // 播报结束 → resolve speak()，使 xmov 与浏览器 TTS 的 await 语义一致
@@ -374,10 +556,21 @@ export function useXmovAvatar(
         avatar.onVoiceStateChange = handleVoiceState;
 
         // SDK 内部错误也暴露出来（否则只会静默失败）
+        //
+        // 断线（WebSocket 断开 / 网关重启）走**指数退避自动重连**，而不是立刻永久降级：
+        // 演示现场网络抖动或服务重启后，界面应当自己恢复；
+        // 连续失败超过上限才降级为浏览器语音，并保留失败原因供现场排查。
         avatar.onError = (error: unknown) => {
+          // 旧实例（已 destroy）的迟到回调：不得再排重连或改界面状态
+          if (disposed) return;
           const reason = describeError(error);
+          // 未超出上限 → 指数退避重连（评审现场拔网线插回、魔珐服务抖动都能自恢）
+          if (scheduleReconnect(reason)) return;
+          // 重连用尽 → 降级为浏览器语音（页面保留失败原因供现场排查）
           setStage("failed");
-          setDetail(`SDK 运行错误：${reason}`);
+          setDetail(
+            `SDK 运行错误（已自动重连 ${MAX_RECONNECT_ATTEMPTS} 次未成功）：${reason}`,
+          );
           setReady(false);
           onUnavailable?.(reason);
         };
@@ -418,27 +611,40 @@ export function useXmovAvatar(
         }
 
         avatarRef.current = avatar;
+        reconnectAttemptRef.current = 0; // 连上了：重连计数归零
+        if (reconnectTimerRef.current) {
+          // 同时清掉「init 期间已排程」的重连：否则它到期后会把刚就绪的实例
+          // 销毁重建（正在进行的播报被切断）
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
         setReady(true);
         setStage("ready");
         setDetail("魔珐数字人已就绪");
       } catch (error) {
+        if (disposed) return; // 卸载造成的失败：不重连、不降级
         const reason = describeError(error);
+        avatar?.destroy?.(); // 先清理失败实例（避免 WebGL 资源泄漏）
+        if (scheduleReconnect(`初始化失败：${reason}`)) return;
         setStage("failed");
-        setDetail(`数字人初始化失败：${reason}`);
+        setDetail(
+          `数字人初始化失败（已自动重连 ${MAX_RECONNECT_ATTEMPTS} 次未成功）：${reason}`,
+        );
         setReady(false);
-        avatar?.destroy?.(); // 清理失败的实例（避免 WebGL 资源泄漏）
         onUnavailable?.(reason);
       }
     })();
 
     return () => {
       disposed = true;
+      if (reconnectTimerRef.current) clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
       avatarRef.current?.destroy?.(); // 官方要求：卸载前销毁，释放 WebGL 资源
       avatarRef.current = null;
     };
     // containerId 或凭证变化时重建（其余依赖刻意不入列，避免重复初始化）
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [containerId, enabled, credentialKey, revision]);
+  }, [containerId, enabled, credentialKey, revision, reconnectToken]);
 
   /** 切换具身状态：同步更新 React 状态与 SDK 行为状态 */
   const setAvatarState = useCallback(
@@ -454,32 +660,18 @@ export function useXmovAvatar(
     [updateState],
   );
 
-  const speak = useCallback(async (text: string, ssml?: string) => {
+  /**
+   * 调用一次 SDK speak 并等待 voice_end（含超时兜底）。
+   *
+   * 等 voice_end 再返回：原先直接 fire-and-forget，调用方 `await speak()` 会立刻
+   * 继续并把「说话中」打回 idle（与浏览器 TTS 实现语义不一致，字幕/徽标提前回落）。
+   */
+  const speakOnce = useCallback(async (payload: string, textLength: number) => {
     const avatar = avatarRef.current;
     if (!avatar) return;
 
-    // 官方约束：speak 不允许连续调用，需先用 interactive_idle 做状态切换；
-    // 而状态切换是异步的（经 WebSocket 下发），立即 speak 会被忽略——
-    // 因此仅在「正在播报」时打断并等待片刻，其余情况直接播报。
-    if (stateRef.current === "speak") {
-      console.log("[HyPRA][avatar] 正在播报，先打断并切回交互待机");
-      avatar.interrupt?.();
-      avatar.interactiveidle?.();
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      if (unmountedRef.current) return; // 等待期间组件已卸载
-      // 等待期间用户已打断（stateRef 被 interrupt 置回 idle）→ 不再开始播报
-      if (stateRef.current !== "speak") {
-        console.log("[HyPRA][avatar] 等待期间已打断，跳过本次播报");
-        return;
-      }
-    }
-
-    console.log("[HyPRA][avatar] speak 调用:", (ssml || text).slice(0, 60));
-
-    // 等 SDK 的 voice_end 再返回：原先直接 fire-and-forget，调用方 `await speak()`
-    // 会立刻继续并把「说话中」打回 idle（与浏览器 TTS 实现语义不一致，字幕/徽标提前回落）。
     // 超时按文本长度估算兜底，保证 voice_end 丢失时也不会永久挂起。
-    const timeoutMs = Math.min(60_000, Math.max(8_000, text.length * 250));
+    const timeoutMs = speakTimeoutMs(textLength);
     await new Promise<void>((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -496,7 +688,7 @@ export function useXmovAvatar(
       }, timeoutMs);
       finishSpeakRef.current = finish;
       try {
-        avatar.speak(ssml || text, true, true);
+        avatar.speak(payload, true, true);
       } catch (error) {
         console.warn("[HyPRA][avatar] speak 抛错:", describeError(error));
         finish();
@@ -504,11 +696,78 @@ export function useXmovAvatar(
     });
   }, []);
 
+  const speak = useCallback(
+    async (text: string, ssml?: string) => {
+      const avatar = avatarRef.current;
+      if (!avatar) return;
+      speakGenerationRef.current += 1; // 抢占：作废进行中的分段循环
+
+      // 官方约束：speak 不允许连续调用，需先用 interactive_idle 做状态切换；
+      // 而状态切换是异步的（经 WebSocket 下发），立即 speak 会被忽略——
+      // 因此仅在「正在播报」时打断并等待片刻，其余情况直接播报。
+      if (stateRef.current === "speak") {
+        console.log("[HyPRA][avatar] 正在播报，先打断并切回交互待机");
+        avatar.interrupt?.();
+        avatar.interactiveidle?.();
+        await new Promise((resolve) => setTimeout(resolve, STATE_SWITCH_DELAY_MS));
+        if (unmountedRef.current) return; // 等待期间组件已卸载
+        // 等待期间用户已打断（stateRef 被 interrupt 置回 idle）→ 不再开始播报
+        if (stateRef.current !== "speak") {
+          console.log("[HyPRA][avatar] 等待期间已打断，跳过本次播报");
+          return;
+        }
+      }
+
+      console.log("[HyPRA][avatar] speak 调用:", (ssml || text).slice(0, 60));
+      await speakOnce(ssml || text, text.length);
+      // 尾音缓冲：调用方紧接着会切回待机，避免切掉最后一句的尾巴
+      await new Promise((resolve) => setTimeout(resolve, SPEAK_TAIL_MS));
+    },
+    [speakOnce],
+  );
+
+  /**
+   * 分段播报（魔珐 SDK）。
+   *
+   * 与整段播报的差别：首段不必等整段 TTS 合成即可出声，字幕也能随段推进；
+   * 代价是段间存在过渡间隔（SDK 不允许连续 speak）。
+   * 因此默认关闭，由界面上的「分段播报」开关控制。
+   */
+  const speakChunks = useCallback(
+    async (chunks: SpeechChunk[], onChunk?: (index: number) => void) => {
+      const avatar = avatarRef.current;
+      if (!avatar || chunks.length === 0) return;
+      // 本次分段播报的代次：段间据此判断是否已被打断 / 被新播报取代。
+      // ⚠️ 不能用 stateRef 判断：每段正常播完时 voice_end 会把状态置回 idle，
+      // 与「被打断」在 state 上无法区分（曾导致只播第一段就 return）。
+      const generation = ++speakGenerationRef.current;
+
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (unmountedRef.current || generation !== speakGenerationRef.current) return;
+        onChunk?.(index);
+        if (index > 0) {
+          avatar.interactiveidle?.();
+          await new Promise((resolve) => setTimeout(resolve, STATE_SWITCH_DELAY_MS));
+          if (unmountedRef.current || generation !== speakGenerationRef.current) return;
+        }
+        await speakOnce(chunks[index].ssml, chunks[index].text.length);
+      }
+      // 全部播完后再留一点尾音缓冲：最后一段之后紧接着就是「切回待机」，
+      // 不留缓冲会把最后一句的尾巴切掉（用户实测的「最后一段说不完」）
+      await new Promise((resolve) => setTimeout(resolve, SPEAK_TAIL_MS));
+    },
+    [speakOnce],
+  );
+
   const interrupt = useCallback(() => {
+    speakGenerationRef.current += 1; // 作废分段循环
     const avatar = avatarRef.current;
     avatar?.interrupt?.();
     avatar?.interactiveidle?.();
     updateState("idle");
+    // 立即结束正在等待 voice_end 的 speak()/speakChunks()：
+    // 被打断时 SDK 通常不再发 voice_end，否则要空等最长达 60s 的超时兜底
+    finishSpeakRef.current?.();
   }, [updateState]);
 
   return {
@@ -520,6 +779,7 @@ export function useXmovAvatar(
     detail,
     setState: setAvatarState,
     speak,
+    speakChunks,
     interrupt,
     containerId,
   };
