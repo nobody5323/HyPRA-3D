@@ -20,6 +20,7 @@ import { AvatarSettings } from "@/components/AvatarSettings";
 import { AvatarStage } from "@/components/AvatarStage";
 import { ChatPanel } from "@/components/ChatPanel";
 import { KnowledgePanel } from "@/components/KnowledgePanel";
+import { LlmSettings } from "@/components/LlmSettings";
 import { MemoryTrace } from "@/components/MemoryTrace";
 import { MoodIndicator } from "@/components/MoodIndicator";
 import { PersonaSwitcher } from "@/components/PersonaSwitcher";
@@ -31,7 +32,7 @@ import { SubtitleBar } from "@/components/SubtitleBar";
 import { useBrowserAvatar, useXmovAvatar } from "@/hooks/useAvatar";
 import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
 import { useChatSession } from "@/hooks/useChatSession";
-import { getHealth, getPersonas, getPresets, getStyles } from "@/lib/api";
+import { getHealth, getLlmConfig, getPersonas, getPresets, getStyles } from "@/lib/api";
 import type {
   McpServerStatus,
   PersonaCatalog,
@@ -42,6 +43,7 @@ import type {
 const CONTAINER_ID = "avatar-container"; // 用于 DOM 元素的 id
 const CONTAINER_SELECTOR = "#avatar-container"; // 传给 SDK 的 CSS 选择器（兜底）
 const SETTINGS_PANEL_ID = "avatar-settings-panel";
+const LLM_PANEL_ID = "llm-settings-panel";
 
 /** 键盘焦点样式（浅色主题：鼠尾草绿环） */
 const FOCUS_RING =
@@ -51,6 +53,10 @@ export default function HomePage() {
   const { credentials, source, configured, revision, save, clear } = useAvatarCredentials();
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** 对话模型设置面板开关 */
+  const [llmOpen, setLlmOpen] = useState(false);
+  /** 当前生效的模型名（顶栏展示；来源是 GET /llm/config） */
+  const [llmModel, setLlmModel] = useState("");
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   /** MCP 外部服务连接状态（行动层可见性证据） */
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
@@ -137,6 +143,7 @@ export default function HomePage() {
   useEffect(() => {
     if (backendOnline !== true) return;
     getPresets().then((catalog) => setPresetCatalog(catalog));
+    void getLlmConfig().then((data) => setLlmModel(data?.config.model ?? ""));
     void getStyles().then((catalog) => {
       setStyleCatalog(catalog);
       if (!catalog || styleTouchedRef.current) return;
@@ -210,6 +217,15 @@ export default function HomePage() {
           <AgentBadge servers={mcpServers} />
           <button
             type="button"
+            aria-expanded={llmOpen}
+            aria-controls={LLM_PANEL_ID}
+            onClick={() => setLlmOpen((prev) => !prev)}
+            className={`rounded-full bg-surface-raised px-3 py-1 text-xs text-ink-muted ring-1 ring-line transition-colors hover:bg-surface-hover ${FOCUS_RING}`}
+          >
+            模型{llmModel ? ` · ${llmModel}` : ""}
+          </button>
+          <button
+            type="button"
             aria-expanded={settingsOpen}
             aria-controls={SETTINGS_PANEL_ID}
             onClick={() => setSettingsOpen((prev) => !prev)}
@@ -231,6 +247,17 @@ export default function HomePage() {
           save={save}
           clear={clear}
           panelId={SETTINGS_PANEL_ID}
+        />
+
+        <LlmSettings
+          open={llmOpen}
+          onClose={() => setLlmOpen(false)}
+          panelId={LLM_PANEL_ID}
+          onApplied={(config) => {
+            setLlmModel(config.model);
+            // 预设档按新模型名重新匹配，清单要跟着刷新（否则「自动」档还是旧的）
+            void getPresets().then((catalog) => setPresetCatalog(catalog));
+          }}
         />
       </header>
 

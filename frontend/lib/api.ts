@@ -6,6 +6,10 @@ import type {
   KnowledgeDeleteResult,
   KnowledgeDoc,
   KnowledgeUploadResult,
+  LlmConfigInfo,
+  LlmConfigInput,
+  LlmConfigResponse,
+  LlmTestResult,
   PersonaCatalog,
   PresetCatalog,
   SessionDeleteResult,
@@ -478,6 +482,80 @@ export async function exportStPreset(
   );
   if (!res.ok) await throwApiError(res, "导出预设");
   return (await res.json()) as Record<string, unknown>;
+}
+
+// =============================================================
+// 对话模型的运行时切换（/llm/*）
+// =============================================================
+
+/**
+ * 当前生效的模型配置。
+ *
+ * 失败返回 null（后端离线时不该挡住界面）；注意响应里**没有 api_key 明文**，
+ * 只有 `has_api_key`——key 只在后端本地文件里，前端只能提交「要改的新值」。
+ */
+export async function getLlmConfig(): Promise<LlmConfigResponse | null> {
+  try {
+    const res = await fetch(`${API_BASE}/llm/config`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as LlmConfigResponse;
+  } catch {
+    return null;
+  }
+}
+
+/** 切换对话模型（立即生效；默认写入后端本地运行时配置）。 */
+export async function updateLlmConfig(input: LlmConfigInput): Promise<LlmConfigInfo> {
+  const res = await fetch(`${API_BASE}/llm/config`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await throwApiError(res, "切换模型");
+  const data = (await res.json()) as { config: LlmConfigInfo };
+  return data.config;
+}
+
+/** 清除界面设置，回到部署配置（.env）。 */
+export async function resetLlmConfig(): Promise<LlmConfigInfo> {
+  const res = await fetch(`${API_BASE}/llm/config`, { method: "DELETE" });
+  if (!res.ok) await throwApiError(res, "恢复部署配置");
+  const data = (await res.json()) as { config: LlmConfigInfo };
+  return data.config;
+}
+
+/**
+ * 拉取端点可用模型（`GET {base_url}/models`）。
+ *
+ * `apiKey` 不传时后端用已保存的；传了只在本次请求内使用，不落盘。
+ */
+export async function listLlmModels(params: {
+  baseUrl?: string;
+  apiKey?: string | null;
+  provider?: string;
+}): Promise<string[]> {
+  const query = new URLSearchParams();
+  if (params.baseUrl) query.set("base_url", params.baseUrl);
+  if (params.apiKey) query.set("api_key", params.apiKey);
+  if (params.provider) query.set("provider", params.provider);
+  const res = await fetch(`${API_BASE}/llm/models?${query.toString()}`, { cache: "no-store" });
+  if (!res.ok) await throwApiError(res, "拉取模型列表");
+  const data = (await res.json()) as { models?: string[] };
+  return data.models ?? [];
+}
+
+/**
+ * 连通性测试：发一条极短请求，返回成功与否与延迟。
+ * 不改变当前配置、不落盘——用于「应用」之前先确认三件套是否正确。
+ */
+export async function testLlmConfig(input: LlmConfigInput): Promise<LlmTestResult> {
+  const res = await fetch(`${API_BASE}/llm/config/test`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await throwApiError(res, "测试连接");
+  return (await res.json()) as LlmTestResult;
 }
 
 export { API_BASE };

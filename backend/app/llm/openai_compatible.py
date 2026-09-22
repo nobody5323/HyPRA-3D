@@ -70,6 +70,14 @@ class OpenAICompatibleProvider(LLMProvider):
             http_client=http_client,
         )
 
+    def list_models(self) -> list[str]:
+        """列出端点可用的模型名（OpenAI 兼容端点通常提供 `GET /models`）。
+
+        去重并排序：部分服务商会在列表里重复返回同一模型 ID。
+        """
+        response = self._client.models.list()
+        return sorted({item.id for item in response.data if getattr(item, "id", "")})
+
     def _extra_body(self, enable_thinking: bool | None = None) -> dict | None:
         """非标准参数（如推理模型的思考开关）。None 时不传，避免影响普通模型。
 

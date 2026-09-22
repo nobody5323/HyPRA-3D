@@ -60,6 +60,17 @@ class LLMProvider(ABC):
     #: 默认 False —— 调用方据此决定是否传 enable_thinking，避免破坏第三方实现。
     supports_thinking_override: bool = False
 
+    #: 模型名（界面展示与「模型预设档」匹配用；测试替身可给任意值）
+    model: str = ""
+
+    def list_models(self) -> list[str]:
+        """列出该端点可用的模型名（默认空 = 不支持枚举）。
+
+        供界面「拉取模型列表」用。调用方必须容忍空列表：不少第三方实现不提供
+        `GET /models`，此时用户手动填写模型名即可，不应当成错误。
+        """
+        return []
+
     @abstractmethod
     def chat(
         self,

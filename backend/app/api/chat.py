@@ -24,6 +24,7 @@ from app.graph.nodes import ChatNodes
 from app.llm.base import LLMProvider
 from app.llm.factory import create_llm_provider
 from app.llm.profiles import list_presets, load_model_profiles, resolve_profile
+from app.llm.runtime import load_runtime_config
 from app.memory.cold.extractor import create_extractor
 from app.memory.cold.mood_log import SqliteMoodLogStore
 from app.memory.cold.sqlite_store import SqliteColdStore
@@ -240,19 +241,32 @@ def _build_tool_registry():
     return registry
 
 
+def _provider_kwargs() -> dict:
+    """构造 provider 的参数：**运行时设置优先**，否则用 .env。
+
+    运行时配置由 `app/api/llm.py` 写入（GET/PUT /llm/config），这里只读——
+    两个模块因此没有循环依赖，且「界面切换」与「重启后」的行为天然一致。
+    """
+    config = load_runtime_config()
+    if config is not None:
+        return config.provider_kwargs()
+
+    settings = get_settings()
+    return {
+        "provider": settings.llm_provider,
+        "api_key": settings.llm_api_key,
+        "model": settings.llm_model,
+        "base_url": settings.llm_base_url,
+        "timeout": settings.llm_timeout,
+        "enable_thinking": settings.llm_enable_thinking,
+    }
+
+
 def get_llm_provider() -> LLMProvider:
     """懒加载 LLM provider（默认 mock：无 key 可跑通对话链路）。"""
     global _llm_provider
     if _llm_provider is None:
-        settings = get_settings()
-        _llm_provider = create_llm_provider(
-            settings.llm_provider,
-            api_key=settings.llm_api_key,
-            model=settings.llm_model,
-            base_url=settings.llm_base_url,
-            timeout=settings.llm_timeout,
-            enable_thinking=settings.llm_enable_thinking,
-        )
+        _llm_provider = create_llm_provider(**_provider_kwargs())
     return _llm_provider
 
 
@@ -286,7 +300,8 @@ def get_chat_graph():
             ),
             styles=_styles,
             default_style_id=settings.style_preset,
-            model_name=settings.llm_model,
+            # 用**当前生效的**模型名匹配预设档（界面可能已切换过模型）
+            model_name=getattr(provider, "model", "") or settings.llm_model,
             profiles=get_model_profiles(),
             tool_registry=_build_tool_registry() if settings.agent_tools_enabled else None,
             mood_store=get_mood_store() if settings.agent_tools_enabled else None,
@@ -468,9 +483,12 @@ def list_chat_presets() -> dict:
     """
     settings = get_settings()
     profiles = get_model_profiles()
-    matched = resolve_profile(settings.llm_model, profiles)
+    # 用当前生效的模型名匹配：界面切换模型后，「自动」档要跟着换，
+    # 否则会把上一个模型的采样档套到新模型上
+    model_name = getattr(get_llm_provider(), "model", "") or settings.llm_model
+    matched = resolve_profile(model_name, profiles)
     return {
-        "model": settings.llm_model,
+        "model": model_name,
         "auto_preset_id": matched.id,
         "presets": list_presets(profiles),
     }

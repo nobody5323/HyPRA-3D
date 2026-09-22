@@ -13,6 +13,7 @@ import pytest
 
 from app.api import chat as chat_module
 from app.api import knowledge as knowledge_module
+from app.api import llm as llm_module
 from app.api import media as media_module
 from app.digital_human.local_provider import LocalDigitalHumanProvider
 from app.llm.mock import MockLLMProvider
@@ -53,6 +54,16 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     media_module.set_digital_human_provider(LocalDigitalHumanProvider())
     # ST 预设存储：指向临时目录（绝不碰 backend/data/presets，也不依赖本机状态）
     chat_module.set_st_preset_store(StPresetStore(tmp_path / "st_presets"))
+    # 模型运行时配置：指向临时文件 + 清空进程内缓存
+    # （绝不碰 backend/data/llm_runtime.json，也不受本机已保存的模型切换影响）
+    monkeypatch.setenv("LLM_RUNTIME_PATH", str(tmp_path / "llm_runtime.json"))
+    # 同时把**部署配置**固定成 mock：测试结果不得依赖本机 backend/.env
+    # （本机可能配了真实 key，会让“默认回落 .env”类断言闯到真实 provider 上）
+    monkeypatch.setenv("LLM_PROVIDER", "mock")
+    monkeypatch.setenv("LLM_API_KEY", "")
+    monkeypatch.setenv("LLM_BASE_URL", "")
+    monkeypatch.setenv("LLM_MODEL", "test-model")
+    llm_module.reset_llm_config_cache()
     yield store
     chat_module.set_embedding_provider(None)
     chat_module.set_memory_store(None)
@@ -61,5 +72,6 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     chat_module.set_session_repository(None)
     chat_module.set_llm_provider(None)
     chat_module.set_st_preset_store(None)
+    llm_module.reset_llm_config_cache()
     media_module.set_digital_human_provider(None)
     set_mcp_manager(None)

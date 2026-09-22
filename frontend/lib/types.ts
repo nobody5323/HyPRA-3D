@@ -395,3 +395,59 @@ export interface StPresetPatch {
   memory_injection?: Record<string, unknown>;
   assembly?: Record<string, unknown>;
 }
+
+// =============================================================
+// 对话模型的运行时切换（/llm/*）
+// 分工：这里选**用哪个模型**；PresetInfo 配的是**这个模型的采样参数**
+// =============================================================
+
+/** 一个可选 provider（由后端给出，前端不再硬编码） */
+export interface LlmProviderOption {
+  value: string;
+  label: string;
+  hint: string;
+}
+
+/** 当前生效的模型配置（**不含 api_key 明文**） */
+export interface LlmConfigInfo {
+  provider: string;
+  base_url: string;
+  model: string;
+  timeout: number;
+  enable_thinking: boolean | null;
+  /** 是否已保存 key —— 前端永远拿不到明文 */
+  has_api_key: boolean;
+  /** runtime = 界面设置；env = 部署配置；session = 本次运行生效但未落盘 */
+  source: string;
+}
+
+/** GET /llm/config 响应 */
+export interface LlmConfigResponse {
+  config: LlmConfigInfo;
+  providers: LlmProviderOption[];
+  /** 各 provider 的默认端点（切 provider 时自动填入） */
+  default_base_urls: Record<string, string>;
+}
+
+/** POST /llm/config/test 响应（测试连接） */
+export interface LlmTestResult {
+  ok: boolean;
+  latency_ms: number;
+  model: string;
+  provider?: string;
+  reply_preview?: string;
+  error?: string;
+}
+
+/** 切换模型的请求体 */
+export interface LlmConfigInput {
+  provider: string;
+  base_url?: string;
+  model?: string;
+  /** 留空 / 不传 = 沿用已保存的 key（前端拿不到明文） */
+  api_key?: string | null;
+  timeout?: number | null;
+  enable_thinking?: boolean | null;
+  /** 是否写入本地运行时配置（重启后保留） */
+  persist?: boolean;
+}

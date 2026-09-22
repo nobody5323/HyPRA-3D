@@ -63,6 +63,9 @@ class MockLLMProvider(LLMProvider):
 
     name = "mock"
 
+    #: 界面展示用的模型名（明确标为本地占位实现，不假装是真实模型）
+    model = "mock"
+
     #: 支持按请求覆盖推理开关（便于测试断言预设档已生效）
     supports_thinking_override = True
 
@@ -71,6 +74,10 @@ class MockLLMProvider(LLMProvider):
         self._cursor = 0
         #: 最近一次请求携带的推理开关（None = 未传）——供测试断言
         self.last_enable_thinking: bool | None = None
+
+    def list_models(self) -> list[str]:
+        """本地占位实现没有远端模型列表（界面据此提示“无需选择模型”）。"""
+        return ["mock"]
 
     def reset_script(self) -> None:
         """重置脚本游标（同实例多次调用时用）。"""

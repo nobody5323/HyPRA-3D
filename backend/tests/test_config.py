@@ -45,8 +45,14 @@ def test_env_var_override(monkeypatch) -> None:
     assert settings.qdrant_url == "https://cloud.example.com:6333"
 
 
-def test_env_file_is_read_when_present(tmp_path) -> None:
+def test_env_file_is_read_when_present(tmp_path, monkeypatch) -> None:
     """显式指定 .env 时应能读到其中配置。"""
+    # 环境变量优先级高于 .env 文件（pydantic-settings 的既定行为）。
+    # 全局 conftest 为了隔离本机 .env 会把 LLM_* 固定成 mock，
+    # 而本用例验证的正是「文件能被读到」，因此先把这几个环境变量清掉。
+    for name in ("LLM_PROVIDER", "LLM_MODEL", "LLM_API_KEY", "LLM_BASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+
     env_file = tmp_path / ".env"
     env_file.write_text("LLM_PROVIDER=siliconflow\nLLM_MODEL=test-model\n", encoding="utf-8")
 
