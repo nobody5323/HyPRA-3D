@@ -133,7 +133,7 @@ def test_import_invalid_json_is_400_and_not_stored() -> None:
 
 
 def test_import_does_not_persist_credentials() -> None:
-    """端点/密钥类字段剥离且不落盘（安全红线）。"""
+    """端点/密钥类字段剥离且不落盘（安全红线），并向界面报告剥了什么。"""
     import_preset()
     store = chat_module.get_st_preset_store()
     raw = (store.root / "tavern-preset.json").read_text(encoding="utf-8")
@@ -142,6 +142,11 @@ def test_import_does_not_persist_credentials() -> None:
     assert "proxy_password" not in raw
     assert "custom_url" not in raw
     assert "temperature" in raw
+
+    # 剥离只发生在导入那一刻：详情必须从索引读回字段名，否则界面上看不到这个提示
+    detail = client.get("/chat/st-presets/tavern-preset").json()["detail"]
+    assert "proxy_password" in detail["stripped_keys"]
+    assert "custom_url" in detail["stripped_keys"]
 
 
 def test_unknown_preset_is_404() -> None:

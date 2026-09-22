@@ -189,6 +189,16 @@ class StPresetStore:
         entry = self._read_index().get("presets", {}).get(preset_id, {})
         return str(entry.get("name") or preset_id)
 
+    def get_stripped_keys(self, preset_id: str) -> list[str]:
+        """导入时被安全剥离的端点/密钥类字段名（值从未保存）。
+
+        必须从索引读：剥离发生在导入那一刻，之后重新载入的文件里已经没这些字段了，
+        重新解析只会得到空列表（用户在界面上就看不到“凭证被剥了”的提示）。
+        """
+        entry = self._read_index().get("presets", {}).get(preset_id, {})
+        keys = entry.get("stripped_keys")
+        return [str(key) for key in keys] if isinstance(keys, list) else []
+
     # ---------- 导入 / 清单 ----------
 
     def _allocate_id(self, base: str) -> str:
@@ -246,6 +256,9 @@ class StPresetStore:
             "source_file": source_file,
             "imported_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "sha256": self._sha256(text),
+            # 导入时被安全剥离的端点/密钥类字段名（**值从未保存**）——
+            # 仅此刻能知道它们，落到索引里供界面提示用户
+            "stripped_keys": list(parsed.stripped_keys),
         }
         self._write_index(index)
 

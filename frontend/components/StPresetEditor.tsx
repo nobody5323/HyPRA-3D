@@ -709,6 +709,14 @@ export function StPresetEditor({
           </ul>
         </section>
       )}
+
+      {detail.stripped_keys.length > 0 && (
+        <p className="rounded-xl border border-line bg-surface-inset px-3 py-2 text-xs text-ink-soft">
+          为安全考虑，导入时已剥离且<strong className="font-medium text-ink-muted">未保存</strong>
+          这些端点/密钥类字段：{detail.stripped_keys.join("、")}。
+          因此导出时不会还原它们（在酒馆里重新选择服务商即可）。
+        </p>
+      )}
     </div>
   );
 }

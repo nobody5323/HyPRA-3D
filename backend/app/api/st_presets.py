@@ -186,7 +186,8 @@ def _st_preset_detail(store: StPresetStore, preset_id: str, parsed: ParsedPreset
         "memory_injection": store.get_memory_injection(preset_id),
         "override": store.get_override(preset_id),
         "source_format": parsed.source_format,
-        "stripped_keys": parsed.stripped_keys,
+        # 从索引读：剥离发生在导入那一刻，重新载入的文件里已无这些字段
+        "stripped_keys": store.get_stripped_keys(preset_id),
         "warnings": parsed.warnings,
         "unsupported": parsed.unsupported,
     }
