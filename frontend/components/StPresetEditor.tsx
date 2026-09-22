@@ -83,6 +83,10 @@ export function StPresetEditor({
   }));
   const [assembly, setAssembly] = useState<AssemblyState>(() => ({ ...detail.assembly }));
   const [memory, setMemory] = useState<StMemoryInjection>(() => ({ ...detail.memory_injection }));
+  /** use_sysprompt 开启时用来替换系统条目正文的文本 */
+  const [systemPromptOverride, setSystemPromptOverride] = useState(
+    detail.system_prompt_override,
+  );
   const [expanded, setExpanded] = useState<string | null>(null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [dragOver, setDragOver] = useState<number | null>(null);
@@ -189,6 +193,17 @@ export function StPresetEditor({
   const setAssemblyValue = (patchFields: Partial<AssemblyState>) => {
     setAssembly((prev) => ({ ...prev, ...patchFields }));
     queue({ assembly: patchFields as Record<string, unknown> });
+  };
+
+  const setOverrideText = (value: string) => {
+    setSystemPromptOverride(value);
+    queue({ system_prompt_override: value });
+  };
+
+  /** 一键启用/停用全部条目（社区大预设动辄 100+ 条，逐个点太痛） */
+  const setAllEnabled = (enabled: boolean) => {
+    const next = rows.map((row) => ({ ...row, enabled }));
+    commitRows(next, toOrderPatch(next));
   };
 
   const setMemoryValue = (patchFields: Partial<StMemoryInjection>) => {
@@ -339,9 +354,29 @@ export function StPresetEditor({
             />
             用统一系统指令覆盖预设里标记为「系统提示」的条目
           </label>
-          <p className="mt-1 text-xs text-ink-faint">
-            开启后需要提供覆盖文本才会替换；本项目暂未提供该文本入口，未提供时仍按预设原正文发送。
-          </p>
+          {assembly.use_sysprompt ? (
+            <div className="mt-2">
+              <label
+                htmlFor="st-sysprompt-override"
+                className="text-xs text-ink-muted"
+              >
+                统一系统指令
+              </label>
+              <textarea
+                id="st-sysprompt-override"
+                value={systemPromptOverride}
+                rows={5}
+                disabled={disabled}
+                onChange={(event) => setOverrideText(event.target.value)}
+                placeholder="留空 = 不替换，按预设原正文发送"
+                className={`mt-1 w-full rounded-lg border border-line bg-surface-panel px-2 py-1 font-mono text-xs text-ink placeholder:text-ink-faint ${FOCUS_RING}`}
+              />
+            </div>
+          ) : (
+            <p className="mt-1 text-xs text-ink-faint">
+              开启后需要填写覆盖文本才会替换；未填写时仍按预设原正文发送。
+            </p>
+          )}
         </div>
       </section>
 
@@ -349,7 +384,25 @@ export function StPresetEditor({
       <section className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-xs font-medium text-ink">提示词条目</h4>
-          <span className="text-xs text-ink-faint">拖动左侧手柄排序，或用 ↑ ↓ 微调</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-ink-faint">拖动左侧手柄排序，或用 ↑ ↓ 微调</span>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => setAllEnabled(true)}
+              className={`rounded-full bg-surface-raised px-2.5 py-0.5 text-xs text-ink-muted ring-1 ring-line transition-colors hover:bg-surface-hover disabled:opacity-40 ${FOCUS_RING}`}
+            >
+              全部启用
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => setAllEnabled(false)}
+              className={`rounded-full px-2.5 py-0.5 text-xs text-ink-soft transition-colors hover:bg-surface-hover disabled:opacity-40 ${FOCUS_RING}`}
+            >
+              全部关闭
+            </button>
+          </div>
         </div>
         <ol className="flex flex-col gap-2">
           {rows.map((row, index) => {

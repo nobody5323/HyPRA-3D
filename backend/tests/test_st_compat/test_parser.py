@@ -101,6 +101,45 @@ def test_duplicate_identifier_renamed(make_preset) -> None:
     assert any("重复" in w for w in parsed.warnings)
 
 
+def _item(data: dict, identifier: str) -> dict:
+    """按标识取条目（别用下标：夹具增删条目时下标会静默错位）。"""
+    return next(item for item in data["prompts"] if item["identifier"] == identifier)
+
+
+def test_role_alias_model_maps_to_assistant(make_preset) -> None:
+    """社区预设里 Gemini 风格的 `role: model` 应映射为 assistant，而不是回退 system。"""
+    data = make_preset()
+    _item(data, "reply-length")["role"] = "model"
+
+    parsed = parse_st_preset(data)
+
+    assert parsed.get("reply-length").role == "assistant"
+    # 已知别名不该产生“不受支持”噪声（真实预设里一次会出现好几条）
+    assert not any("不受支持" in w for w in parsed.warnings)
+
+
+def test_role_alias_ai_maps_to_assistant(make_preset) -> None:
+    """`ai` / `bot` 等旧写法同样归一为 assistant。"""
+    data = make_preset()
+    _item(data, "reply-length")["role"] = "AI"
+
+    parsed = parse_st_preset(data)
+
+    assert parsed.get("reply-length").role == "assistant"
+    assert not any("不受支持" in w for w in parsed.warnings)
+
+
+def test_unknown_role_still_warns(make_preset) -> None:
+    """真正未知的角色仍然回退 system 并告警。"""
+    data = make_preset()
+    _item(data, "main")["role"] = "wizard"
+
+    parsed = parse_st_preset(data)
+
+    assert parsed.get("main").role == "system"
+    assert any("wizard" in w for w in parsed.warnings)
+
+
 def test_invalid_role_falls_back_to_system(make_preset) -> None:
     """非法角色应回退 system 并留下警告，而不是让整份预设导入失败。"""
     data = make_preset()
@@ -143,8 +182,26 @@ def test_missing_prompt_order_falls_back_to_definition_order(make_preset) -> Non
     assert any("未提供条目顺序" in w for w in parsed.warnings)
 
 
-def test_multiple_orders_uses_first(make_preset) -> None:
-    """多份顺序表（按角色卡区分）取第 1 份并提示。"""
+def test_multiple_orders_prefers_the_one_with_more_entries(make_preset) -> None:
+    """多份顺序表应取**覆盖条目最多**的那份（并列取靠前）。
+
+    真实场景：社区预设导出常见「全局 11 条 + 目标角色 55 条」，
+    机械取第 1 份会让其余 100+ 个条目全部显成「未启用」。
+    """
+    data = make_preset()
+    full_order = list(data["prompt_order"][0]["order"])
+    data["prompt_order"][0]["order"] = full_order[:2]          # 全局那份很小
+    data["prompt_order"].append({"character_id": 100001, "order": full_order})
+
+    parsed = parse_st_preset(data)
+
+    assert parsed.order_index == 1
+    assert len(parsed.order) == len(full_order)
+    assert any("覆盖条目最多" in w for w in parsed.warnings)
+
+
+def test_multiple_orders_keeps_first_when_it_is_richest(make_preset) -> None:
+    """第 1 份条目更多时仍选第 1 份。"""
     data = make_preset()
     data["prompt_order"].append(
         {"character_id": 100001, "order": [{"identifier": "main", "enabled": False}]}
@@ -153,7 +210,7 @@ def test_multiple_orders_uses_first(make_preset) -> None:
     parsed = parse_st_preset(data)
 
     assert parsed.order_index == 0
-    assert any("2 份顺序表" in w for w in parsed.warnings)
+    assert any("份顺序表" in w for w in parsed.warnings)
     assert parsed.get("main") is not None
 
 
@@ -171,7 +228,7 @@ def test_dangling_reference_removed_and_unreferenced_warned(make_preset) -> None
     assert "ghost" not in identifiers
     assert "mood-note" not in identifiers
     assert any("ghost" in w for w in parsed.warnings)
-    assert any("未加入顺序表" in w for w in parsed.warnings)
+    assert any("未列入任何顺序表" in w for w in parsed.warnings)
 
 
 def test_duplicate_order_entry_deduplicated(make_preset) -> None:
@@ -243,7 +300,7 @@ def test_text_completion_format_reported() -> None:
 def test_group_and_trigger_features_reported(make_preset) -> None:
     """群聊字段与不受支持的生成类型触发应进入未生效清单。"""
     data = make_preset(group_nudge_prompt="（测试语料）只以 {{char}} 身份回应。")
-    data["prompts"][7]["injection_trigger"] = ["continue", "swipe"]
+    _item(data, "reply-length")["injection_trigger"] = ["continue", "swipe"]
 
     parsed = parse_st_preset(data)
 
@@ -254,7 +311,7 @@ def test_group_and_trigger_features_reported(make_preset) -> None:
 def test_supported_trigger_not_reported(make_preset) -> None:
     """受支持的触发类型（normal/regenerate）不应产生未生效提示。"""
     data = make_preset()
-    data["prompts"][7]["injection_trigger"] = ["normal", "regenerate"]
+    _item(data, "reply-length")["injection_trigger"] = ["normal", "regenerate"]
 
     parsed = parse_st_preset(data)
 

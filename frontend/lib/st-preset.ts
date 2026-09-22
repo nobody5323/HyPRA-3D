@@ -259,6 +259,13 @@ export function mergePatch(base: StPresetPatch, next: StPresetPatch): StPresetPa
   const memory = compact({ ...base.memory_injection, ...next.memory_injection });
   if (memory) merged.memory_injection = memory;
 
+  const assembly = compact({ ...base.assembly, ...next.assembly });
+  if (assembly) merged.assembly = assembly;
+
+  // 系统指令覆盖文本：空串是**合法值**（= 清空），所以用 undefined 判定而不是真值判定
+  const overrideText = next.system_prompt_override ?? base.system_prompt_override;
+  if (overrideText !== undefined) merged.system_prompt_override = overrideText;
+
   return merged;
 }
 

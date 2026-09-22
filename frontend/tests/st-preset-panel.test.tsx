@@ -120,6 +120,7 @@ function makeDetail(overrides: Partial<StPresetDetail> = {}): StPresetDetail {
     ],
     memory_injection: { enabled: true, position: "in_chat", depth: 1, role: "system", order: 100 },
     override: {},
+    system_prompt_override: "",
     source_format: "chat",
     stripped_keys: [],
     warnings: [],
@@ -303,6 +304,100 @@ describe("预设编辑：写回覆盖层", () => {
       () => {
         const patch = calls.find((call) => call.method === "PATCH");
         expect(patch?.body).toMatchObject({ prompts: { main: { content: "改过的正文" } } });
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("「全部启用」一次性打开所有条目（社区大预设动辄 100+ 条）", async () => {
+    const calls = renderSelected(routeWithDetail());
+    await waitFor(() => expect(screen.getByRole("button", { name: "全部启用" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "全部启用" }));
+
+    await waitFor(
+      () => {
+        const patch = calls.find((call) => call.method === "PATCH");
+        expect(patch?.body).toMatchObject({
+          prompts: {
+            main: { enabled: true },
+            chatHistory: { enabled: true },
+            "mood-note": { enabled: true },
+          },
+        });
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("「全部关闭」同样一次到位", async () => {
+    const calls = renderSelected(routeWithDetail());
+    await waitFor(() => expect(screen.getByRole("button", { name: "全部关闭" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "全部关闭" }));
+
+    await waitFor(
+      () => {
+        const patch = calls.find((call) => call.method === "PATCH");
+        expect(patch?.body).toMatchObject({ prompts: { main: { enabled: false } } });
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("组装开关（合并系统消息）能提交到 assembly", async () => {
+    const calls = renderSelected(routeWithDetail());
+    await waitFor(() =>
+      expect(screen.getByLabelText("合并相邻的系统消息")).toBeTruthy(),
+    );
+
+    // 与夹具当前值解耦：断言提交的是「点击后的状态」
+    const checkbox = screen.getByLabelText("合并相邻的系统消息") as HTMLInputElement;
+    const before = checkbox.checked;
+    fireEvent.click(checkbox);
+
+    await waitFor(
+      () => {
+        const patch = calls.find((call) => call.method === "PATCH");
+        expect(patch?.body).toMatchObject({
+          assembly: { squash_system_messages: !before },
+        });
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("use_sysprompt 开启后可填写统一系统指令并提交", async () => {
+    const calls = stubRoutes((url, method) => {
+      if (url.endsWith("/chat/st-presets/demo") && method === "PATCH") {
+        return jsonResponse({ detail: makeDetail() });
+      }
+      if (url.endsWith("/chat/st-presets/demo") && method === "GET") {
+        return jsonResponse({
+          preset: makeSummary(),
+          detail: makeDetail({
+            assembly: { use_sysprompt: true, squash_system_messages: false, names_behavior: 0 },
+          }),
+        });
+      }
+      if (url.endsWith("/chat/st-presets") && method === "GET") {
+        return jsonResponse({ dir: "/tmp/presets", presets: [makeSummary()] });
+      }
+      return undefined;
+    });
+
+    render(<StPresetPanel value="demo" onChange={() => {}} />);
+    expand();
+    await waitFor(() => expect(screen.getByLabelText("统一系统指令")).toBeTruthy());
+
+    fireEvent.change(screen.getByLabelText("统一系统指令"), {
+      target: { value: "（测试语料）统一指令" },
+    });
+
+    await waitFor(
+      () => {
+        const patch = calls.find((call) => call.method === "PATCH");
+        expect(patch?.body).toMatchObject({ system_prompt_override: "（测试语料）统一指令" });
       },
       { timeout: 3000 },
     );

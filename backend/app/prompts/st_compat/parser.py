@@ -34,11 +34,12 @@ from app.prompts.st_compat.models import (
     MARKER_WORLD_INFO_AFTER,
     MARKER_WORLD_INFO_BEFORE,
     TRIGGER_UNSUPPORTED,
-    VALID_ROLES,
     STPreset,
     STPromptItem,
     STPromptOrder,
     STPromptOrderEntry,
+    is_known_role_alias,
+    normalize_role,
     strip_sensitive_keys,
 )
 
@@ -97,6 +98,7 @@ class ParsedPreset:
     order_index: int = -1                # 采用了第几份 prompt_order（-1 = 由定义顺序生成）
     raw: dict[str, Any] = field(default_factory=dict)   # 剥离敏感键后的原始内容（导出/落盘用）
     memory_injection: dict[str, Any] = field(default_factory=dict)  # HyPRA 记忆注入配置（见契约文档 §7）
+    system_prompt_override: str = ""     # use_sysprompt 开启时的覆盖文本（用户提供）
 
     @property
     def ordered_items(self) -> list[tuple[STPromptItem, bool]]:
@@ -171,12 +173,14 @@ def _normalize_prompts(
         if identifier != base:
             warnings.append(f"条目 identifier「{base}」重复，已重命名为「{identifier}」")
 
-        # ---- role：非法值回退 system ----
-        if item.role not in VALID_ROLES:
-            warnings.append(
-                f"条目「{identifier}」的角色「{item.role}」不受支持，已回退 system"
-            )
-            item.role = "system"
+        # ---- role：别名归一（Gemini 的 model → assistant）；未知值回退 system ----
+        normalized = normalize_role(item.role)
+        if normalized != item.role:
+            if not is_known_role_alias(item.role):
+                warnings.append(
+                    f"条目「{identifier}」的角色「{item.role}」不受支持，已回退 system"
+                )
+            item.role = normalized
 
         # ---- 正文：运行时填充类 marker 强制清空 ----
         if item.marker or identifier in RUNTIME_FILLED_MARKERS:
@@ -193,6 +197,23 @@ def _normalize_prompts(
     return items, by_id, warnings
 
 
+def _pick_richest_order(
+    raw_orders: list[STPromptOrder], prompts_by_id: dict[str, STPromptItem]
+) -> int:
+    """选**覆盖已定义条目最多**的那份顺序表（并列取靠前的）。
+
+    ST 的 `prompt_order` 按角色卡分别保存，社区预设导出时很常见
+    「全局 11 条 + 目标角色 55 条」这种组合；若机械取第 1 份，剩下 100+ 个条目
+    会被判为「未启用」，界面上看起来就像导入坏了。
+    """
+    best_index, best_count = 0, -1
+    for index, order in enumerate(raw_orders):
+        covered = sum(1 for entry in order.order if entry.identifier in prompts_by_id)
+        if covered > best_count:
+            best_index, best_count = index, covered
+    return best_index
+
+
 def _normalize_order(
     raw_orders: list[STPromptOrder],
     prompts_by_id: dict[str, STPromptItem],
@@ -200,12 +221,7 @@ def _normalize_order(
     """归一化顺序表，返回 (生效顺序, 采用第几份, 警告)。"""
     warnings: list[str] = []
 
-    if len(raw_orders) > 1:
-        warnings.append(
-            f"预设包含 {len(raw_orders)} 份顺序表（按角色卡区分），本项目采用第 1 份"
-        )
-
-    if not raw_orders or not raw_orders[0].order:
+    if not raw_orders or not any(order.order for order in raw_orders):
         warnings.append("预设未提供条目顺序，已按条目定义顺序生成（全部启用）")
         return (
             [STPromptOrderEntry(identifier=item.identifier, enabled=True) for item in prompts_by_id.values()],
@@ -213,9 +229,18 @@ def _normalize_order(
             warnings,
         )
 
+    chosen_index = _pick_richest_order(raw_orders, prompts_by_id)
+    chosen = raw_orders[chosen_index]
+    if len(raw_orders) > 1:
+        enabled_count = sum(1 for entry in chosen.order if entry.enabled)
+        warnings.append(
+            f"预设包含 {len(raw_orders)} 份顺序表（按角色卡区分），已采用覆盖条目最多的第 "
+            f"{chosen_index + 1} 份（{len(chosen.order)} 条，其中启用 {enabled_count} 条）"
+        )
+
     order: list[STPromptOrderEntry] = []
     seen: set[str] = set()
-    for entry in raw_orders[0].order:
+    for entry in chosen.order:
         identifier = (entry.identifier or "").strip()
         if not identifier:
             continue
@@ -228,13 +253,16 @@ def _normalize_order(
         seen.add(identifier)
         order.append(STPromptOrderEntry(identifier=identifier, enabled=bool(entry.enabled)))
 
-    unused = [item.display_name for ident, item in prompts_by_id.items() if ident not in seen]
+    unused = [ident for ident in prompts_by_id if ident not in seen]
     if unused:
+        names = [prompts_by_id[ident].display_name for ident in unused[:5]]
+        more = f" 等共 {len(unused)} 个" if len(unused) > 5 else ""
         warnings.append(
-            "以下条目已定义但未加入顺序表，视为未启用：" + "、".join(unused)
+            f"有 {len(unused)} 个条目未列入任何顺序表（在酒馆里也不会发送），已追加到列表末尾并置为未启用："
+            f"{'、'.join(names)}{more}；如需全开，可在条目列表上方点「全部启用」"
         )
 
-    return order, 0, warnings
+    return order, chosen_index, warnings
 
 
 def _field_is_set(preset: STPreset, field: str) -> bool:

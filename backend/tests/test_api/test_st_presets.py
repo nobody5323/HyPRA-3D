@@ -289,6 +289,27 @@ def test_patch_assembly_switches() -> None:
     assert detail["assembly"]["names_behavior"] == 1
 
 
+def test_patch_system_prompt_override_affects_rendering() -> None:
+    """use_sysprompt 开启时，覆盖文本会替换系统条目正文（可在界面上编辑）。"""
+    import_preset(use_sysprompt=True)
+
+    resp = client.patch(
+        "/chat/st-presets/tavern-preset",
+        json={"system_prompt_override": "（测试语料）统一系统指令"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["detail"]["system_prompt_override"] == "（测试语料）统一系统指令"
+
+    body = client.post(
+        "/chat", json={"text": "你好", "st_preset_id": "tavern-preset"}
+    ).json()
+    all_text = "\n".join(message["content"] for message in body["messages"])
+
+    assert "（测试语料）统一系统指令" in all_text
+    assert "（测试语料）以角色身份回应对话者。" not in all_text   # main 被替换
+    assert "（测试语料）保持温柔语气。" not in all_text            # jailbreak 也被替换
+
+
 def test_patch_rejects_illegal_role() -> None:
     """条目角色是枚举，非法值同样在写入前拒收。"""
     import_preset()

@@ -298,6 +298,8 @@ class ChatNodes:
             user_input=state.get("user_input", ""),
             memory_text=self._compose_memory_text(state),
             style_text=style_text,
+            # use_sysprompt 开启时用它替换系统条目正文（空串 = 不替换，只告警）
+            system_prompt_override=st_preset.system_prompt_override,
             persona_name=persona.name if persona is not None else "",
             user_name=state.get("user_name", ""),
             macro_variables=dict(state.get("macro_variables", {})),

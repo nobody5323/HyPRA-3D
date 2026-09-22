@@ -160,6 +160,65 @@ def test_roll_with_invalid_expression_returns_text() -> None:
     assert render_macros("{{roll::abc}}", MacroContext())[0] == "abc"
 
 
+def test_last_message_macros() -> None:
+    """{{lastUserMessage}} / {{lastCharMessage}} / {{lastMessage}} / {{input}}。"""
+    context = MacroContext(
+        last_user_message="我说过的话",
+        last_char_message="她回的话",
+        current_input="这次说的",
+    )
+
+    resolved, unresolved = render_macros(
+        "U={{lastusermessage}} C={{lastcharmessage}} L={{lastmessage}} I={{input}}", context
+    )
+
+    assert resolved == "U=我说过的话 C=她回的话 L=这次说的 I=这次说的"
+    assert unresolved == []
+
+
+def test_space_separated_arguments() -> None:
+    """酒馆的另一种参数写法：{{roll 1d1}}、{{setvar k v}}（社区预设里很常见）。"""
+    context = MacroContext()
+
+    assert render_macros("{{roll 1d1}}", context)[0] == "1"
+    assert render_macros("{{setvar mood 有点低落}}{{getvar mood}}", context)[0] == "有点低落"
+    assert context.variables["mood"] == "有点低落"
+
+
+def test_space_separated_incvar() -> None:
+    context = MacroContext()
+
+    assert render_macros("{{setvar n 5}}{{incvar n}}", context)[0] == "6"
+
+
+def test_extended_time_macros() -> None:
+    """{{weekday}} / {{isotime}} / {{isodate}}（2026-03-04 是周三）。"""
+    context = MacroContext(now=datetime(2026, 3, 4, 9, 5, 7))
+
+    resolved, unresolved = render_macros("{{weekday}} {{isotime}} {{isodate}}", context)
+
+    assert resolved == "周三 09:05:07 2026-03-04"
+    assert unresolved == []
+
+
+def test_text_helper_macros() -> None:
+    """{{newline}} 换行；{{noop}} 输出空（常用作占位）。"""
+    resolved, unresolved = render_macros("A{{newline}}B{{noop}}C", MacroContext())
+
+    assert resolved == "A\nBC"
+    assert unresolved == []
+
+
+def test_roll_with_large_sides() -> None:
+    """预设里常见 {{roll 1d999999}}（空格写法 + 大面数）。"""
+    resolved, unresolved = render_macros(
+        "{{roll 1d999999}}", MacroContext(rng=random.Random(7))
+    )
+
+    assert 1 <= int(resolved) <= 999999
+    assert unresolved == []
+
+
 # --------------------------------------------------------------------------
 # 未识别与边界
 # --------------------------------------------------------------------------

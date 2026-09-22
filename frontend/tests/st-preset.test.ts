@@ -76,6 +76,7 @@ function makeDetail(overrides: Partial<StPresetDetail> = {}): StPresetDetail {
     ],
     memory_injection: { enabled: true, position: "in_chat", depth: 1, role: "system", order: 100 },
     override: {},
+    system_prompt_override: "",
     source_format: "chat",
     stripped_keys: [],
     warnings: [],

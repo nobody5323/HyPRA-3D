@@ -277,6 +277,27 @@ def test_use_sysprompt_without_override_keeps_original(make_preset, make_context
     assert any("未提供覆盖文本" in warning for warning in rendered.warnings)
 
 
+def test_macro_last_messages_from_history(make_preset, make_context) -> None:
+    """{{lastUserMessage}} / {{lastCharMessage}} 取自历史与本次输入。"""
+    from app.session.context import ChatTurn
+
+    data = make_preset()
+    for item in data["prompts"]:
+        if item["identifier"] == "main":
+            item["content"] = "上一句：{{lastcharmessage}} / 我说：{{lastusermessage}}"
+
+    rendered = render_st_preset(
+        parse_st_preset(data),
+        make_context(
+            history=[ChatTurn("assistant", "我在听")],
+            user_input="今天有点累",
+        ),
+    )
+
+    assert rendered.messages[0]["content"] == "上一句：我在听 / 我说：今天有点累"
+    assert rendered.unresolved_macros == []
+
+
 def test_dialogue_examples_block_with_separator(make_preset, make_context) -> None:
     """示例块：示例分隔文本 + 示例对话，插在 dialogueExamples 槽位。"""
     data = make_preset(new_example_chat_prompt="（测试语料）示例开始")

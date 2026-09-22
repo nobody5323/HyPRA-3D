@@ -409,7 +409,19 @@ def _build_macro_context(context: STRenderContext) -> MacroContext:
         scenario=context.scenario_text,
         persona=context.user_persona,
         variables=context.macro_variables,
+        # 对话上下文：供 {{lastUserMessage}} / {{lastCharMessage}} / {{input}} 使用
+        last_user_message=context.user_input or _last_by_role(context.history, "user"),
+        last_char_message=_last_by_role(context.history, "assistant"),
+        current_input=context.user_input,
     )
+
+
+def _last_by_role(history: list[ChatTurn], role: str) -> str:
+    """历史里最后一条指定角色的消息（没有则空串）。"""
+    for turn in reversed(history):
+        if turn.role == role:
+            return turn.text
+    return ""
 
 
 class _MacroRunner:

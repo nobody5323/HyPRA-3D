@@ -38,6 +38,9 @@ _TRIM_LINE_PATTERN = re.compile(r"[ \t]*\{\{\s*trim\s*\}\}[ \t]*\r?\n?")
 # {{roll::2d6+3}} / {{roll::1d20}} / {{roll::d20}}
 _ROLL_PATTERN = re.compile(r"^\s*(?:(\d+)\s*)?d\s*(\d+)\s*([+-]\s*\d+)?\s*$", re.IGNORECASE)
 
+#: {{weekday}} 的中文星期名（本项目面向中文场景）
+_WEEKDAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
 
 @dataclass
 class MacroContext:
@@ -60,6 +63,32 @@ class MacroContext:
     # 注入随机源（测试可传固定种子；缺省用模块级 random）
     rng: random.Random | None = None
 
+    # ---- 对话上下文（供 {{lastUserMessage}} 等宏）----
+    last_user_message: str = ""   # 最近一条用户消息（含本次输入）
+    last_char_message: str = ""   # 最近一条角色回复
+    current_input: str = ""       # 本次用户输入（{{input}}）
+
+    @property
+    def last_message(self) -> str:
+        """最后一条消息：优先本次输入，都没给才用上一条角色回复。"""
+        return self.current_input or self.last_user_message or self.last_char_message
+
+
+def _parse_body(body: str) -> tuple[str, list[str]]:
+    """解析宏体 → (宏名, 参数列表)。
+
+    兼容酒馆的**两种**参数写法：`{{roll::1d6}}` 与 `{{roll 1d6}}`
+    （社区预设里两种都大量出现，只认 `::` 会让后者整体变成「未识别宏」）。
+    """
+    if "::" in body:
+        name, _, args_text = body.partition("::")
+        return name.strip().lower(), args_text.split("::")
+
+    parts = body.split(None, 1)
+    name = parts[0].strip().lower()
+    args_text = parts[1].strip() if len(parts) > 1 else ""
+    return name, args_text.split() if args_text else []
+
 
 def render_macros(text: str, context: MacroContext | None = None) -> tuple[str, list[str]]:
     """解析文本中的 ST 宏，返回 (结果文本, 未识别宏列表)。
@@ -81,8 +110,8 @@ def render_macros(text: str, context: MacroContext | None = None) -> tuple[str, 
             return raw
         if body.startswith("//"):
             return ""   # {{//注释}}
-        name, separator, args_text = body.partition("::")
-        return _dispatch(name.strip().lower(), args_text if separator else "", raw, ctx, unresolved)
+        name, args = _parse_body(body)
+        return _dispatch(name, args, raw, ctx, unresolved)
 
     resolved = _MACRO_PATTERN.sub(_replace, cleaned)
     return resolved, unresolved
@@ -95,12 +124,16 @@ def render_macros(text: str, context: MacroContext | None = None) -> tuple[str, 
 
 def _dispatch(
     name: str,
-    args_text: str,
+    args: list[str],
     raw: str,
     ctx: MacroContext,
     unresolved: list[str],
 ) -> str:
-    """按宏名分派；不认识的宏返回原文并记录。"""
+    """按宏名分派；不认识的宏返回原文并记录。
+
+    `args` 已由 `_parse_body` 统一切好，因此 `{{roll::1d6}}` 与 `{{roll 1d6}}`
+    走同一条路径，无需分别处理。
+    """
     # ---- 变量替换类 ----
     if name == "char":
         return ctx.char_name
@@ -115,24 +148,46 @@ def _dispatch(
     if name == "persona":
         return ctx.persona
 
+    # ---- 对话上下文类 ----
+    if name == "lastusermessage":
+        return ctx.last_user_message
+    if name == "lastcharmessage":
+        return ctx.last_char_message
+    if name == "lastmessage":
+        return ctx.last_message
+    if name == "input":
+        return ctx.current_input
+
     # ---- 时间类 ----
     if name == "time":
         return _now(ctx).strftime("%H:%M")
     if name == "date":
         return _now(ctx).strftime("%Y-%m-%d")
+    if name == "isotime":
+        return _now(ctx).strftime("%H:%M:%S")
+    if name == "isodate":
+        return _now(ctx).strftime("%Y-%m-%d")
+    if name == "weekday":
+        return _WEEKDAYS[_now(ctx).weekday()]
+
+    # ---- 文本处理类 ----
+    if name == "newline":
+        return "\n"
+    if name == "noop":
+        return ""
 
     # ---- 会话变量类 ----
-    args = args_text.split("::") if args_text else []
     if name == "getvar":
         return ctx.variables.get(args[0].strip(), "") if args else ""
     if name == "setvar":
         if len(args) >= 2:
-            ctx.variables[args[0].strip()] = args[1]
+            # 旧式写法 `{{setvar name value}}` 的值可能含空格 → 取首参之后的全部
+            ctx.variables[args[0].strip()] = " ".join(args[1:])
         return ""
     if name == "addvar":
         if len(args) >= 2:
             key = args[0].strip()
-            ctx.variables[key] = ctx.variables.get(key, "") + args[1]
+            ctx.variables[key] = ctx.variables.get(key, "") + " ".join(args[1:])
         return ""
     if name in ("incvar", "decvar"):
         if args:
@@ -147,12 +202,14 @@ def _dispatch(
         return ""
 
     # ---- 随机类 ----
+    options_text = args[0] if args else ""
     if name == "random":
-        return _random_pick(args_text, ctx, stable=False)
+        return _random_pick(options_text, ctx, stable=False)
     if name == "pick":
-        return _random_pick(args_text, ctx, stable=True)
+        return _random_pick(options_text, ctx, stable=True)
     if name == "roll":
-        return _roll(args_text or "1d20", ctx)
+        # 空格写法 `{{roll 1d999999}}` 与 `{{roll::1d999999}}` 等价
+        return _roll(" ".join(args) or "1d20", ctx)
 
     unresolved.append(raw)
     return raw

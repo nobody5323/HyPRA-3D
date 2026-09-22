@@ -28,6 +28,30 @@ POSITION_ABSOLUTE = 1   # In-Chat：按 depth 插进对话历史
 # ---- 消息角色 ----
 VALID_ROLES = ("system", "user", "assistant")
 
+#: 角色别名：社区预设里常见非标准写法（Gemini 风格的 `model`、旧版的 `ai`），
+#: 语义上等于 assistant —— 直接回退 system 会让这些条目的效果彻底错位。
+ROLE_ALIASES: dict[str, str] = {
+    "model": "assistant",
+    "ai": "assistant",
+    "bot": "assistant",
+    "char": "assistant",
+    "character": "assistant",
+    "human": "user",
+}
+
+
+def normalize_role(role: str) -> str:
+    """把角色名归一到 `VALID_ROLES` 之一（未知值回退 system）。"""
+    value = (role or "").strip().lower()
+    if value in VALID_ROLES:
+        return value
+    return ROLE_ALIASES.get(value, "system")
+
+
+def is_known_role_alias(role: str) -> bool:
+    """是否为已知别名（已知别名不产生“不受支持”告警，避免噪声）。"""
+    return (role or "").strip().lower() in ROLE_ALIASES
+
 # ---- marker 标识（正文由 HyPRA 运行时填充，映射见契约文档 §5）----
 MARKER_MAIN = "main"
 MARKER_WORLD_INFO_BEFORE = "worldInfoBefore"

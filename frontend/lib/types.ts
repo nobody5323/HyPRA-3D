@@ -373,6 +373,8 @@ export interface StPresetDetail {
   memory_injection: StMemoryInjection;
   /** 当前覆盖层内容（调试/重置提示用） */
   override: Record<string, unknown>;
+  /** use_sysprompt 开启时替换系统条目正文的文本（空 = 未提供，按原正文发送） */
+  system_prompt_override: string;
   /** chat | text（text = 仅采样参数可用） */
   source_format: string;
   /** 导入时为安全剥离的端点/密钥类字段名（值从未保存） */
@@ -394,6 +396,8 @@ export interface StPresetPatch {
   prompt_order?: string[];
   memory_injection?: Record<string, unknown>;
   assembly?: Record<string, unknown>;
+  /** use_sysprompt 开启时的覆盖文本（空串 = 清空） */
+  system_prompt_override?: string;
 }
 
 // =============================================================

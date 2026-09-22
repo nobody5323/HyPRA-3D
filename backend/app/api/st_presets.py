@@ -129,6 +129,8 @@ class StPresetPatchRequest(BaseModel):
     prompt_order: list[str] | None = None
     memory_injection: dict[str, object] | None = None
     assembly: dict[str, object] | None = None
+    #: use_sysprompt 开启时用来替换系统条目正文的文本（空串 = 清空）
+    system_prompt_override: str | None = None
 
 
 def _load_st_preset(preset_id: str) -> tuple[StPresetStore, ParsedPreset]:
@@ -186,6 +188,8 @@ def _st_preset_detail(store: StPresetStore, preset_id: str, parsed: ParsedPreset
         "memory_injection": store.get_memory_injection(preset_id),
         "override": store.get_override(preset_id),
         "source_format": parsed.source_format,
+        # use_sysprompt 开启时的覆盖文本（正文，供用户在自己的界面里编辑）
+        "system_prompt_override": parsed.system_prompt_override,
         # 从索引读：剥离发生在导入那一刻，重新载入的文件里已无这些字段
         "stripped_keys": store.get_stripped_keys(preset_id),
         "warnings": parsed.warnings,

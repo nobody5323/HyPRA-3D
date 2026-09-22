@@ -561,6 +561,12 @@ def apply_override(parsed: ParsedPreset, override: dict) -> ParsedPreset:
                 entry.enabled = entries_patch[entry.identifier]
 
     parsed.memory_injection = normalize_memory_injection(override.get("memory_injection"))
+
+    # ---- System Prompt 覆盖文本（use_sysprompt 开启时替换系统条目正文）----
+    override_text = override.get("system_prompt_override")
+    if isinstance(override_text, str):
+        parsed.system_prompt_override = override_text
+
     return parsed
 
 
