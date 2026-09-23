@@ -9,11 +9,14 @@
 
 | | Web 端（`frontend/`） | 桌面端（`desktop/`） |
 |---|---|---|
-| 运行方式 | 浏览器访问 `localhost:3000` | Electron 透明窗，托盘常驻 |
-| 界面 | 完整工作台（对话 / 记忆可见性 / 世界书 / 创作工坊 / 数字人设置） | 桌面上的一只角色 + 气泡 + 一键聊天 |
+| 运行方式 | 浏览器访问 `localhost:3000` | Electron：**程序控制台**（常规窗口）+ **桌宠窗**（透明窗）+ 托盘常驻 |
+| 界面 | 完整工作台（对话 / 记忆可见性 / 世界书 / 创作工坊 / 数字人设置） | 程序控制台（11 个分组，复用 Web 端面板）+ 桌面上的一只角色 + 气泡 + 一键聊天 |
 | 数字人 | 魔珐 3D / Live2D / 立绘（三档降级） | **Live2D / 立绘**（不做 3D：桌宠需要透明小窗常驻，3D 那套留给 Web 端演示） |
-| 配置入口 | 页面内的各类设置面板 | 桌宠自身的窗口开关（缩放 / 置顶 / 穿透）+ 托盘；**业务设置仍在 Web 端** |
+| 配置入口 | 页面内的各类设置面板 | **程序控制台**（模型库 / 构图调试 / 插件 / 技能 / 预设 / 会话 / 创作工坊 / 桌宠设置 / 模式启动） |
 | 后端 | 同一个 FastAPI（`localhost:8000`） | 同左 |
+
+> **启动行为**：桌面端启动后先显示**程序控制台**（配置与调试主入口），
+> **桌宠窗不再自动弹出** —— 由用户在控制台的「模式启动」里选「以桌面模式启动」（见 §9）。
 
 换句话说：**桌面端不是 Web 端的复制品，而是"陪伴在场"的那一面**。评审看能力用 Web 端，日常陪伴用桌宠端。
 
@@ -26,6 +29,9 @@ desktop/
 ├── src/main/            主进程（CommonJS，tsc 编译到 dist/main）
 │   ├── index.ts         组装：静态服务 → 托盘 → 设置 → IPC → 快捷键 → 显示窗口
 │   ├── petWindow.ts     桌宠窗：透明/置顶/穿透两态/拖拽/位置持久化/显示器自愈
+│   ├── consoleWindow.ts 控制台窗：常规窗口、关闭即隐藏、页面来源解析
+│   ├── consoleIpc.ts    控制台 IPC（模式启动 / 桌宠设置 / 打开 Web 端）
+│   ├── consoleSettings.ts 控制台设置（userData/console-settings.json，原子写）
 │   ├── petGeometry.ts   窗口几何纯函数（可单测）
 │   ├── petSettings.ts   设置读写（userData/pet-settings.json，原子写）
 │   ├── petPositionStore.ts 位置读写（userData/pet-window.json，原子写）
@@ -34,8 +40,10 @@ desktop/
 │   ├── trayIcon.ts      运行时生成 PNG 图标（仓库里不放二进制资产）
 │   ├── ipc.ts / ipcValidation.ts  IPC 注册与入参白名单校验
 │   └── windowSecurity.ts 禁止导航 / 新窗 / webview
-├── src/preload/pet.ts   contextBridge 白名单（渲染层唯一的桌面能力入口）
+├── src/preload/pet.ts   contextBridge 白名单（桌宠窗唯一的桌面能力入口）
+├── src/preload/console.ts 控制台的能力白名单（window.hyprConsole）
 ├── src/renderer/pet/    React 桌宠窗（Vite 独立入口，**自己写 UI**）
+├── src/renderer/console/ React 程序控制台（Vite 第二入口，**复用 Web 端组件 + Tailwind**）
 └── src/shared/ipc.ts    两端共享的类型与常量（禁止 import electron / react）
 ```
 
@@ -47,8 +55,11 @@ desktop/
 - `hooks/avatar/useAvatar.ts`（浏览器 TTS / 服务端 TTS 双实现 + 逐句降级）
 - `hooks/chat/useChatSession.ts`（对话、记忆召回、情绪、世界书、工具调用）
 - `hooks/avatar/useTtsPreferences.ts`
+- `hooks/avatar/useAvatarModels.ts`（模型清单 / 上传 / 情绪映射 / 构图校准 / 当前选用）
+- **`components/**`**（程序控制台直接复用 Web 端面板：模型库、能力中心、技能、LLM、人设与文风、会话、创作工坊）
 
-桌面端**自己写**的部分：桌宠窗 UI（气泡、输入、右键菜单、设置面板）与全部窗口交互。
+桌面端**自己写**的部分：桌宠窗 UI（气泡、输入、右键菜单、设置面板）、
+程序控制台的外壳与分组布局，以及全部窗口交互。
 这样做的理由见 §3.3。
 
 ---
@@ -170,19 +181,23 @@ Live2D Cubism runtime 由官方 SDK 提供，使用与分发须遵守 Live2D 官
 ```bash
 cd desktop
 npm run typecheck     # 渲染层 + 主进程两套 tsconfig
-npm test              # 57 项单测：几何 / 设置归一化 / IPC 校验 / 静态服务 / 图标 / preload 边界
+npm test              # 68 项单测：几何 / 设置归一化（桌宠 + 控制台）/ IPC 校验 / 静态服务 / 图标 / preload 边界
 npm run build         # 构建 + 资源边界校验
 npm run dist:win      # 打包 portable + nsis，再校验安装包内容
 ```
 
 人工验收（`npm run dev` 或打包后的 exe）：
 
-1. 桌面右下角出现**无边框、透明背景**的角色，可拖动，松手位置被记住；
+0. 启动后先出现**「HyPRA 程序控制台」窗口**（11 个分组，样式与 Web 端一致）；
+   托盘「程序控制台」可再次唤出；关闭窗口只是隐藏（不是退出）；
+1. 「模式启动」→「以桌面模式启动」，桌面右下角出现**无边框、透明背景**的角色，可拖动，松手位置被记住；
 2. 右键出菜单：开关穿透 / 置顶、缩放、打开对话、隐藏、退出；
 3. 「穿透」后它不再遮挡其它窗口，鼠标移到角色上浮现「解锁交互」；
 4. 托盘菜单与状态一致；`Ctrl+Alt+P` 显示 / 隐藏；
 5. 打开对话说一句话 → 有回复、有情绪徽标、Live2D 表情跟着变；
-6. 缩放 70%–150% 时窗口与内容同步（`--pet-scale` CSS 变量），不出现错位。
+6. 缩放 70%–150% 时窗口与内容同步（`--pet-scale` CSS 变量），不出现错位；
+7. 「形象调试」里选模型、拖动预览 → 保存构图 → 桌宠窗里模型与底部按钮对齐（不再分离）；
+8. 桌宠跑 Live2D 时**没有**米黄圆底座与情绪光晕（只留模型本身）；切到静态立绘时底座回来。
 
 ---
 
@@ -195,3 +210,58 @@ npm run dist:win      # 打包 portable + nsis，再校验安装包内容
 | 界面一直「后端未连接」 | 后端没起，或后端 CORS 未放行回环地址（见 §4） |
 | 打包时卡在下载 | 需要 `ELECTRON_MIRROR`（Electron 二进制）与 `ELECTRON_BUILDER_BINARIES_MIRROR`（打包工具）；`electronDist` 已指向本地 Electron 以避免校验下载 |
 | 安装包体积约 96MB | Electron 运行时固有体积；Web 端仍是轻量的浏览器访问 |
+
+---
+
+## 9. 程序控制台（`console.html`）
+
+**定位**：桌面端的**配置与调试主入口**。启动后先看到它；桌宠窗与 Web 端都由用户在里面选。
+
+### 9.1 为什么是独立窗口，而不是 Web 端的一个路由
+
+需求原话是「Web 端和桌面的模型界面，让用户在程序控制台里选择调试好之后再选择哪个模式」——
+即控制台必须是**程序自身**的一部分：
+
+- Web 端路由要求 Next 服务先跑起来，而「选哪个模式启动」恰恰是**什么界面都还没启动时**要做的事；
+- 桌面端不该为了改一个设置而依赖另一个前端服务。
+
+因此控制台是**同一进程里的第二个 BrowserWindow**：常规窗口（有边框、可缩放、进任务栏），
+关闭按钮 = **隐藏**（不是退出），由托盘「程序控制台」随时唤出。
+
+### 9.2 复用方式：Tailwind + Web 端组件
+
+控制台**不重写面板**。`frontend/components/**` 已核实**零 `next/*` 依赖**，可直接在 Vite 里渲染，
+唯一缺口是样式：那些组件用 Tailwind 语义色（`bg-surface-panel` 等）。
+
+- `desktop/postcss.config.mjs` + `desktop/tailwind.config.ts`（后者**从 `../frontend/tailwind.config` import 主题**，
+  只覆盖 `content`）——色板单一来源，避免两端各写一份而漂移；
+- `src/renderer/console/main.tsx` 引入 `@/app/globals.css`（`@tailwind` 指令 + 焦点环 + 页面底色）。
+
+两个弹层组件（`LlmSettings` / `StudioPanel`）加了 `variant?: "overlay" | "inline"`：
+Web 端仍是原来的弹层行为，控制台用 `inline`（不限尺寸、不抢焦点、不响应 Esc、不渲染关闭按钮）。
+
+### 9.3 边界
+
+| 事项 | 约定 |
+|---|---|
+| 打开 Web 端 | 只调 `shell.openExternal`，**不代起前端服务**（那会带来端口冲突与孤儿进程）；失败把原因返回界面 |
+| URL 白名单 | `normalizeWebUrl` 只放行 http/https —— 这个值最终进 `openExternal`，而 `file://` / 自定义协议能借它拉起本机任意程序 |
+| 桌宠设置 | 与桌宠窗共用同一个 `commitSettings`（校验 + 落盘 + 广播 + 刷新托盘），不存在两份状态 |
+| 能力面 | `window.hyprConsole` 刻意**不含**拖拽 / 穿透 / 缩放这些桌宠专属能力（见 `src/preload/console.ts`） |
+| 不代理业务 | 与桌宠窗一致：本进程不接触模型 API Key，控制台里的数据全部由后端提供 |
+
+### 9.4 模型构图校准（解决「模型与底部按钮分离」）
+
+桌宠窗里拖动只能移动**整个窗口**，改不了模型在窗口里的位置——分离的根因是**构图**：
+不同 Live2D 模型的画布比例差别很大，而构图曾经是代码常量（`frontend/lib/live2d/model-assets.ts`）。
+
+现在：
+
+1. 模型元数据（`backend/data/avatar_models/<id>/model.json`）带 `layout: { scale, offsetX, offsetY, anchor }`；
+2. 「形象调试」里**拖动预览即调位移**、滑块调缩放，点「保存构图」写入后端；
+3. **Web 端与桌面端读同一份**（`GET /media/avatar/models`），所以调一次两边都对；
+4. 「当前用哪个模型」也从 localStorage 迁到后端（`GET|PUT /media/avatar/models/selection`）——
+   桌宠窗是 `127.0.0.1:34567`、Web 端是 `localhost:3000`，localStorage 天然不共享。
+
+> 内置模型（`LIVE2D_MODELS.default`）的构图写在代码常量里，因此调试台里**能预览、不能保存**；
+> 要保存校准，先在「模型库」上传模型并切换过去。

@@ -77,10 +77,11 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
                         #     / chat（会话与本地偏好）/ studio / live2d（三态桥，路径不可动）
       vendor/cubism/    #   Cubism SDK（脚本落位，不入库）
       tests/            #   vitest
-    desktop/            # Electron 桌宠端（透明桌宠窗 + 托盘）
-      src/main/         #   主进程：窗口/穿透/托盘/设置/loopback 静态资源服务
+    desktop/            # Electron 桌面端（程序控制台 + 透明桌宠窗 + 托盘）
+      src/main/         #   主进程：控制台窗/桌宠窗/穿透/托盘/设置/loopback 静态资源服务
       src/preload/      #   contextBridge 白名单（sandbox 下只能 require electron）
       src/renderer/pet/ #   桌宠窗（Vite 独立入口；经 `@/` 复用 frontend 的渲染器与 hooks）
+      src/renderer/console/ # 程序控制台（Vite 第二入口；复用 frontend/components + Tailwind）
       src/shared/       #   两端共享的 IPC 契约（禁 electron / react 依赖）
     docs/               # 参赛说明文档、演示脚本、设计文档
     _local/             # 本机私有资料：自备 SDK/模型包、开发留档、旧备份、生成缓存 —— gitignore
@@ -119,6 +120,11 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
   桌宠窗是 Vite 独立入口（不依赖 Next 服务），页面由主进程的 loopback 静态资源服务提供
   （前端资源引用是绝对路径 `/live2d`、`/portraits`，`file://` 下会 404），端口固定优先以
   保证 localStorage origin 稳定。主进程**不接触任何模型 API Key**，不代理业务请求。
+  **程序控制台**（`console.html`）是启动后的默认窗口（常规窗，关闭 = 隐藏），
+  桌宠窗与 Web 端都由它在「模式启动」里选定后再启动（桌宠不再自动弹出）；
+  控制台复用 `frontend/components/**`（已核实零 `next/*` 依赖），因此 desktop 接了 Tailwind
+  （theme 从 `frontend/tailwind.config` import，单一来源）。
+  模型构图校准（scale / offset / anchor）与「当前用哪个模型」均存**后端模型元数据**，两端口径一致。
   发布包不含模型/音频（白名单拷贝 + `scripts/verify-release-assets.mjs` 硬校验），
   用户自备模型放 `%APPDATA%/HyPRA/live2d/`。设计见 `docs/desktop-pet.md`。
 
