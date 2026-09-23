@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { requireBoolean, requirePoint, requireSettingsPatch } from "../src/main/ipcValidation";
+import {
+  requireBoolean,
+  requireConsoleSettingsPatch,
+  requirePoint,
+  requireSettingsPatch,
+} from "../src/main/ipcValidation";
 
 describe("requireBoolean", () => {
   it("接受布尔值", () => {
@@ -53,5 +58,28 @@ describe("requireSettingsPatch", () => {
   it("非对象入参报错", () => {
     expect(() => requireSettingsPatch(null)).toThrow(TypeError);
     expect(() => requireSettingsPatch("scale=1")).toThrow(TypeError);
+  });
+});
+
+describe("requireConsoleSettingsPatch", () => {
+  it("归一化合法地址", () => {
+    expect(requireConsoleSettingsPatch({ webUrl: "http://localhost:3000/" })).toEqual({
+      webUrl: "http://localhost:3000",
+    });
+  });
+
+  it("非法协议报错，而不是静静回落成默认值", () => {
+    // 用户明明填了东西却没生效（比如填成 file:///...）是最难查的一类问题
+    expect(() => requireConsoleSettingsPatch({ webUrl: "file:///C:/calc.exe" })).toThrow(TypeError);
+    expect(() => requireConsoleSettingsPatch({ webUrl: "" })).toThrow(TypeError);
+  });
+
+  it("只挑出已知字段", () => {
+    expect(requireConsoleSettingsPatch({ evil: 1 })).toEqual({});
+  });
+
+  it("非对象入参报错", () => {
+    expect(() => requireConsoleSettingsPatch(null)).toThrow(TypeError);
+    expect(() => requireConsoleSettingsPatch("http://x")).toThrow(TypeError);
   });
 });

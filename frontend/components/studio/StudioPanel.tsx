@@ -42,6 +42,7 @@ export function StudioPanel({
   defaultScope,
   panelId = "studio-panel",
   onCatalogChange,
+  variant = "overlay",
 }: {
   open: boolean;
   onClose: () => void;
@@ -52,6 +53,12 @@ export function StudioPanel({
   panelId?: string;
   /** catalog 更新回调（页面据此刷新「陪伴对象」选择器） */
   onCatalogChange?: (catalog: StudioCatalog) => void;
+  /**
+   * 展示形态：
+   * - `overlay`（默认）= Web 端全屏模态（带遮罩、Esc 可关）；
+   * - `inline` = 直接铺在容器里（程序控制台）：无遮罩、不响应 Esc。
+   */
+  variant?: "overlay" | "inline";
 }) {
   const [catalog, setCatalog] = useState<StudioCatalog | null>(null);
   const [tab, setTab] = useState<StudioTab>("persona");
@@ -99,9 +106,9 @@ export function StudioPanel({
     closeRef.current?.focus();
   }, [open, load]);
 
-  // Esc 关闭并归还焦点
+  // Esc 关闭并归还焦点（仅模态形态；内嵌形态没有「关闭」这个语义）
   useEffect(() => {
-    if (!open) return;
+    if (!open || variant === "inline") return;
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -109,23 +116,28 @@ export function StudioPanel({
     }
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [open, close]);
+  }, [open, close, variant]);
 
   if (!open) return null;
 
   return (
     <div
       role="presentation"
-      className="fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/30 p-3 sm:p-6"
+      className={
+        variant === "inline"
+          ? "w-full"
+          : "fixed inset-0 z-40 flex items-start justify-center overflow-y-auto bg-ink/30 p-3 sm:p-6"
+      }
       onClick={(event) => {
-        // 点击遮罩才关闭（点面板内部不关）
+        // 点击遮罩才关闭（点面板内部不关）；内嵌形态没有遮罩，自然也不会关
+        if (variant === "inline") return;
         if (event.target === event.currentTarget) close();
       }}
     >
       <div
         id={panelId}
         role="dialog"
-        aria-modal="true"
+        aria-modal={variant === "inline" ? undefined : true}
         aria-labelledby={titleId}
         className="w-full max-w-5xl rounded-2xl border border-line bg-surface-panel shadow-xl"
       >
@@ -138,14 +150,16 @@ export function StudioPanel({
               自定义陪伴角色的性格、背景故事，以及按条件触发的世界设定
             </p>
           </div>
-          <button
-            ref={closeRef}
-            type="button"
-            onClick={close}
-            className="focus-ring rounded-lg border border-line px-3 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-hover"
-          >
-            关闭
-          </button>
+          {variant === "overlay" ? (
+            <button
+              ref={closeRef}
+              type="button"
+              onClick={close}
+              className="focus-ring rounded-lg border border-line px-3 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-hover"
+            >
+              关闭
+            </button>
+          ) : null}
         </header>
 
         <div

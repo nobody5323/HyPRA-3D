@@ -167,3 +167,118 @@ const SCALE_DIVISOR = Math.round(1 / PET_SCALE_STEP);
 export function roundScale(scale: number): number {
   return Math.round(scale * SCALE_DIVISOR) / SCALE_DIVISOR;
 }
+
+// =============================================================
+// 程序控制台窗（console.html）
+// =============================================================
+
+/**
+ * 控制台窗的可持久化设置。
+ *
+ * 与 `PetSettings` 分开存：桌宠设置管的是「窗口长什么样」，
+ * 控制台设置管的是「程序怎么被启动」，两者语义与生命周期都不同。
+ */
+export interface ConsoleSettings {
+  /** Web 端地址：「以 Web 模式启动」时用系统浏览器打开它 */
+  webUrl: string;
+}
+
+export const DEFAULT_CONSOLE_SETTINGS: ConsoleSettings = {
+  webUrl: "http://localhost:3000",
+};
+
+/**
+ * 归一化 Web 端地址。
+ *
+ * **只允许 http/https**：这个值最终会交给 `shell.openExternal`，
+ * 而 `file://`、`javascript:`、自定义协议都能借它拉起本机任意程序——
+ * 设置文件是用户可手改的，不能当可信输入。
+ */
+export function normalizeWebUrl(value: unknown): string {
+  const raw = String(value ?? "").trim();
+  if (!raw) {
+    return "";
+  }
+
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" && url.protocol !== "https:") {
+      return "";
+    }
+
+    // 去掉末尾斜杠：拼子路径时不会出现 `//`
+    const path = url.pathname.replace(/\/+$/, "");
+    return `${url.origin}${path}`;
+  } catch {
+    return "";
+  }
+}
+
+/** 把任意输入归一化成合法控制台设置（非法值回落默认，而不是存进去让功能永远不可用） */
+export function normalizeConsoleSettings(value: unknown): ConsoleSettings {
+  const source = (value ?? {}) as { webUrl?: unknown };
+  const normalized = normalizeWebUrl(source.webUrl);
+
+  return { webUrl: normalized || DEFAULT_CONSOLE_SETTINGS.webUrl };
+}
+
+/** 控制台窗的状态快照 */
+export interface ConsoleState {
+  /** 桌宠窗当前是否可见（控制台里「桌面模式」的运行状态按它显示） */
+  petVisible: boolean;
+  /** 桌宠窗的完整状态（缩放 / 穿透 / 置顶），控制台的「桌宠设置」直接读它 */
+  petState: PetWindowState;
+  /** 桌宠窗设置（与桌宠窗内的设置面板共用同一份，改完两边一致） */
+  petSettings: PetSettings;
+  settings: ConsoleSettings;
+  environment: PetEnvironment;
+}
+
+/** 「以 Web 模式启动」的结果（失败时给出可读原因，界面直接展示） */
+export interface OpenWebResult {
+  ok: boolean;
+  reason?: string;
+}
+
+/** 控制台窗的 IPC 通道名 */
+export const CONSOLE_CHANNELS = {
+  getState: "console:get-state",
+  stateChanged: "console:state-changed",
+  getSettings: "console:get-settings",
+  settingsChanged: "console:settings-changed",
+  updateSettings: "console:update-settings",
+  showPet: "console:show-pet",
+  hidePet: "console:hide-pet",
+  updatePetSettings: "console:update-pet-settings",
+  openWeb: "console:open-web",
+  quit: "console:quit",
+} as const;
+
+export type ConsoleChannelName = keyof typeof CONSOLE_CHANNELS;
+export type ConsoleChannel = (typeof CONSOLE_CHANNELS)[ConsoleChannelName];
+
+export type ConsoleStateListener = (state: ConsoleState) => void;
+export type ConsoleSettingsListener = (settings: ConsoleSettings) => void;
+
+/**
+ * 控制台窗能看到的桌面能力（`window.hyprConsole`）。
+ *
+ * 刻意**不**把 `window.hyprPet` 合并进来：控制台是常规窗口，不需要拖拽、穿透、
+ * 缩放这些桌宠专属能力，给它多佘入口只会扩大可被滥用的面。
+ */
+export interface ConsoleBridge {
+  getState(): Promise<ConsoleState>;
+  getSettings(): Promise<ConsoleSettings>;
+  updateSettings(patch: Partial<ConsoleSettings>): Promise<ConsoleSettings>;
+  /** 以桌面模式启动：显示桌宠窗 */
+  showPet(): Promise<ConsoleState>;
+  /** 收起桌宠窗（回到托盘） */
+  hidePet(): Promise<ConsoleState>;
+  /** 改桌宠设置（缩放 / 穿透 / 置顶）：与桌宠窗内的设置面板共用同一份设置 */
+  updatePetSettings(patch: Partial<PetSettings>): Promise<ConsoleState>;
+  /** 以 Web 模式启动：用系统浏览器打开 Web 端地址 */
+  openWeb(): Promise<OpenWebResult>;
+  quit(): void;
+  onStateChanged(listener: ConsoleStateListener): () => void;
+  onSettingsChanged(listener: ConsoleSettingsListener): () => void;
+}

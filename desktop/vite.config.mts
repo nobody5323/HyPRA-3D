@@ -108,6 +108,8 @@ export default defineConfig({
     rollupOptions: {
       input: {
         pet: path.resolve(currentDir, "pet.html"),
+        // 程序控制台：普通窗口，复用 Web 端组件（Tailwind 由 postcss.config.mjs 接上）
+        console: path.resolve(currentDir, "console.html"),
       },
     },
   },

@@ -1,0 +1,38 @@
+/*
+ * 控制台窗的少量补充样式。
+ *
+ * 绝大部分外观来自 Tailwind（含复用 Web 端组件的那套语义色板），
+ * 这里只处理「桌面窗口」特有的两件事：整窗高度与滚动条。
+ */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden; /* 滚动交给内容区，避免整窗出现两条滚动条 */
+}
+
+#console-root {
+  height: 100%;
+}
+
+/* 控制台是长时间开着的窗口：滚动条做得细一点，别抢内容的视觉重量 */
+.consoleScroll {
+  scrollbar-width: thin;
+  scrollbar-color: #d9d2c6 transparent;
+}
+
+.consoleScroll::-webkit-scrollbar {
+  width: 10px;
+}
+
+.consoleScroll::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background-clip: content-box;
+  background-color: #d9d2c6;
+}
+
+.consoleScroll::-webkit-scrollbar-track {
+  background: transparent;
+}

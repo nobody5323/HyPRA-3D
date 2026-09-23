@@ -11,6 +11,8 @@ import { createTrayIconPng } from "./trayIcon";
  */
 
 export interface TrayHandlers {
+  /** 打开程序控制台（配置与调试的主入口） */
+  openConsole(): void;
   /** 显示 / 隐藏桌宠窗 */
   toggleVisibility(): void;
   /** 开关点击穿透 */
@@ -40,6 +42,11 @@ export function createAppTray(handlers: TrayHandlers, state: TrayState): AppTray
 
   const buildMenu = (): Menu =>
     Menu.buildFromTemplate([
+      {
+        label: "程序控制台",
+        click: () => handlers.openConsole(),
+      },
+      { type: "separator" },
       {
         label: current.visible ? "隐藏桌宠" : "显示桌宠",
         click: () => handlers.toggleVisibility(),

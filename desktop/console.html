@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      生产 CSP：控制台只允许加载自身资源，且只能连本机后端（FastAPI，默认 8000）。
+      与 pet.html 同一套策略——控制台比桌宠窗多做的事只是「读后端接口」，
+      并不需要任何额外来源。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:*; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>HyPRA 程序控制台</title>
+  </head>
+  <body>
+    <div id="console-root"></div>
+    <script type="module" src="/src/renderer/console/main.tsx"></script>
+  </body>
+</html>

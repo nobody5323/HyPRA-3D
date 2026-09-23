@@ -45,12 +45,21 @@ export function LlmSettings({
   onClose,
   onApplied,
   panelId = "llm-settings",
+  variant = "overlay",
 }: {
   open: boolean;
   onClose: () => void;
   /** 应用 / 恢复成功后回调（页面据此刷新顶部显示与「自动」预设档） */
   onApplied?: (config: LlmConfigInfo) => void;
   panelId?: string;
+  /**
+   * 展示形态。
+   *
+   * - `overlay`（默认）= Web 端页面右上角的下拉面板：绝对定位、限宽限高、抢焦点、Esc 可关；
+   * - `inline` = 直接铺在容器里（程序控制台）：不限尺寸，且**不抢焦点 / 不响应 Esc**——
+   *   控制台是常驻窗口，抢焦点会让用户一进页面光标就跳进输入框。
+   */
+  variant?: "overlay" | "inline";
 }) {
   const [catalog, setCatalog] = useState<LlmConfigResponse | null>(null);
   const [provider, setProvider] = useState("mock");
@@ -111,17 +120,17 @@ export function LlmSettings({
     };
   }, [open, fillFrom]);
 
-  // 打开后聚焦首个控件，并记住来源焦点
+  // 打开后聚焦首个控件，并记住来源焦点（仅下拉形态：内嵌时抢焦点是干扰）
   useEffect(() => {
-    if (!open) return;
+    if (!open || variant === "inline") return;
     restoreFocusRef.current =
       document.activeElement instanceof HTMLElement ? document.activeElement : null;
     firstFieldRef.current?.focus();
-  }, [open]);
+  }, [open, variant]);
 
-  // Esc 关闭
+  // Esc 关闭（仅下拉形态：内嵌形态没有「关闭」这个语义）
   useEffect(() => {
-    if (!open) return;
+    if (!open || variant === "inline") return;
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -130,7 +139,7 @@ export function LlmSettings({
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, variant]);
 
   if (!open) return null;
 
@@ -239,9 +248,13 @@ export function LlmSettings({
     <div
       id={panelId}
       role="dialog"
-      aria-modal="true"
+      aria-modal={variant === "inline" ? undefined : true}
       aria-labelledby={titleId}
-      className="absolute right-0 top-full z-30 mt-2 max-h-[min(80vh,620px)] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-lg"
+      className={
+        variant === "inline"
+          ? "w-full rounded-2xl border border-line bg-surface-panel p-4"
+          : "absolute right-0 top-full z-30 mt-2 max-h-[min(80vh,620px)] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-lg"
+      }
     >
       <div className="flex items-start justify-between">
         <div>
@@ -252,13 +265,15 @@ export function LlmSettings({
             走 OpenAI 兼容 API，切换后下一轮对话即生效
           </p>
         </div>
-        <button
-          type="button"
-          onClick={close}
-          className="focus-ring rounded-lg px-2 py-1 text-xs text-ink-soft transition-colors hover:bg-surface-hover hover:text-ink"
-        >
-          关闭
-        </button>
+        {variant === "overlay" ? (
+          <button
+            type="button"
+            onClick={close}
+            className="focus-ring rounded-lg px-2 py-1 text-xs text-ink-soft transition-colors hover:bg-surface-hover hover:text-ink"
+          >
+            关闭
+          </button>
+        ) : null}
       </div>
 
       {current && (

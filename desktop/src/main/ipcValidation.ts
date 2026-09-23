@@ -1,5 +1,5 @@
-import type { PetSettings } from "../shared/ipc";
-import { normalizePetSettings } from "../shared/ipc";
+import type { ConsoleSettings, PetSettings } from "../shared/ipc";
+import { normalizePetSettings, normalizeWebUrl } from "../shared/ipc";
 import type { PetDragPoint } from "../shared/ipc";
 
 /**
@@ -57,6 +57,34 @@ export function requireSettingsPatch(value: unknown): Partial<PetSettings> {
 
   if ("clickThrough" in source) {
     patch.clickThrough = requireBoolean(source.clickThrough, "clickThrough");
+  }
+
+  return patch;
+}
+
+/**
+ * 读取控制台设置补丁。
+ *
+ * 只挑已知字段；`webUrl` 归一化失败就**报错**，而不是静静回落成默认值：
+ * 用户明明填了东西却没生效（比如填成了 `file:///...`），比一句明确的报错难查得多。
+ * 这一层是 `shell.openExternal` 的最后一道门，协议白名单在 `normalizeWebUrl` 里。
+ */
+export function requireConsoleSettingsPatch(value: unknown): Partial<ConsoleSettings> {
+  if (!value || typeof value !== "object") {
+    throw new TypeError("IPC 参数 patch 必须是对象");
+  }
+
+  const source = value as Record<string, unknown>;
+  const patch: Partial<ConsoleSettings> = {};
+
+  if ("webUrl" in source) {
+    const normalized = normalizeWebUrl(source.webUrl);
+
+    if (!normalized) {
+      throw new TypeError("webUrl 必须是 http/https 地址");
+    }
+
+    patch.webUrl = normalized;
   }
 
   return patch;
