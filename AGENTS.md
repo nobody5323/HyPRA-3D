@@ -158,6 +158,7 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
 - docs/sillytavern-memory-design-reference.md（记忆机制参照，已建立）
 - docs/desktop-pet.md（桌面桌宠端：形态分工、进程结构、关键决策、合规边界，已建立）
 - docs/license-compliance.md（许可与合规说明：AGPL 义务、§13 检查清单、来源纪律、插件许可边界、依赖审计，已建立）
+- docs/plugin-market.md（插件市场设计：索引/安装/回滚/安全防护/信赖边界，已建立，**设计稿未实现**）
 - README.md / LICENSE
 
 ## 8. 双模式与记忆作用域（已定架构决策）
@@ -395,6 +396,9 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 借鉴 Alife：`Plugin` / `PluginRelease` / `VersionResolver` / `FileSystemPluginManager`
 + 安装计划与回滚。合规边界见 §6：只做索引与安装机制、**不托管第三方代码**、
 参赛提交物内不含任何第三方插件。
+
+详细设计（索引格式 / 安装流程 / 安全防护 / 信赖边界 / 分阶段实施，**尚未实现**）：
+[`docs/plugin-market.md`](docs/plugin-market.md)。
 
 ### 9.10 全部插件化清单
 
