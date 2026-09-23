@@ -4,13 +4,15 @@
     POST /media/speak     文本 + 情绪 → SSML 播报指令（前端 avatar.speak(ssml)）
 
 扩展路径（自研/通用渲染，可接入任意 3D/2D 模型）：
-    POST /media/avatar    文本 + 情绪 → 口型/表情/动作时间轴
+    POST /media/avatar    文本 + 情绪 → 口型/表情/动作时间轴 + 可选音频
     GET  /media/audio/{f} 读取已生成的音频文件（供前端播放）
+    GET  /media/tts/voices 当前语音引擎与可选音色（前端据此决定用服务端音频还是浏览器 TTS）
 
 设计：/media/* 为**同步**路由（FastAPI 放入线程池执行），
-因此 provider 内部可用 asyncio.run 调用魔珐 WebSocket。
+因此 provider 内部可用 asyncio.run 调用魔珐 WebSocket / GPT-SoVITS HTTP。
 """
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -20,15 +22,41 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.digital_human.base import DigitalHumanProvider
 from app.digital_human.factory import create_digital_human_provider
+from app.digital_human.gpt_sovits_provider import GptSovitsDigitalHumanProvider
 from app.digital_human.ssml import build_speak_command, build_ssml, split_for_streaming
+from app.tts.gpt_sovits import GptSovitsConfig, parse_extra_params
+from app.tts.voices import load_voice_config
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/media", tags=["media"])
 
 # 进程内单例（测试可经 set_digital_human_provider 注入）
 _provider: DigitalHumanProvider | None = None
 
-# 允许的音频后缀（防目录穿越 + 限制类型）
-_ALLOWED_AUDIO_SUFFIXES = {".pcm", ".mp3", ".wav", ".ogg", ".m4a"}
+# 允许的音频后缀（防目录穿越 + 限制类型）。
+# 刻意**不**包含 .raw：GPT-SoVITS 的 media_type=raw 是裸 PCM，浏览器 <audio> 放不了，
+# 就算能取到也没用（PCM 之所以在列表里是魔珐流式返回的历史惯性）。
+_ALLOWED_AUDIO_SUFFIXES = {".pcm", ".mp3", ".wav", ".ogg", ".m4a", ".aac"}
+
+
+def _build_gpt_sovits_config(settings) -> GptSovitsConfig:
+    """把 Settings 组装成驱动层要的配置（含音色表与情绪→音色映射）。"""
+    table = load_voice_config(settings.gpt_sovits_voices_file)
+    return GptSovitsConfig(
+        base_url=settings.gpt_sovits_base_url,
+        ref_audio_path=settings.gpt_sovits_ref_audio,
+        prompt_text=settings.gpt_sovits_prompt_text,
+        prompt_lang=settings.gpt_sovits_prompt_lang,
+        text_lang=settings.gpt_sovits_text_lang,
+        speed=settings.gpt_sovits_speed,
+        media_type=settings.gpt_sovits_media_type,
+        timeout=settings.gpt_sovits_timeout,
+        default_voice_id=settings.gpt_sovits_default_voice,
+        voices=table.voices,
+        emotion_voices=table.emotion_voices,
+        extra_params=parse_extra_params(settings.gpt_sovits_extra_params),
+    )
 
 
 def get_digital_human_provider() -> DigitalHumanProvider:
@@ -43,8 +71,30 @@ def get_digital_human_provider() -> DigitalHumanProvider:
             voice=settings.xmov_voice,
             host=settings.xmov_host,
             media_dir=settings.media_dir,
+            gpt_sovits=_build_gpt_sovits_config(settings),
         )
     return _provider
+
+
+def warmup_digital_human_provider() -> bool:
+    """预热当前数字人驱动（若它支持预热）；失败只记日志。
+
+    供应用启动时在后台调用：见 `app/main.py` 的 lifespan。
+
+    """
+    try:
+        provider = get_digital_human_provider()
+    except Exception as exc:   # 例：配了 xmov 但没填密钥
+        logger.warning("数字人驱动构建失败，跳过预热：%s", exc)
+        return False
+    warmup = getattr(provider, "warmup", None)
+    if not callable(warmup):
+        return False   # 该驱动没有预热能力（local / xmov）：不是错误
+    try:
+        return bool(warmup())
+    except Exception as exc:
+        logger.warning("预热失败（已忽略）：%s", exc)
+        return False
 
 
 def set_digital_human_provider(provider: DigitalHumanProvider | None) -> None:
@@ -135,7 +185,10 @@ class AvatarRequest(BaseModel):
     text: str = Field(min_length=1, description="要合成的文本（通常是 assistant 回复）")
     emotion: str | None = Field(default=None, description="情绪标签（英文，如 anxious）")
     intensity: float = Field(default=0.5, ge=0.0, le=1.0, description="情绪强度 0-1")
-    voice: str | None = Field(default=None, description="音色 ID（缺省用配置默认）")
+    voice: str | None = Field(
+        default=None,
+        description="音色（xmov 为 tts_vcn；gpt_sovits 为音色表 id，见 GET /media/tts/voices）",
+    )
 
 
 class AvatarResponse(BaseModel):
@@ -185,6 +238,92 @@ def create_avatar(req: AvatarRequest) -> AvatarResponse:
         face=payload["face"],
         body=payload["body"],
         meta=output.meta,
+    )
+
+
+class TtsVoiceInfo(BaseModel):
+    """一个可选音色。
+
+    刻意**不**回显参考音频路径：那是**服务端**的文件路径，
+    前端只需要 id 与展示名（少暴露一条服务端结构信息）。
+    """
+
+    id: str = Field(description="音色 id（请求 /media/avatar 时填在 voice 字段）")
+    label: str = Field(description="展示名（音色表未填 label 时等于 id）")
+    is_default: bool = Field(default=False, description="是否为未指定 voice 时的默认音色")
+
+
+class TtsVoicesResponse(BaseModel):
+    """语音引擎状态 + 音色清单（前端据此决定用服务端音频还是浏览器原生 TTS）。"""
+
+    provider: str = Field(description="当前数字人驱动：local | xmov | gpt_sovits")
+    server_tts: bool = Field(
+        description="该驱动是否产出服务端音频（false = 前端应回落浏览器 TTS）"
+    )
+    configured: bool = Field(description="服务端 TTS 是否已配好（缺配置时会降级为无音频）")
+    default_voice: str = Field(default="", description="默认音色 id（空 = 用配置里的默认参考音频）")
+    voices: list[TtsVoiceInfo] = Field(default_factory=list)
+    emotion_voices: bool = Field(
+        default=False,
+        description="是否配了「情绪→音色」自动映射（前端据此说明不选音色时的行为）",
+    )
+    note: str = Field(default="", description="状态说明 / 不可用原因（可直接展示给用户）")
+
+
+# 非 gpt_sovits 驱动的状态说明（前端直接展示，不用自己拼文案）
+_TTS_NOTES = {
+    "local": "未启用服务端 TTS（DIGITAL_HUMAN_PROVIDER=local）：前端使用浏览器原生 TTS",
+    "xmov": "魔珐星云自带 TTS：音色由魔珐控制台的应用配置与 XMOV_VOICE 决定",
+}
+
+
+@router.get("/tts/voices", response_model=TtsVoicesResponse)
+def list_tts_voices() -> TtsVoicesResponse:
+    """查询当前语音引擎与可选音色。
+
+    音色来自 `GPT_SOVITS_VOICES_FILE`（默认 backend/data/tts_voices.json）。
+    这里读的是**已构建好的 provider 快照**而非重新读文件：两者必须一致，
+    否则界面会列出“选了却不生效”的音色（改完文件需重启后端，与 .env 一致）。
+    """
+    try:
+        provider = get_digital_human_provider()
+    except ValueError as exc:
+        # 例：“xmov 却没填密钥”。设置面板在页面加载时就会请求本接口，
+        # 不能让它 500 拖垮整个面板——把原因当成 note 返回。
+        settings = get_settings()
+        return TtsVoicesResponse(
+            provider=(settings.digital_human_provider or "local").strip().lower(),
+            server_tts=False,
+            configured=False,
+            note=f"数字人驱动不可用：{exc}",
+        )
+
+    if not isinstance(provider, GptSovitsDigitalHumanProvider):
+        return TtsVoicesResponse(
+            provider=provider.name,
+            server_tts=provider.name == "xmov",
+            configured=provider.name == "xmov",
+            note=_TTS_NOTES.get(provider.name, ""),
+        )
+
+    config = provider.config
+    voices = [
+        TtsVoiceInfo(
+            id=voice_id,
+            label=ref.label or voice_id,
+            is_default=bool(config.default_voice_id) and voice_id == config.default_voice_id,
+        )
+        for voice_id, ref in config.voices.items()
+    ]
+    configured = bool(config.ref_audio_path or config.voices)
+    return TtsVoicesResponse(
+        provider=provider.name,
+        server_tts=True,
+        configured=configured,
+        default_voice=config.default_voice_id,
+        voices=voices,
+        emotion_voices=bool(config.emotion_voices),
+        note="" if configured else "未配置参考音频（GPT_SOVITS_REF_AUDIO 或音色表）：将降级为无音频",
     )
 
 

@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 420" width="320" height="420" role="img" aria-labelledby="happy-title">
+  <title id="happy-title">开心表情立绘占位图</title>
+  <defs>
+    <radialGradient id="happy-glow" cx="50%" cy="38%" r="58%">
+      <stop offset="0%" stop-color="#E0A24E" stop-opacity="0.32"/>
+      <stop offset="100%" stop-color="#E0A24E" stop-opacity="0"/>
+    </radialGradient>
+    <clipPath id="happy-head">
+      <ellipse cx="160" cy="166" rx="88" ry="98"/>
+    </clipPath>
+  </defs>
+
+  <!-- 情绪光晕（颜色与 tailwind.config.ts 的 mood.* 一致） -->
+  <circle cx="160" cy="158" r="152" fill="url(#happy-glow)"/>
+
+  <!-- 肩与衣 -->
+  <path d="M48 420 C48 334 102 294 160 294 C218 294 272 334 272 420 Z" fill="#EFEAE2"/>
+  <!-- 脖子 -->
+  <path d="M140 244 h40 v36 a20 20 0 0 1 -40 0 Z" fill="#E8E2D9"/>
+
+  <!-- 头 -->
+  <ellipse cx="160" cy="166" rx="88" ry="98" fill="#F6F2EB"/>
+  <!-- 头发（裁切在头部椭圆内，避免越出轮廓） -->
+  <g clip-path="url(#happy-head)">
+    <rect x="72" y="66" width="176" height="64" rx="32" fill="#E0A24E"/>
+    <rect x="72" y="110" width="22" height="122" fill="#E0A24E" opacity="0.85"/>
+    <rect x="226" y="110" width="22" height="122" fill="#E0A24E" opacity="0.85"/>
+  </g>
+
+  <path d="M112 174 Q126 156 140 174" fill="none" stroke="#4A423B" stroke-width="6" stroke-linecap="round"/>
+  <path d="M180 174 Q194 156 208 174" fill="none" stroke="#4A423B" stroke-width="6" stroke-linecap="round"/>
+  <path d="M132 212 Q160 244 188 212" fill="none" stroke="#4A423B" stroke-width="6" stroke-linecap="round"/>
+</svg>

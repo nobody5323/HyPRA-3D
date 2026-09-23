@@ -15,9 +15,22 @@
     "incremental": true,
     "plugins": [{ "name": "next" }],
     "paths": {
-      "@/*": ["./*"]
+      "@/*": ["./*"],
+
+    /*
+     * Cubism 运行时桥：**双候选路径**，按顺序取第一个存在的。
+     *
+     * - 已安装 SDK（`scripts/setup-cubism.mjs` 落位）→ 用 `vendor/cubism/bridge.ts`（真实实现）；
+     * - 未安装 → 回落 `lib/live2d/cubism-bridge.unavailable.ts`（提交入库的空实现）。
+     *
+     * 这样参赛仓库「不带 SDK 也能 build + typecheck 通过」，而本地装好
+     * SDK 后同一条 import 自动换成真实实现（无需改动任何业务代码）。
+     */
+    "@cubism-bridge": ["./vendor/cubism/bridge.ts", "./lib/live2d/cubism-bridge.unavailable.ts"]
     }
   },
   "include": ["next-env.d.ts", "**/*.ts", "**/*.tsx", "**/*.mts", ".next/types/**/*.ts"],
-  "exclude": ["node_modules"]
+  // public/ 是静态资源目录（含官方 Core 的 .js/.d.ts、模型文件），不应该被 tsc 扫描；
+  // Core 的类型声明由 setup 脚本单独放到 vendor/cubism/Core/ 供编译使用。
+  "exclude": ["node_modules", "public"]
 }

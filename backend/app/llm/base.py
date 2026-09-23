@@ -141,3 +141,15 @@ class LLMProvider(ABC):
         默认实现返回 None（不支持）；支持 function calling 的 provider 覆盖本方法。
         """
         return None
+
+    def take_generation_note(self) -> str:
+        """取走上一次生成过程的诊断说明（取走即清空）。
+
+        存在的理由：`chat()` 只能返回字符串，而「为什么回复是空的」这类
+        判断需要 provider 侧的细节（finish_reason、推理 token 占用等）。
+        调用方在生成后取走这条说明，并入 prompt 的 warnings 通道，
+        避免把「空回复」静默地交给用户。
+
+        默认返回空串；不需要诊断的 provider 无需实现。
+        """
+        return ""

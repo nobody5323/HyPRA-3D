@@ -1,0 +1,346 @@
+/**
+ * Cubism 运行时桥的**真实实现**（由 setup-cubism.mjs 生成到 vendor/cubism/bridge.ts）。
+ *
+ * 定位：官方 Cubism Web SDK 的薄应用适配器。
+ * 官方 SDK 负责变形、物理、表情/动作混合与 WebGL 绘制；本文件只做四件事：
+ *   ① 取 WebGL 上下文、建 renderer、载 shader、装贴图；
+ *   ② 把「设参数 / 播表情 / 播动作」翻译成 SDK 调用；
+ *   ③ 每帧推进动作、眨眼、表情与物理后绘制；
+ *   ④ 释放资源（含 shader 单例的最后回收）。
+ *
+ * 参数名、表情名、动作组名一律**不在这里硬编码**——它们来自
+ * `lib/live2d/parameter-map.json` 与 `presets.json`，
+ * 因此换模型不需要改本文件（这正是把它独立成"桥"的意义）。
+ *
+ * ⚠️ 本文件只有在安装 SDK 后才会被编译，类型检查随之发生。
+ * 若官方 SDK 版本存在 API 差异，请对照 `Framework/src/**` 调整顶部的
+ * import 路径与方法名。
+ */
+
+import { CubismFramework } from "./Framework/src/live2dcubismframework";
+import { CubismModelSettingJson } from "./Framework/src/cubismmodelsettingjson";
+import { CubismMatrix44 } from "./Framework/src/math/cubismmatrix44";
+import { CubismEyeBlink } from "./Framework/src/effect/cubismeyeblink";
+import { CubismExpressionMotion } from "./Framework/src/motion/cubismexpressionmotion";
+import { CubismMotion } from "./Framework/src/motion/cubismmotion";
+import { CubismUserModel } from "./Framework/src/model/cubismusermodel";
+import { CubismShaderManager_WebGL } from "./Framework/src/rendering/cubismshader_webgl";
+
+import type { CubismBridge, CubismLoadOptions, CubismModelHandle } from "@/lib/live2d/cubism-bridge";
+
+/**
+ * 同一时刻只允许一个 WebGL 宿主。
+ *
+ * shader 管理器是 SDK 内的单例，只有最后一个画布释放后才能回收，
+ * 否则新模型会拿到已删除的 shader program。
+ */
+const webglOwners = new Set<HypraCubismModel>();
+
+let frameworkReady = false;
+
+/** 初始化官方框架（幂等） */
+function ensureFramework(onLog?: (message: string) => void): void {
+  if (frameworkReady) return;
+  CubismFramework.startUp({
+    logFunction: (message: string) => onLog?.(String(message)),
+    loggingLevel: 3,
+  });
+  CubismFramework.initialize();
+  frameworkReady = true;
+}
+
+/** 一个已加载的 Cubism 模型（官方 CubismUserModel 的应用适配器） */
+class HypraCubismModel extends CubismUserModel implements CubismModelHandle {
+  private gl: WebGLRenderingContext | null = null;
+  private textures: WebGLTexture[] = [];
+  private settings: CubismModelSettingJson | null = null;
+  private blink: CubismEyeBlink | null = null;
+  private idleMotion: CubismMotion | null = null;
+  private projection: CubismMatrix44 | null = null;
+  private lastFrameTime = 0;
+  private released = false;
+  /** 模型初始参数快照（用于表情收回）：必须在任何 setParameter 之前拍 */
+  private defaults: number[] | null = null;
+  /** 表情会改到哪些参数（从 exp3.json 收集），收回时只恢复这些 */
+  private readonly expressionParameterIds = new Set<string>();
+
+  private readonly expressions = new Map<string, CubismExpressionMotion>();
+  /** 动作按 "组名:序号" 索引（如 "Idle:0"） */
+  private readonly motions = new Map<string, CubismMotion>();
+  private readonly parameterIndices = new Map<string, number>();
+
+  async load(options: CubismLoadOptions): Promise<void> {
+    ensureFramework(options.onLog);
+
+    const canvas = options.canvas;
+    const gl = canvas.getContext("webgl", {
+      alpha: true,
+      premultipliedAlpha: true,
+      antialias: true,
+    });
+    if (!gl) throw new Error("当前设备/浏览器无法启用 WebGL，Live2D 无法渲染");
+    this.gl = gl;
+
+    const base = new URL(options.modelUrl, location.href);
+    const read = async (relativePath: string): Promise<ArrayBuffer> => {
+      const response = await fetch(new URL(relativePath, base));
+      if (!response.ok && response.status !== 0) {
+        throw new Error(`模型文件加载失败（${response.status}）：${relativePath}`);
+      }
+      return response.arrayBuffer();
+    };
+
+    // ① 模型设置（model3.json）→ moc3 → 物理
+    const settingsBuffer = await read("pet.model3.json");
+    const settings = new CubismModelSettingJson(settingsBuffer, settingsBuffer.byteLength);
+    this.settings = settings;
+    this.loadModel(await read(settings.getModelFileName()), true);
+    if (!this._model) throw new Error("Cubism 无法解析该模型（moc3 版本与 SDK 是否匹配？）");
+
+    const physicsFile = settings.getPhysicsFileName();
+    if (physicsFile) {
+      const physics = await read(physicsFile);
+      this.loadPhysics(physics, physics.byteLength);
+    }
+
+    this.blink = CubismEyeBlink.create(settings);
+
+    // ② 表情与动作：名字来自模型自身（所以换模型不用改代码）
+    for (let i = 0; i < settings.getExpressionCount(); i += 1) {
+      const name = settings.getExpressionName(i);
+      const buffer = await read(settings.getExpressionFileName(i));
+      // loadExpression 的声明返回基类 ACubismMotion（实际是 CubismExpressionMotion），
+      // 而表达式管理器的 startMotion 只接受后者，所以要收窄。
+      this.expressions.set(
+        name,
+        this.loadExpression(buffer, buffer.byteLength, name) as CubismExpressionMotion,
+      );
+      // 记录该表情会改到哪些参数：收回表情时只需恢复这些
+      const parsed = JSON.parse(new TextDecoder().decode(buffer)) as {
+        Parameters?: { Id?: string }[];
+      };
+      for (const parameter of parsed.Parameters ?? []) {
+        if (parameter.Id) this.expressionParameterIds.add(parameter.Id);
+      }
+    }
+
+    // ★ 动作的「效果参数」必须显式设置。
+    //
+    // CubismMotion 内部的 `_eyeBlinkParameterIds` / `_lipSyncParameterIds` 声明为数组但**没有初值**，
+    // 而 `CubismUserModel.loadMotion()` 也**不会**帮你设置；官方 Sample 是在 loadMotion 之后
+    // 自己调 `setEffectIds()`。漏了这一步的后果是：动作第一次更新就抛
+    // 「Cannot read properties of null (reading 'length')」——已通过离线复现确认。
+    //
+    // 这两组 id 的用途：当动作与「自动眨眼 / 口型」同时驱动同一参数时做冲突处理。
+    const eyeBlinkIds = Array.from(
+      { length: settings.getEyeBlinkParameterCount() },
+      (_, index) => settings.getEyeBlinkParameterId(index),
+    );
+    const lipSyncIds = Array.from(
+      { length: settings.getLipSyncParameterCount() },
+      (_, index) => settings.getLipSyncParameterId(index),
+    );
+
+    for (let group = 0; group < settings.getMotionGroupCount(); group += 1) {
+      const groupName = settings.getMotionGroupName(group);
+      for (let index = 0; index < settings.getMotionCount(groupName); index += 1) {
+        const buffer = await read(settings.getMotionFileName(groupName, index));
+        const motion = this.loadMotion(buffer, buffer.byteLength, `${groupName}_${index}`);
+        motion.setEffectIds(eyeBlinkIds, lipSyncIds);
+        this.motions.set(`${groupName}:${index}`, motion);
+        if (groupName === "Idle" && index === 0) {
+          motion.setLoop(true);
+          this.idleMotion = motion;
+        }
+      }
+    }
+
+    // ③ 渲染器 + shader + 贴图
+    // shader 走运行时 fetch（不进打包），路径与 PUBLIC_CUBISM_DIR 保持一致
+    this.createRenderer(canvas.width, canvas.height);
+    const renderer = this.getRenderer();
+    renderer.startUp(this.gl);
+    renderer.loadShaders(options.shaderBaseUrl);
+    renderer.setIsPremultipliedAlpha(true);
+    webglOwners.add(this);
+
+    const maxTextureSize = this.gl.getParameter(this.gl.MAX_TEXTURE_SIZE) as number;
+    for (let i = 0; i < settings.getTextureCount(); i += 1) {
+      const image = new Image();
+      image.src = new URL(settings.getTextureFileName(i), base).href;
+      await image.decode();
+      if (Math.max(image.width, image.height) > maxTextureSize) {
+        throw new Error("设备不支持这张模型贴图的尺寸（超过 MAX_TEXTURE_SIZE）");
+      }
+      const texture = this.gl.createTexture();
+      this.gl.bindTexture(this.gl.TEXTURE_2D, texture);
+      this.gl.pixelStorei(this.gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, 1);
+      this.gl.texImage2D(
+        this.gl.TEXTURE_2D,
+        0,
+        this.gl.RGBA,
+        this.gl.RGBA,
+        this.gl.UNSIGNED_BYTE,
+        image,
+      );
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MIN_FILTER, this.gl.LINEAR);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_MAG_FILTER, this.gl.LINEAR);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_S, this.gl.CLAMP_TO_EDGE);
+      this.gl.texParameteri(this.gl.TEXTURE_2D, this.gl.TEXTURE_WRAP_T, this.gl.CLAMP_TO_EDGE);
+      renderer.bindTexture(i, texture);
+      this.textures.push(texture);
+    }
+
+    // ④ 参数索引 + 投影
+    // 注意：Core 的 d.ts 里 parameters.ids 是 string[]（不是 csmVector），用 length/下标访问。
+    this.parameterIndices.clear();
+    const ids = this._model.getModel().parameters.ids;
+    for (let i = 0; i < ids.length; i += 1) {
+      this.parameterIndices.set(ids[i], i);
+    }
+
+    this._modelMatrix.setHeight(1.9);
+    this._modelMatrix.setPosition(0, 0);
+    this.resize();
+    this._model.update();
+    // 快照必须在任何 setParameter 之前：这是"收回表情"的基准
+    this.defaults = Array.from(this._model.getModel().parameters.values);
+    this.lastFrameTime = performance.now();
+  }
+
+  setParameter(name: string, value: number): boolean {
+    const index = this.parameterIndices.get(name);
+    if (index === undefined || !this._model) return false;
+    this._model.setParameterValueByIndex(index, value);
+    return true;
+  }
+
+  getParameter(name: string): number {
+    if (!this._model) return 0;
+    return this._model.getParameterValueById(CubismFramework.getIdManager().getId(name));
+  }
+
+  parameterNames(): readonly string[] {
+    return Array.from(this.parameterIndices.keys());
+  }
+
+  playExpression(name: string): boolean {
+    const motion = this.expressions.get(name);
+    if (!motion) return false;
+    this._expressionManager.startMotion(motion, false);
+    return true;
+  }
+
+  resetExpression(): void {
+    this._expressionManager.stopAllMotions();
+    if (!this._model || !this.defaults) return;
+    // 只恢复"表情会改到的参数"：动效与物理驱动的参数（头发/尾巴等）不该被回弹，
+    // 否则会出现待机动作一顿一顿的现象。
+    for (const id of this.expressionParameterIds) {
+      const index = this.parameterIndices.get(id);
+      if (index === undefined) continue;
+      this._model.setParameterValueByIndex(index, this.defaults[index]);
+    }
+  }
+
+  playMotion(group: string, index: number, loop: boolean): boolean {
+    const motion = this.motions.get(`${group}:${index}`);
+    if (!motion) return false;
+    motion.setLoop(loop);
+    // 优先级 3 = 覆盖当前动作（官方示例：Idle 用 1，交互类用 2/3）
+    this._motionManager.startMotionPriority(motion, false, 3);
+    return true;
+  }
+
+  /** 每帧推进：动作 → 眨眼 → 表情 → 物理 → 绘制 */
+  update(deltaSeconds: number): void {
+    if (this.released || !this._model || !this.gl) return;
+    const delta = Math.min(Math.max(deltaSeconds, 0), 0.1);
+    this.lastFrameTime = performance.now();
+
+    if (this.idleMotion && this._motionManager.isFinished()) {
+      this._motionManager.startMotionPriority(this.idleMotion, false, 1);
+    }
+    this._motionManager.updateMotion(this._model, delta);
+    this.blink?.updateParameters(this._model, delta);
+    this._expressionManager.updateMotion(this._model, delta);
+    this._physics?.evaluate(this._model, delta);
+    this._model.update();
+    this.draw();
+  }
+
+  resize(): void {
+    if (!this.gl || !this._modelMatrix) return;
+    const canvas = this.gl.canvas as HTMLCanvasElement;
+    // 上限 2x：给大贴图留抗锯齿余量，同时受设备渲染缓冲上限约束
+    const dpr = Math.max(2, globalThis.devicePixelRatio || 1);
+    const limit = (this.gl.getParameter(this.gl.MAX_RENDERBUFFER_SIZE) as number) || 4096;
+    const scale = Math.min(dpr, limit / Math.max(1, canvas.clientWidth, canvas.clientHeight));
+    const width = Math.max(1, Math.round(canvas.clientWidth * scale));
+    const height = Math.max(1, Math.round(canvas.clientHeight * scale));
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      this.setRenderTargetSize(width, height);
+    }
+    const projection = new CubismMatrix44();
+    projection.scale(height / width, 1);
+    projection.multiplyByMatrix(this._modelMatrix);
+    this.projection = projection;
+  }
+
+  release(): void {
+    if (this.released) return;
+    this.released = true;
+    for (const texture of this.textures) this.gl?.deleteTexture(texture);
+    this.textures = [];
+    this.expressions.clear();
+    this.motions.clear();
+    this.parameterIndices.clear();
+    this.idleMotion = null;
+    this.blink = null;
+    this.projection = null;
+    this.defaults = null;
+    this.expressionParameterIds.clear();
+    super.release();
+    if (webglOwners.delete(this) && webglOwners.size === 0) {
+      // 最后一个宿主释放后回收 shader 单例，否则下次加载会拿到已删除的 program
+      CubismShaderManager_WebGL.deleteInstance();
+    }
+  }
+
+  private draw(): void {
+    const gl = this.gl;
+    if (!gl || !this.projection) return;
+    gl.viewport(0, 0, gl.canvas.width, gl.canvas.height);
+    gl.clearColor(0, 0, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    const renderer = this.getRenderer();
+    renderer.setMvpMatrix(this.projection);
+    // 官方声明写成 WebGLFramebuffer，但实现接受 null（默认帧缓冲），官方 Sample 也传 null
+    renderer.setRenderState(null as unknown as WebGLFramebuffer, [
+      0,
+      0,
+      gl.canvas.width,
+      gl.canvas.height,
+    ]);
+    renderer.drawModel();
+  }
+}
+
+export const cubismBridge: CubismBridge = {
+  available: true,
+  unavailableReason: "",
+
+  init(): void {
+    ensureFramework();
+  },
+
+  async load(options: CubismLoadOptions): Promise<CubismModelHandle> {
+    const model = new HypraCubismModel();
+    await model.load(options);
+    return model;
+  },
+};
+
+export default cubismBridge;

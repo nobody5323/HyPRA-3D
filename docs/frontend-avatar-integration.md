@@ -159,7 +159,8 @@ async function speakChunks(ssmlChunks) {
 | `GET /chat/personas` | 人设（陪伴对象）清单 | 人设 id 即记忆命名空间 `companion_id` |
 | `GET /chat/styles` | 文风清单 | 界面「文风」选择器数据源 |
 | `POST /media/speak` | 仅生成播报指令 | 参数：`text` / `emotion` / `intensity` / `voice` / `streaming` / `max_chars`；`streaming=true` 时额外返回 `chunks`（纯文本分段）与 `ssml_chunks`（逐段 SSML） |
-| `POST /media/avatar` | **扩展路径**：口型/表情/动作**时间轴** | 供自研渲染使用（见下节） |
+| `POST /media/avatar` | **扩展路径**：口型/表情/动作**时间轴** + 可选音频 | 供自研渲染使用（见下节） |
+| `GET /media/tts/voices` | 当前语音引擎与可选音色 | 前端据此决定用服务端音频还是浏览器 TTS（`server_tts` / `configured` / `voices` / `note`） |
 | `GET /media/audio/{file}` | 音频文件 | 仅扩展路径产生音频时有值 |
 | `POST /knowledge/upload` | 上传个人记忆 | multipart：`file` 或 `text`；query `companion_id`；form `title` / `force`；判重命中返回 409 + 判重详情 |
 | `GET /knowledge/list` | 个人记忆文档列表 | query `companion_id` |
@@ -188,9 +189,163 @@ async function speakChunks(ssmlChunks) {
 
 这套接口是**渲染无关**的，因此同一份后端数据既可驱动魔珐 SDK，也可驱动任意模型。
 
+当后端接了服务端 TTS 时，响应里还会多出音频：
+
+```json
+{
+  "provider": "gpt_sovits",
+  "has_audio": true,
+  "audio_url": "/media/audio/tts_ab12cd34ef56.wav",
+  "audio_format": "wav",
+  "duration_ms": 3200,
+  "visemes": [ ... ],
+  "meta": { "voice": "gentle", "align": "estimated-scaled", "duration_source": "audio" }
+}
+```
+
+- `audio_url` 是**相对路径**（后端不知道自己对外暴露的域名/端口）：
+  前端必须用 `resolveMediaUrl()` 补全，否则请求会打到前端 3000 而 404；
+- `meta.align` 是「口型精度自述」：`estimated-scaled` = 按文本估算再缩放到真实音频时长
+  （GPT-SoVITS 不返回字级时间戳，做不到逐字对齐）；
+- 列 `meta.duration_source` 为 `estimated` 时说明没拿到音频时长（非 WAV），口型仍是估算值。
+
 ---
 
-## 八、常见问题
+## 八、语音从哪来（三条路径，可手动切换）
+
+声音与渲染是**解耦**的：同一个形象可以换声音，换声音不影响对话 / 记忆 / 情绪链路。
+
+| 路径 | 适用形象 | 声音来源 | 口型精度 |
+|---|---|---|---|
+| 魔珐 SDK 自带 TTS | 魔珐 3D 形象 | 魔珐控制台配置的音色（`XMOV_VOICE`） | 字级时间戳，逐字对齐 |
+| 服务端 TTS（GPT-SoVITS） | Live2D / 静态立绘 | 自部署 GPT-SoVITS + 音色表 | 整段对齐（估算轨道按音频时长缩放） |
+| 浏览器原生 TTS | 任意本地渲染 | Web Speech API | 无（音频在浏览器侧，后端不知时长） |
+
+**为什么魔珐路径不能配外部 TTS**：SDK 的 `avatar.speak(ssml)` 只接受文本（SSML），
+不接受外部音频；即「魔珐形象 + GPT-SoVITS 声音」当前不可行，
+要么用魔珐音色，要么用自研渲染器（`POST /media/avatar` 的音频 + 时间轴）。
+
+**选择规则**（`frontend/lib/avatar-config.ts` 的 `resolveVoiceSource`，有单测）：
+
+```
+魔珐渲染中 ? xmov
+         : 偏好=browser → browser
+         : 偏好=server  → server（探测失败也先试一次）
+         : 探测到服务端 TTS 就绪 ? server : browser
+```
+
+用户可在「数字人设置 → 语音引擎」选三档（自动 / 强制服务端 / 强制浏览器），音色另有下拉框。
+
+### 前端契约：`timeline` 与 `useLipSyncTimeline`
+
+```ts
+interface AvatarController {
+  provider: "browser" | "xmov" | "server";
+  /** 与**正在播放的音频同源**的口型时间轴（仅服务端 TTS 提供） */
+  timeline?: readonly VisemeFrame[] | null;
+  speak(text, ssml?, context?): Promise<void>;   // context = 本轮情绪
+}
+```
+
+- **服务端 TTS 路径**：音频与 viseme 来自**同一次** `POST /media/avatar`，
+  口型时钟对齐 `playing` 事件（真实出声那一刻），字幕用 `audio.currentTime` 推进；
+  此路径下 `useLipSyncTimeline` **保持 inactive**，不再多打一次请求
+  （否则就是「声音 A + 口型 B」）；
+- **浏览器 TTS 路径**：没有音频时长可用，只能另发一次请求让后端按文本估算，
+  只求「嘴会动」；
+- **降级是逐句的**：某一轮拿不到 `audio_url`（服务挂了/没配）就那一句回落到浏览器 TTS，
+  不需要重启也不需要重新配置。
+
+### 音色（服务端 TTS）
+
+GPT-SoVITS 是零样本音色克隆，**音色 = 一段参考音频 + 该音频对应的文字**，没有服务端预置 id。
+所以「有哪些声音可选」由后端音色表 `backend/data/tts_voices.json` 定义（属本地数据，不入库）：
+
+```json
+{ "gentle": { "ref_audio_path": "refs/gentle.wav", "prompt_text": "今天也辛苦了。", "label": "温柔" } }
+```
+
+- 前端只保存「选了哪个 id」（localStorage），参考音频路径**不下发到浏览器**；
+- 音色 id 失效（表改了）时前端自动回落默认音色，不会留下「选了却没反应」的死选项；
+- 改动音色表需**重启后端**（前端里已写进提示）；
+- 参考音频 **必须 3~10 秒**；`prompt_text` 与音频内容逐字一致时效果最好，**留空也能用**；
+- 部署步骤与排查看 [`deployment.md`](deployment.md) 第 6.5 节。
+
+### 声随情变：情绪 → 音色
+
+音色表里可以用**保留键** `_emotion_map` 把后端 8 类情绪标签映射到音色 id
+（ `_` 开头的键不会被当作音色）：
+
+```json
+{
+  "_emotion_map": { "sad": "sad", "tired": "sad", "anxious": "sad",
+                    "happy": "joyful", "surprised": "joyful",
+                    "calm": "neutral", "neutral": "neutral", "angry": "neutral" },
+  "sad":     { "ref_audio_path": "refs/sad.wav",     "label": "爱弥斯·忧伤" },
+  "joyful":  { "ref_audio_path": "refs/joyful.wav",  "label": "爱弥斯·开心" },
+  "neutral": { "ref_audio_path": "refs/neutral.wav", "label": "爱弥斯·中立" }
+}
+```
+
+解析优先级（都有单测）：
+
+```
+显式 voice  >  情绪映射  >  GPT_SOVITS_DEFAULT_VOICE  >  默认参考音频
+```
+
+两个刻意的行为选择：
+
+1. **显式传了未知 voice 时不走情绪映射**，而是固定回落默认音色：
+   拼错应当表现为可预测的「没换成」，而不是「接心情换了个声音」——后者难排查；
+2. 指向不存在音色的映射在**加载时**就丢弃并记 warning（不是等到播放才失效）。
+
+响应里的 `meta.voice_source` 会告诉你是谁选的声音：
+`request`（显式）/ `emotion`（按情绪）/ `default`（默认 id）/ `config`（没走音色表）。
+前端无需任何配合：本轮情绪已经随 `speak(text, ssml, context)` 传到后端，
+面板上的「不选音色」会自动变成「按情绪选音色」（接口的 `emotion_voices` 字段决定文案）。
+
+### 播报流水线：首句提前 + 字声同步
+
+**为什么不再整段合成**：实测合成耗时随文本长度**近似线性增长**（同一台机器、v2ProPlus 微调模型）：
+
+| 文本长度 | 整段合成耗时 |
+|---|---|
+| 15 字 | 2.99s |
+| 46 字 | 8.75s（冷）/ 4.8~5.4s（热） |
+| 96 字 | 8.60s |
+
+即长回复要**干等 8~9 秒**才出声。改法：按句切分 → 逐段合成 → **段就绪即播**（字幕同一切换）
+→ 播放期间预取下一段。
+
+实测效果（真实 uvicorn + 真实 GPT-SoVITS）：
+
+| 回复 | 分段 | 旧：整段合成就绪 | 新：首句出声 | 收益 | 段间断档 |
+|---|---|---|---|---|---|
+| 49 字 | 3 段（19/20/10） | 5.38s | **2.81s** | 提前 2.57s（48%） | 无 |
+| 96 字 | 7 段 | 8.60s | **2.54s** | 提前 6.06s（70%） | 无 |
+
+三个参数都有实测依据，改它们前请先看数字：
+
+| 参数 | 值 | 依据 |
+|---|---|---|
+| 分段字数上限 | `max_chars=20` | 切分只按 `。！？；` 断句（不在逗号处断），20 字让常见的 15~17 字句子自然成段又不触发硬切；更小会在句中硬切（语调不自然），更大则首段变长 |
+| 预取深度 | **固定 1 段** | 更深会**拖慢首段**：实测深度 2 时服务端把并发的两个请求一起处理，首段从 1.66s 拖到 4.60s。深度 1 已足够无缝——首段之后每段的播放时长（2~4.5s）都大于下一段的合成耗时（1.5~2.6s） |
+| 分段播报开关 | **默认开** | 服务端 TTS 下它就是流水线，没有理由默认关；魔珐 SDK 路径段间有约 400ms 过渡，想整段连贯可关 |
+
+**字幕与语音如何同步**：`useChatSession` 不再预先显示整段字幕，而由 `speakChunks` 的
+`onChunk` 在**每段音频就绪那一刻**（`play()` 之前）驱动——所以每句的字与声同时出现。
+
+**逐段降级**：某一段拿不到音频（超时 / 服务未部署）时只把**那一段**交给浏览器 TTS，
+前后段继续走服务端，字幕照常推进。
+
+**未采用的两条路（备查）**：
+- `streaming_mode=true`：实测首包 1.47s（比非流式的 2.99s 减半），但要用上它必须让前端
+  边下边播，且流式拿不到时长 → 口型对齐退化。属于方案 5，本次未做；
+- `sample_steps` 调采样步数：实测 8/16/32 → 3.13/2.80/3.18s，**无差异**，别再折腾。
+
+---
+
+## 九、常见问题
 
 | 现象 | 排查 |
 |---|---|
@@ -198,3 +353,8 @@ async function speakChunks(ssmlChunks) {
 | 数字人不说话 | 检查 `avatar.init()` 是否成功；确认 WebSocket 已连接（`ttsa/session`） |
 | 说完一句后第二句没反应 | `speak` 不能连续调用，需先 `interactive_idle`（见第五节） |
 | 字幕出现 `kacomfort` 之类乱码 | 前端应使用 `display_text` 字段渲染字幕，而不是自行去标签 |
+| 听到的仍是浏览器语音（选了服务端 TTS） | 每一句都是**独立降级**：看 `GET /media/tts/voices` 的 `note`；再看后端 `media/` 目录下有没有新音频；`POST /media/avatar` 的 `meta.degrade_reason` 会写清原因（连不上 / 超时 / 缺参考音频） |
+| 声音出来了但嘴不太合 | GPT-SoVITS 无字级时间戳，对齐是**整段级**的（`meta.align=estimated-scaled`）：先看 `meta.duration_source` 是不是 `estimated`（非 WAV 拿不到时长），必要时改用 `GPT_SOVITS_MEDIA_TYPE=wav` |
+| 改了 `tts_voices.json` 但下拉框没变 | 音色表在**启动时**读一次（与 `.env` 一致）→ 重启后端 |
+| 声音没有随情绪变化 | 音色表里没配 `_emotion_map`（看 `/media/tts/voices` 的 `emotion_voices`），或本轮显式指定了 voice（看 `meta.voice_source`） |
+| 某个音色“选了没反应” | 该音色 id 不在音色表里（`meta.unknown_voice` 会写出来）；若是情绪映射，加载时会因指向不存在音色而被丢弃 |

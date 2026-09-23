@@ -85,6 +85,78 @@ EMBEDDING_PROVIDER=deterministic
 此时链路完整可用（会话 / 世界书 / 渲染照常），前端也会自动降级为浏览器 TTS，
 仅模型回复为占位文本。
 
+## 6.5 可选：自部署 GPT-SoVITS（给 Live2D / 静态立绘配真声音）
+
+**不部署也完全可用**：未配置时驱动自动降级（`has_audio=false`），
+前端逐句回落浏览器原生 TTS，对话不中断。本节只给想开这能力的人看。
+
+```bash
+# ① 拉官方仓库并起服务（需要 NVIDIA GPU；默认端口 9880）
+git clone https://github.com/RVC-Boss/GPT-SoVITS && cd GPT-SoVITS
+python api_v2.py -a 127.0.0.1 -p 9880 -c GPT_SoVITS/configs/tts_infer.yaml
+
+# ② 准备一段参考音频（5 秒左右即可零样本克隆），例如放到 GPT-SoVITS/refs/xiaolin.wav
+```
+
+```env
+# ③ backend/.env：只改这两处
+DIGITAL_HUMAN_PROVIDER=gpt_sovits
+GPT_SOVITS_BASE_URL=http://127.0.0.1:9880
+# 注意：这是**跑 GPT-SoVITS 那台机器**上可见的路径，不是本机相对路径
+GPT_SOVITS_REF_AUDIO=refs/xiaolin.wav
+GPT_SOVITS_PROMPT_TEXT=参考音频里说的那一句话
+```
+
+**多音色**：把音色写在 `backend/data/tts_voices.json`（属本地数据，已被 gitignore 覆盖）：
+```json
+{
+  "_emotion_map": { "sad": "gentle", "tired": "gentle", "happy": "lively" },
+  "gentle": { "ref_audio_path": "refs/gentle.wav", "prompt_text": "今天也辛苦了。", "label": "温柔" },
+  "lively": { "ref_audio_path": "refs/lively.wav", "prompt_text": "我们出发吧！", "label": "活泼" }
+}
+```
+改完文件需**重启后端**（前端「数字人设置」里会提示这一点）；前端可在
+「数字人设置 → 语音引擎 / 音色」里选择，并能点「试听」。
+
+**参考音频的硬要求（实测确认）**：
+| 项 | 要求 |
+|---|---|
+| 时长 | **必须 3~10 秒**（服务端会拦：`参考音频需在3~10秒范围外，请更换！`） |
+| `ref_audio_path` | **必填**：不传直接 `400 ref_audio_path is required`（`ref_free` 在这个版本无效） |
+| `prompt_text` | 与音频内容**逐字一致**时相似度最佳；**留空也能用**（实测可正常合成，速度更快、相似度略降） |
+| 路径语义 | 服务端可见的路径（跑 GPT-SoVITS 那台机器上的路径）；支持正斜杠 `D:/.../x.wav` |
+
+**情绪 → 音色（声随情变）**：音色表里的保留键 `_emotion_map`（`_` 开头的键不会被当作音色）
+把后端 8 类情绪标签映射到音色 id，于是「不指定 voice 时按本轮情绪选声音」：
+```
+优先级：显式 voice  >  情绪映射  >  GPT_SOVITS_DEFAULT_VOICE  >  默认参考音频
+```
+指向不存在音色的映射会在加载时被丢弃并记 warning；响应里的
+`meta.voice_source`（`request` / `emotion` / `default` / `config`）能一眼看出这次声音是谁选的。
+
+**性能相关配置（都有实测依据）**：
+
+| 配置 | 作用 | 实测 |
+|---|---|---|
+| `GPT_SOVITS_WARMUP=true`（默认） | 启动时在后台线程预热一次 | 预热耗时 1.5s；避免服务刚起来时首个请求偏慢 |
+| `GPT_SOVITS_EXTRA_PARAMS` | 透传 api_v2 调优参数（核心字段不可覆盖） | `{"parallel_infer": false}` → 2.74s vs 默认 2.99s |
+| ⚠️ 别再试 `{"sample_steps": 8}` | — | **实测无效**：8/16/32 分别 3.13 / 2.80 / 3.18s |
+| `GPT_SOVITS_MEDIA_TYPE=wav` | 能解析出时长 → 口型按真实音频对齐 | 非 wav 时 `meta.duration_source=estimated`（口型退化为估算） |
+
+> 合成耗时随文本长度**近似线性**：15 字 ≈ 3.0s、46 字 ≈ 4.8~8.8s、96 字 ≈ 8.6s。
+> 因此前端默认开启分句流水线（首句 2~3s 出声），细节见
+> [frontend-avatar-integration.md](frontend-avatar-integration.md) 第八章。
+
+**排查**：
+| 现象 | 原因 |
+|---|---|
+| 听到的是浏览器语音 | 后端降级了：看 `/media/tts/voices` 的 `note`（多为未配参考音频 / 服务没启动） |
+| `GET /media/tts/voices` 返回 `configured: false` | `GPT_SOVITS_REF_AUDIO` 与音色表都没配 |
+| 合成报 `参考音频需在3~10秒` | 参考音频太长/太短（实测 70 秒的示例会被拒） |
+| 音频能合成但取不到 | `GPT_SOVITS_MEDIA_TYPE` 别选 `raw`（裸 PCM，浏览器放不了） |
+
+> ⚠️ **合规**：音色克隆只使用自己录制或已获明确授权的声音，不要克隆他人声音。
+
 ## 7. 后端配置键位速查
 
 | 键 | 默认 | 评审模式建议 |
@@ -96,3 +168,7 @@ EMBEDDING_PROVIDER=deterministic
 | `LLM_API_KEY` / `LLM_MODEL` | 空 / qwen2.5-7b | 自填 |
 | `EMBEDDING_PROVIDER` | `deterministic` | 与 LLM 同源提供商 |
 | `EMBEDDING_API_KEY` | 空 | 自填 |
+| `DIGITAL_HUMAN_PROVIDER` | `local` | `xmov`（魔珐渲染+自带 TTS）/ `gpt_sovits`（仅出声音） |
+| `GPT_SOVITS_BASE_URL` | `http://127.0.0.1:9880` | 自部署 GPT-SoVITS 地址 |
+| `GPT_SOVITS_REF_AUDIO` | 空 | 参考音频路径（决定音色；不填=不出服务端音频） |
+| `GPT_SOVITS_VOICES_FILE` | `data/tts_voices.json` | 多音色表（可选） |

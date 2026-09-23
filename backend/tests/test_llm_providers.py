@@ -188,3 +188,97 @@ def test_factory_model_default_when_empty() -> None:
 def test_factory_unknown_raises() -> None:
     with pytest.raises(ValueError):
         create_llm_provider("not-a-provider")
+
+
+# --------------------------------------------------------------------------
+# 生成诊断：空回复必须能被解释
+# --------------------------------------------------------------------------
+
+
+def _handler_with(
+    finish_reason: str, content: str = "", message_extra: dict | None = None
+):
+    """构造可控 finish_reason / content / 附加字段的响应。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        message = {"role": "assistant", "content": content}
+        message.update(message_extra or {})
+        return httpx.Response(
+            200,
+            json={
+                "id": "chatcmpl-test",
+                "object": "chat.completion",
+                "created": 1_700_000_000,
+                "model": "test-model",
+                "choices": [
+                    {"index": 0, "message": message, "finish_reason": finish_reason}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            },
+            request=request,
+        )
+
+    return handler
+
+
+def _provider(handler) -> OpenAICompatibleProvider:
+    return OpenAICompatibleProvider(
+        name="openai-compatible",
+        api_key="test-key",
+        model="test-model",
+        base_url="https://example.invalid/v1",
+        http_client=_mock_client(handler),
+    )
+
+
+def test_note_explains_empty_reply_truncated_by_length() -> None:
+    """空正文 + finish_reason=length → 必须给出可读说明，不能静默返回空串。
+
+    回归背景（实测）：推理模型把 max_tokens 全用在思考上，HTTP 200、无异常、
+    正文为空——不主动解释的话，用户只会看到一片空白。
+    """
+    provider = _provider(_handler_with("length", ""))
+
+    reply = provider.chat([ChatMessage(role="user", content="你好")], max_tokens=350)
+
+    assert reply == ""
+    note = provider.take_generation_note()
+    assert "350" in note
+    assert "length" in note
+
+
+def test_note_is_cleared_after_read() -> None:
+    """说明取走即清空（否则会把上一轮的问题算到下一轮头上）。"""
+    provider = _provider(_handler_with("length", ""))
+    provider.chat([ChatMessage(role="user", content="你好")], max_tokens=350)
+
+    assert provider.take_generation_note()
+    assert provider.take_generation_note() == ""
+
+
+def test_no_note_for_normal_reply() -> None:
+    """正常回复不留说明。"""
+    provider = _provider(_ok_handler())
+
+    assert provider.chat([ChatMessage(role="user", content="你好")])
+    assert provider.take_generation_note() == ""
+
+
+def test_empty_content_but_stopped_is_not_reported() -> None:
+    """正常结束的空回复不归因于长度（避免误报）。"""
+    provider = _provider(_handler_with("stop", ""))
+
+    provider.chat([ChatMessage(role="user", content="你好")])
+
+    assert provider.take_generation_note() == ""
+
+
+def test_reasoning_content_marks_model_as_reasoning() -> None:
+    """响应带 reasoning_content → 记下这是推理模型（供采样抬高额度）。"""
+    provider = _provider(
+        _handler_with("stop", "你好", {"reasoning_content": "（测试语料）先想一想…"})
+    )
+
+    provider.chat([ChatMessage(role="user", content="你好")])
+
+    assert provider.saw_reasoning is True

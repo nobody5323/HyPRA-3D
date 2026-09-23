@@ -1,0 +1,14 @@
+{
+  "_comment": "模型特异参数名映射。Cubism 标准参数名（ParamMouthOpenY / ParamEyeLOpen 等）直接写在渲染器里，这里只放**不同模型叫法不同**的那几个。换模型时改本文件，不用改代码。",
+  "headYaw": "ParamAngleX",
+  "headPitch": "ParamAngleY",
+  "headRoll": "ParamAngleZ",
+  "mouthOpen": "ParamMouthOpenY",
+  "mouthForm": "ParamMouthForm",
+  "eyeLeftOpen": "ParamEyeLOpen",
+  "eyeRightOpen": "ParamEyeROpen",
+  "gazeX": "ParamEyeBallX",
+  "gazeY": "ParamEyeBallY",
+  "bodyAngle": "ParamBodyAngleX",
+  "breath": "ParamBreath"
+}

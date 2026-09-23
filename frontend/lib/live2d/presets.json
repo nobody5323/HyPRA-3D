@@ -1,0 +1,22 @@
+{
+  "_comment": "情绪 → 模型表情名（模型自带 exp3.json 里的名字）。留空 = 该情绪显示中性脸（不是\"保持上一张脸\"：渲染器会把上一个表情收回）。换模型后把下面改成模型实际的表情名即可——运行 `node scripts/import-live2d-model.mjs <模型目录>` 会打印可用表情清单。",
+  "_model": "DS 面捕版（c_0120）：共 44 个表情可选，例如 开心兴奋 / 生气 / 悲伤 / 晕晕 / 流汗 / 呆呆眼 / 感叹号 / 星星眼 / 爱心眼 / 脸红 / 阴暗 / 吐舌 / 调皮",
+  "version": 1,
+  "emotionExpressions": {
+    "happy": "开心兴奋",
+    "calm": "",
+    "sad": "悲伤",
+    "anxious": "流汗",
+    "tired": "呆呆眼",
+    "angry": "生气",
+    "surprised": "感叹号",
+    "neutral": ""
+  },
+  "_motionGroupsComment": "具身状态 → 动作组名。默认全部用 Idle（循环待机）是**有意的保守选择**：模型里的 喷水 / 开盖 / 番茄酱 / 自拍 等属于\"特定动作\"，其语义只有模型作者清楚，猜错了会显得莫名其妙。想用它们就把某个状态改成对应组名。",
+  "motionGroups": {
+    "idle": "Idle",
+    "listen": "Idle",
+    "think": "Idle",
+    "speak": "Idle"
+  }
+}

@@ -5,15 +5,19 @@
  *
  * 两种渲染模式（由 provider 决定）：
  * - `xmov`：把魔珐 SDK 挂载到 `#avatar-container`（真实 3D 数字人，F2）；
- * - `browser`：占位形象 + 情绪光效（零依赖降级，F1）。
+ * - `browser`：静态立绘换图 + CSS 动效 + 情绪光晕（零依赖降级，F1）。
  *
  * 两种模式共享同一套外部 UI（状态徽标、角色名、提示），便于演示时无缝切换。
  */
 
+import { useState } from "react";
 import type { RefObject } from "react";
 
-import type { AvatarInitStage } from "@/hooks/useAvatar";
-import type { AvatarState, EmotionInfo } from "@/lib/types";
+import type { AvatarController, AvatarInitStage } from "@/hooks/useAvatar";
+import type { AvatarRendererPreference } from "@/lib/avatar-config";
+import { BUILT_IN_MODEL_SOURCE, type AvatarModelSource } from "@/lib/avatar-model-source";
+import type { AvatarState, EmotionInfo, VisemeFrame } from "@/lib/types";
+import { LocalAvatarStage } from "./LocalAvatarStage";
 import { StateBadge } from "./StateBadge";
 
 /** 情绪色（hex，与 tailwind.config.ts 的 mood.* 一致）：用于光晕与阴影 */
@@ -47,6 +51,9 @@ export function AvatarStage({
   state,
   emotion,
   provider,
+  renderer = "auto",
+  source = BUILT_IN_MODEL_SOURCE,
+  lipSync = null,
   containerId = "avatar-container",
   containerRef,
   stage = "ready",
@@ -54,12 +61,27 @@ export function AvatarStage({
 }: {
   state: AvatarState;
   emotion: EmotionInfo | null;
-  provider: "browser" | "xmov";
+  /**
+   * 语音/形象来源。
+   *
+   * 直接用 `AvatarController["provider"]` 而不是手写联合类型：
+   * 新增一种实现（如 server = 服务端 TTS）时只需改一处，不会漏改这里。
+   * 注意 `xmov` 是唯一走 SDK 渲染的值，**其余都走本地渲染器**。
+   */
+  provider: AvatarController["provider"];
+  /** 渲染方式偏好（仅本地渲染路径使用） */
+  renderer?: AvatarRendererPreference;
+  /** 用哪个模型（内置 / 上传的 Live2D / 上传的静态立绘） */
+  source?: AvatarModelSource;
+  /** 口型时间轴（仅本地 Live2D 渲染器消费） */
+  lipSync?: readonly VisemeFrame[] | null;
   containerId?: string;
   containerRef?: RefObject<HTMLDivElement | null>;
   stage?: AvatarInitStage;
   detail?: string;
 }) {
+  /** 本地渲染器的状态文案（由 LocalAvatarStage 上报，这里统一展示） */
+  const [localStatus, setLocalStatus] = useState("");
   const color = MOOD_COLOR[emotion?.label ?? "neutral"] ?? MOOD_COLOR.neutral;
   const intensity = emotion?.intensity ?? 0.5;
   const isXmov = provider === "xmov";
@@ -122,29 +144,19 @@ export function AvatarStage({
             )}
           </div>
         ) : (
-          /* 占位形象（零依赖降级）：鼠尾草色球体 + 暖灰五官（浅底上仍需可辨） */
-          <div
-            className={`relative h-52 w-52 rounded-full bg-gradient-to-b from-accent-soft to-accent/50 transition-transform duration-700 ${
-              state === "speak" ? "animate-breathe-in" : ""
-            }`}
-            style={{ boxShadow: `0 0 ${20 + intensity * 50}px ${withAlpha(color, 0.33)}` }}
-            role="img"
-            aria-label="数字人形象占位"
-          >
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="flex flex-col items-center gap-4">
-                <div className="flex gap-6">
-                  <span className="h-2.5 w-2.5 rounded-full bg-ink-soft" />
-                  <span className="h-2.5 w-2.5 rounded-full bg-ink-soft" />
-                </div>
-                <span
-                  className={`bg-ink-soft transition-[height,width] duration-300 ${
-                    state === "speak" ? "h-4 w-8 rounded-full" : "h-1 w-6 rounded-full"
-                  }`}
-                />
-              </div>
-            </div>
-          </div>
+          /* 本地渲染（零依赖降级）：装了 Cubism SDK 走 Live2D，否则静态立绘。
+             两者实现同一个 AvatarRenderer 接口，选择逻辑封装在 LocalAvatarStage；
+             渲染方式由用户在「数字人设置」里指定（renderer），
+             状态文案通过 onStatusChange 回传到这里统一展示（避免组件内绝对定位与相邻元素重叠）。 */
+          <LocalAvatarStage
+            emotion={emotion}
+            motion={state}
+            characterLabel="数字人形象"
+            renderer={renderer}
+            source={source}
+            lipSync={lipSync}
+            onStatusChange={setLocalStatus}
+          />
         )}
 
         <div className="flex flex-col items-center gap-2">
@@ -156,7 +168,7 @@ export function AvatarStage({
         </div>
 
         <p className="text-xs text-ink-soft">
-          {isXmov ? "渲染：魔珐星云具身驱动 SDK" : "渲染：占位形象（配置密钥后自动切换真实数字人）"}
+          {isXmov ? "渲染：魔珐星云具身驱动 SDK" : localStatus || "渲染：本地渲染器"}
         </p>
       </div>
     </section>

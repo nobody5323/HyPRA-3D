@@ -65,3 +65,80 @@ body {
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-panel;
   }
 }
+
+/**
+ * 静态立绘动效（`static_portrait` 渲染器）。
+ *
+ * 渲染器只写 `data-motion`，表现完全交给 CSS——关键取舍：说话时用的是
+ * **当前表情那张图**加动效，不切换 sprite，避免每句台词换图造成的闪烁。
+ * 缩放/摆动以底部为支点，符合「站立」的直觉。
+ * （单独一个 @layer components 块：Tailwind 会把同名层合并，无需改动上面的样式。）
+ */
+@layer components {
+  .portrait-figure {
+    transform-origin: bottom center;
+    transition: opacity 240ms ease;
+  }
+  .portrait-stage[data-image-state="loading"] .portrait-figure {
+    opacity: 0.75;
+  }
+  .portrait-stage[data-image-state="error"] .portrait-figure {
+    opacity: 0.45;
+  }
+  .portrait-stage[data-motion="idle"] .portrait-figure {
+    animation: portrait-breathe 5.5s ease-in-out infinite;
+  }
+  .portrait-stage[data-motion="listen"] .portrait-figure {
+    animation: portrait-sway 2.8s ease-in-out infinite;
+  }
+  .portrait-stage[data-motion="think"] .portrait-figure {
+    animation: portrait-tilt 3.4s ease-in-out infinite;
+  }
+  .portrait-stage[data-motion="speak"] .portrait-figure {
+    animation: portrait-speak 1.15s ease-in-out infinite;
+  }
+}
+
+/* 立绘动效关键帧（放在 @layer 外：@keyframes 不受层叠层影响） */
+@keyframes portrait-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.015);
+  }
+}
+
+@keyframes portrait-sway {
+  0%,
+  100% {
+    transform: translateY(0) scale(1);
+  }
+  50% {
+    transform: translateY(-5px) scale(1.008);
+  }
+}
+
+@keyframes portrait-tilt {
+  0%,
+  100% {
+    transform: rotate(0deg);
+  }
+  30% {
+    transform: rotate(-1deg);
+  }
+  70% {
+    transform: rotate(1deg);
+  }
+}
+
+@keyframes portrait-speak {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.025);
+  }
+}

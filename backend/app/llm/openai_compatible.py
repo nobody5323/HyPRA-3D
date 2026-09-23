@@ -11,9 +11,13 @@
 - 真实 key 一律从 backend/.env 读取，不入库。
 """
 
+import logging
+
 from openai import OpenAI
 
 from app.llm.base import ChatMessage, LLMProvider, ToolCall
+
+logger = logging.getLogger(__name__)
 
 # 各提供商默认 base_url（可被 .env 的 LLM_BASE_URL 覆盖）
 DEFAULT_BASE_URLS: dict[str, str] = {
@@ -62,6 +66,12 @@ class OpenAICompatibleProvider(LLMProvider):
         self.model = model
         # None = 不传该参数（兼容非推理模型）；False = 关闭思考（推理模型提速）
         self._enable_thinking = enable_thinking
+        # 上一次生成的诊断说明（取走即清空，见 LLMProvider.take_generation_note）
+        self._generation_note = ""
+        # 运行期观测：见过 reasoning_content 就认定这是推理模型。
+        # 模型名匹配不可能穷尽（实测 "deepseek-flash" 就是推理模型但名字里没标记），
+        # 因此用真实响应补一次自适应：首轮可能空回复 + 告警，下一轮就会抬高额度。
+        self.saw_reasoning = False
         self._client = OpenAI(
             api_key=api_key,
             base_url=resolved_base,
@@ -77,6 +87,54 @@ class OpenAICompatibleProvider(LLMProvider):
         """
         response = self._client.models.list()
         return sorted({item.id for item in response.data if getattr(item, "id", "")})
+
+    def take_generation_note(self) -> str:
+        """取走并清空上一次生成的诊断说明（见 `LLMProvider.take_generation_note`）。"""
+        note, self._generation_note = self._generation_note, ""
+        return note
+
+    def _record_response(self, response, max_tokens: int | None) -> None:
+        """记录一次响应的诊断信息（供上层解释「为什么回复是空的」）。
+
+        只在「正文为空且被长度截断」时留下说明：这类空回复 HTTP 是 200、
+        也没有异常，不主动解释的话用户只会看到一片空白。
+        """
+        self._generation_note = ""
+        if not getattr(response, "choices", None):
+            self._generation_note = "模型没有返回任何候选结果（choices 为空）"
+            return
+
+        choice = response.choices[0]
+        message = choice.message
+        finish = getattr(choice, "finish_reason", "") or ""
+        reasoning = getattr(message, "reasoning_content", None) or ""
+        content = message.content or ""
+        # 诊断日志：只记长度与结束原因，不记正文（预设正文属用户本地数据）
+        # 诊断日志：只记长度与结束原因，不记正文（预设正文属用户本地数据）
+        logger.debug(
+            "LLM 响应: finish=%s content=%d字 reasoning=%d字 max_tokens=%s",
+            finish or "?",
+            len(content),
+            len(reasoning),
+            max_tokens,
+        )
+        if reasoning:
+            # 运行期证据：这个模型会先思考（模型名不一定带标记）
+            self.saw_reasoning = True
+
+        if content.strip():
+            return
+        if finish != "length":
+            return
+
+        limit = f"max_tokens={max_tokens}" if max_tokens is not None else "未设置 max_tokens"
+        hint = (
+            "推理模型会先生成思考内容，额度不足时正文为空。"
+            "请把「回复长度上限」调大（实测需 ≥3000），或改用非推理模型。"
+            if self.saw_reasoning
+            else "模型在长度上限内没有输出正文，可尝试调大「回复长度上限」。"
+        )
+        self._generation_note = f"回复为空：{limit}，已被长度上限截断（finish_reason=length）。{hint}"
 
     def _extra_body(self, enable_thinking: bool | None = None) -> dict | None:
         """非标准参数（如推理模型的思考开关）。None 时不传，避免影响普通模型。
@@ -119,6 +177,7 @@ class OpenAICompatibleProvider(LLMProvider):
             kwargs["extra_body"] = extra_body
 
         response = self._client.chat.completions.create(**kwargs)
+        self._record_response(response, max_tokens)
         if not response.choices:
             return ""
         return response.choices[0].message.content or ""
@@ -171,6 +230,7 @@ class OpenAICompatibleProvider(LLMProvider):
             response = self._client.chat.completions.create(
                 messages=api_messages, tools=tools, tool_choice="auto", **_sampling_kwargs()
             )
+            self._record_response(response, max_tokens)
             if not response.choices:
                 break
             message = response.choices[0].message
@@ -296,6 +356,7 @@ class OpenAICompatibleProvider(LLMProvider):
             kwargs["extra_body"] = extra_body
 
         response = self._client.chat.completions.create(**kwargs)
+        self._record_response(response, max_tokens)
         if not response.choices:
             return None
         message = response.choices[0].message

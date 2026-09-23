@@ -97,3 +97,38 @@ def build_viseme_track_estimated(
 def track_duration_ms(frames: list[VisemeFrame]) -> int:
     """时间轴总时长（无帧时为 0）。"""
     return max((f.end_ms for f in frames), default=0)
+
+
+def scale_track_ms(frames: list[VisemeFrame], target_ms: int) -> list[VisemeFrame]:
+    """把口型时间轴**等比缩放**到目标总时长。
+
+    为什么需要：估算轨道是按固定语速（`DEFAULT_CHAR_MS`）写死的，而真实语音长
+    短由 TTS 决定。带字级时间戳的 TTS（魔珐）不需要这一步；只返回音频的 TTS
+    （GPT-SoVITS）必须把整条轨道拉伸/压缩到实际音频长度，嘴才不会越说越飘。
+
+    一致性保证：所有边界乘以同一个系数，因此
+    「相邻帧首尾相接、单调不重叠」在缩放后依然成立；取整后用 `max` 兜底，
+    避免极短帧被压成 `end < start`。
+
+    参数:
+        frames: 原时间轴；
+        target_ms: 目标总时长（毫秒）；<= 0 或原时长为 0 时原样返回副本。
+    """
+    total_ms = track_duration_ms(frames)
+    if not frames or total_ms <= 0 or target_ms <= 0:
+        return list(frames)
+
+    factor = target_ms / total_ms
+    scaled: list[VisemeFrame] = []
+    for frame in frames:
+        start = int(round(frame.start_ms * factor))
+        end = int(round(frame.end_ms * factor))
+        scaled.append(
+            VisemeFrame(
+                start_ms=start,
+                end_ms=max(start, end),
+                viseme=frame.viseme,
+                char=frame.char,
+            )
+        )
+    return scaled

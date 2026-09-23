@@ -23,6 +23,8 @@ const eslintConfig = [
       "node_modules/**",
       "next-env.d.ts", // Next 自动生成，不参与 lint
       "eslint-report.json",
+      "vendor/**", // 第三方 SDK 源码（官方 Framework，自带的 eslint 指令不属于我们的规则集）
+      "public/**", // 静态资源（含官方 Core 的压缩 js）
     ],
   },
   ...compat.extends("next/core-web-vitals"),

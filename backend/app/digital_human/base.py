@@ -6,6 +6,7 @@
 实现：
 - local  本地降级（零依赖，无音频，时间轴按文本估算）——默认，评审无 key 亦可用
 - xmov   魔珐星云（TTS WebSocket 取音频 + 字级时间戳，口型精确对齐）
+- gpt_sovits  GPT-SoVITS（自部署 TTS 取整段音频，口型按音频时长缩放估算）
 """
 
 from abc import ABC, abstractmethod

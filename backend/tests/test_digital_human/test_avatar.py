@@ -11,6 +11,7 @@ from app.digital_human.viseme import (
     build_viseme_track_estimated,
     build_viseme_track_from_char_times,
     classify_char,
+    scale_track_ms,
     track_duration_ms,
 )
 from app.digital_human.xmov_auth import build_signature, encode_with_md5
@@ -51,6 +52,45 @@ def test_estimated_track_pause_longer_than_char() -> None:
     frames = build_viseme_track_estimated("好，")
     assert frames[1].viseme == Viseme.SIL
     assert frames[1].duration_ms > frames[0].duration_ms
+
+
+def test_scale_track_ms_hits_target_duration() -> None:
+    frames = build_viseme_track_estimated("我会在这里陪着你，慢慢说。")
+    scaled = scale_track_ms(frames, 5000)
+    # 每帧边界各自取整，允许 1ms 的累计误差
+    assert abs(track_duration_ms(scaled) - 5000) <= 1
+
+
+def test_scale_track_ms_keeps_frames_contiguous() -> None:
+    """缩放后仍须「首尾相接、单调不重叠」——否则口型会跳变。"""
+    frames = build_viseme_track_estimated("我会在这里陪着你。")
+    for target_ms in (600, 3000):          # 压缩与拉伸各测一次
+        scaled = scale_track_ms(frames, target_ms)
+        assert len(scaled) == len(frames)
+        for prev, cur in zip(scaled, scaled[1:]):
+            assert prev.end_ms == cur.start_ms
+            assert prev.end_ms >= prev.start_ms
+
+
+def test_scale_track_ms_preserves_viseme_and_char() -> None:
+    """缩放只改时间，不改口型与文字。"""
+    frames = build_viseme_track_estimated("好听，")
+    scaled = scale_track_ms(frames, 900)
+    assert [f.viseme for f in scaled] == [f.viseme for f in frames]
+    assert [f.char for f in scaled] == [f.char for f in frames]
+
+
+def test_scale_track_ms_returns_copy_for_invalid_target() -> None:
+    """目标时长非法（0 / 负数）时原样返回，且不共享列表对象。"""
+    frames = build_viseme_track_estimated("你好")
+    for target_ms in (0, -100):
+        out = scale_track_ms(frames, target_ms)
+        assert out == frames
+        assert out is not frames
+
+
+def test_scale_track_ms_handles_empty_track() -> None:
+    assert scale_track_ms([], 1000) == []
 
 
 def test_char_time_track_uses_exact_timestamps() -> None:

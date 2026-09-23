@@ -1,10 +1,12 @@
 "use client";
 
 /**
- * 具身状态机 + 语音播报控制器（两种实现，同一接口，可自动降级）。
+ * 具身状态机 + 语音播报控制器（三种实现，同一接口，可自动降级）。
  *
  * - `useBrowserAvatar`：浏览器原生 TTS（Web Speech API）——零依赖，无密钥可用；
- * - `useXmovAvatar`：魔珐具身驱动 SDK（XmovAvatar）——真实 3D 数字人渲染。
+ * - `useXmovAvatar`：魔珐具身驱动 SDK（XmovAvatar）——真实 3D 数字人渲染；
+ * - `useServerTtsAvatar`：服务端 TTS（GPT-SoVITS）——**给 Live2D / 静态立绘出真声音**，
+ *   拿不到音频时逐句降级为浏览器 TTS（借助上面的 useBrowserAvatar）。
  *
  * 状态机（赛题明确的评分点）：
  *   idle → listen（用户输入）→ think（等待后端）→ speak（播报）→ idle
@@ -19,8 +21,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { RefObject } from "react";
 
+import { postAvatar, resolveMediaUrl } from "@/lib/api";
 import type { AvatarCredentials } from "@/lib/avatar-config";
-import { AVATAR_STATE_LABELS, type AvatarState } from "@/lib/types";
+import { AVATAR_STATE_LABELS, type AvatarState, type VisemeFrame } from "@/lib/types";
 
 /** 数字人初始化阶段（用于向用户暴露诊断信息） */
 export type AvatarInitStage =
@@ -44,30 +47,67 @@ export interface SpeechChunk {
   ssml: string;
 }
 
+/**
+ * 播报上下文：**本轮**的情绪（服务端 TTS 还需要它换后端产出的表情时间轴）。
+ *
+ * 为什么按「调用时传入」而不是 hook 参数：情绪是本轮对话的**产物**
+ * （`useChatSession` 拿到回复后才知道），而 hook 在 `useChatSession` 之前调用，
+ * 用 hook 参数会形成循环依赖。只有服务端 TTS 会用它，
+ * 浏览器 TTS / 魔珐 SDK 各自有别的情绪通道（SSML 里已含 KA 动作），直接忽略。
+ */
+export interface SpeakContext {
+  /** 情绪标签（英文，如 anxious） */
+  emotion?: string | null;
+  /** 情绪强度 0-1 */
+  intensity?: number;
+  /** 本轮临时覆盖音色 id（一般用设置里的默认音色，不用传） */
+  voice?: string | null;
+}
+
 export interface AvatarController {
   state: AvatarState;
   stateLabel: string;
   ready: boolean;
-  provider: "browser" | "xmov";
+  /** 语音来源：browser（浏览器原生）/ xmov（魔珐 SDK 自带）/ server（服务端 TTS） */
+  provider: "browser" | "xmov" | "server";
   /** 初始化阶段（诊断用） */
   stage: AvatarInitStage;
   /** 阶段详情 / 失败原因（诊断用） */
   detail: string;
   setState: (state: AvatarState) => void;
   /**
-   * 播报一段回复。
-   * @param text 纯文本（字幕/浏览器 TTS 用）
-   * @param ssml SSML（魔珐 SDK 用；含 KA 动作指令）
-   */
-  speak: (text: string, ssml?: string) => Promise<void>;
-  /**
-   * 分段播报（流式分段：逐段产出，首段可更早出声）。
+   * 与**当前播放的音频同源**的口型时间轴（仅服务端 TTS 路径提供）。
    *
-   * 段间自动做 interactive_idle 过渡——SDK 官方约束 speak 不可连续调用。
-   * @param chunks 逐段内容（纯文本给字幕、SSML 给 SDK）
-   * @param onChunk 每段开始前的回调（推进字幕）
+   * 为什么不另发一次请求取时间轴：音频与口型必须来自同一次合成，
+   * 否则「声音 A + 口型 B」会结构性错位（浏览啧 TTS + 后端估算口型就是这个问题）。
+   * 上层应优先用它（拿到就用，用不到再走独立的 `useLipSyncTimeline`）。
    */
-  speakChunks: (chunks: SpeechChunk[], onChunk?: (index: number) => void) => Promise<void>;
+  timeline?: readonly VisemeFrame[] | null;
+  /**
+   * 播报一段回复。
+   * @param text 纯文本（字幕 / 浏览器 TTS / 服务端 TTS 用）
+   * @param ssml SSML（魔珐 SDK 用；含 KA 动作指令）
+   * @param context 本轮情绪等上下文（仅服务端 TTS 使用，其余实现忽略）
+   */
+  speak: (text: string, ssml?: string, context?: SpeakContext) => Promise<void>;
+  /**
+   * 分段播报（逐段产出，首段更早出声；字幕随语音推进）。
+   *
+   * 两种实现的差别值得记住：
+   * - **服务端 TTS**：每段独立合成，边播边预取下一段（流水线），首段 2~3s 出声、段间无缝，
+   *   字幕在**该段音频就绪那一刻**切换（字与声同时）；
+   * - **魔珐 SDK**：段间要经 interactive_idle 过渡（官方约束 speak 不可连续调用），
+   *   所以段间有约 400ms 间隔。
+   *
+   * @param chunks 逐段内容（纯文本给字幕、SSML 给 SDK）
+   * @param onChunk 每段**开始播报时**的回调（推进字幕）
+   * @param context 本轮情绪等上下文（仅服务端 TTS 使用）
+   */
+  speakChunks: (
+    chunks: SpeechChunk[],
+    onChunk?: (index: number) => void,
+    context?: SpeakContext,
+  ) => Promise<void>;
   /** 打断当前播报（客户端即时打断，不等服务端） */
   interrupt: () => void;
   /** SDK 挂载容器 id（仅 xmov 需要） */
@@ -782,5 +822,347 @@ export function useXmovAvatar(
     speakChunks,
     interrupt,
     containerId,
+  };
+}
+
+// =============================================================
+// 实现三：服务端 TTS（GPT-SoVITS）—— 给 Live2D / 静态立绘出真声音
+// =============================================================
+
+/**
+ * 播放收尾的宽限时间（在音频时长之上再等这么久）。
+ *
+ * `ended` 在少数情况下不会触发（解码中途失败、元素被换源、标签页被冻结），
+ * 没有兜底就会永远卡在 speak，调用方再也回不到 idle。
+ */
+const AUDIO_END_GRACE_MS = 5_000;
+
+/** 播放等待上限：优先按音频真实时长，拿不到时长时按文本长度估。 */
+function audioTimeoutMs(durationMs: number, textLength: number): number {
+  return durationMs > 0 ? durationMs + AUDIO_END_GRACE_MS : speakTimeoutMs(textLength);
+}
+
+/**
+ * 流水线预取深度（领先当前播报段多少段）。
+ *
+ * **实测结论：深度 1 最优，更深反而更慢**（96 字长回复、7 段）：
+ * - 深度 1 → 首段 **1.66s** 出声，之后每段都在上一段播完前就绪，全程无缝；
+ * - 深度 2 → 首段反而拖到 **4.60s**：服务端把并发的两个请求一起处理、几乎同时返回，
+ *   等于把第一段拖成"两段的合成时间"。更深还额外占用一个后端事件循环。
+ *
+ * 深度 1 就够了的原因：首段之后每段的播放时长（2~4.5s）都大于下一段的合成耗时（1.5~2.6s），
+ * 播放期间足够把下一段取回来。
+ */
+const PREFETCH_DEPTH = 1;
+
+/** 一段**已取回**的服务端音频（音频地址 + 与它同源的口型时间轴） */
+interface FetchedSegment {
+  audioUrl: string;
+  visemes: readonly VisemeFrame[] | null;
+  durationMs: number;
+  textLength: number;
+}
+
+/**
+ * `playSegmentAudio` 的结局。
+ *
+ * `blocked`（自动播放被拦）**不降级**：拦得住它就意味着用户还没交互，
+ * 浏览器 TTS 同样会被拦，再降级只会双重出声或白等一次超时。
+ */
+type SegmentPlayOutcome = "played" | "blocked";
+
+/**
+ * 等音频收尾：`ended` / `error` / 超时 / **被中断** 四条路径都必须 settle。
+ *
+ * 为什么必须监听 interrupt：暂停音频**不会**触发 `ended`，若只靠 `ended` +
+ * 超时，一次打断就会让这个 Promise 挂住到最长 95s（旧路径踩过这个坑，
+ * 调用方再也回不到 idle）。所以中断时用同一个 AbortSignal 把它收尾。
+ */
+function waitAudioFinished(
+  audio: HTMLAudioElement,
+  timeoutMs: number,
+  signal: AbortSignal,
+): Promise<"ended" | "error" | "timeout" | "cancelled"> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      audio.removeEventListener("ended", onEnded);
+      audio.removeEventListener("error", onError);
+      signal.removeEventListener("abort", onAbort);
+    };
+    const finish = (reason: "ended" | "error" | "timeout" | "cancelled") => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(reason);
+    };
+    function onEnded() {
+      finish("ended");
+    }
+    function onError() {
+      finish("error");
+    }
+    function onAbort() {
+      finish("cancelled");
+    }
+
+    timer = setTimeout(() => finish("timeout"), timeoutMs);
+    audio.addEventListener("ended", onEnded);
+    audio.addEventListener("error", onError);
+    signal.addEventListener("abort", onAbort);
+
+    // 信号在监听前就已中止（打断发生在请求期间）：立即收尾
+    if (signal.aborted) finish("cancelled");
+  });
+}
+
+export interface ServerTtsOptions {
+  /** 是否使用服务端 TTS（false = 跳过服务端，直接用浏览器 TTS） */
+  enabled?: boolean;
+  /** 情绪标签（英文）；一般不用设，以调用时传入的 `SpeakContext` 为准 */
+  emotion?: string | null;
+  /** 情绪强度 0-1（同上，仅作默认值） */
+  intensity?: number;
+  /** 音色 id（GPT-SoVITS 音色表 id，见 GET /media/tts/voices；空 = 后端默认音色） */
+  voice?: string | null;
+}
+
+/**
+ * 服务端 TTS 播报控制器（GPT-SoVITS），失败**逐句**降级为浏览器原生 TTS。
+ *
+ * 与另两个实现的关键差别：**音频与口型同源**。
+ * `POST /media/avatar` 一次请求同时返回音频与 viseme 时间轴，所以：
+ * - 不再需要 `useLipSyncTimeline` 另发一次请求（否则是「声音 A + 口型 B」）；
+ * - 口型时钟对齐**音频真正开始播放**的时刻（渲染器以收到时间轴为 0 点）；
+ * - 字幕按段推进用 `audio.currentTime` 驱动，不用定时器猜。
+ *
+ * 降级是**逐句**的而不是全局开关：服务在对话中途挂掉，下一句自动改走浏览器 TTS，
+ * 不需要重启也不需要用户干预（这也是不直接抛错的原因）。
+ */
+export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarController {
+  const { enabled = true, emotion = null, intensity = 0.5, voice = null } = options;
+  /** 降级实现：后端没给音频时用它（已单测覆盖，不重复实现一套 TTS） */
+  const browser = useBrowserAvatar();
+  const [timeline, setTimeline] = useState<readonly VisemeFrame[] | null>(null);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
+  /** 播报代次：与另两个实现同一思路——只有代次未变才允许继续/落地状态 */
+  const generationRef = useRef(0);
+  const mountedRef = useRef(false);
+
+  /** 停掉当前音频并释放缓冲（连续对话时不释放会一直攒着已解码的数据） */
+  const stopAudio = useCallback(() => {
+    const audio = audioRef.current;
+    audioRef.current = null;
+    if (!audio) return;
+    try {
+      audio.pause();
+    } catch {
+      // 元素已不可用：忽略（停不下来不是致命错误）
+    }
+    audio.removeAttribute("src");
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      generationRef.current += 1; // 作废进行中的播报
+      abortRef.current?.abort();
+      abortRef.current = null;
+      stopAudio();
+    };
+  }, [stopAudio]);
+
+  /**
+   * 取一段音频（一次 `/media/avatar`）——**只取不播**。
+   *
+   * 拆成"取"与"播"两步是为了做流水线：当前段在播的时候就能去取下一段。
+   * 返回 `null` = 这一段没有服务端音频（服务未部署 / 后端降级），由调用方**逐段**降级。
+   */
+  const fetchSegment = useCallback(
+    async (
+      text: string,
+      context: SpeakContext | undefined,
+      signal: AbortSignal,
+    ): Promise<FetchedSegment | null> => {
+      const data = await postAvatar(
+        {
+          text,
+          // 本轮情绪优先；hook 上的值只是默认值
+          emotion: context?.emotion ?? emotion,
+          intensity: context?.intensity ?? intensity,
+          voice: context?.voice ?? voice,
+        },
+        { signal },
+      );
+      if (!data?.audio_url) return null;
+      return {
+        audioUrl: resolveMediaUrl(data.audio_url),
+        visemes: data.visemes?.length ? data.visemes : null,
+        durationMs: data.duration_ms,
+        textLength: text.length,
+      };
+    },
+    [emotion, intensity, voice],
+  );
+
+  /**
+   * 播一段已取回的音频并等它播完。
+   *
+   * 口型时间轴在 `playing`（**真正出声那一刻**）才交给渲染器：
+   * 渲染器以收到时间轴的时刻为 0 点（见 live2d-renderer 的 lipSyncStartMs），
+   * 提前设置会变成固定的音画偏移。
+   */
+  const playSegmentAudio = useCallback(
+    async (
+      segment: FetchedSegment,
+      generation: number,
+      signal: AbortSignal,
+    ): Promise<SegmentPlayOutcome> => {
+      const audio = new Audio(segment.audioUrl);
+      audio.preload = "auto";
+      audioRef.current = audio;
+      const onPlaying = () => {
+        if (generation === generationRef.current) setTimeline(segment.visemes);
+      };
+      audio.addEventListener("playing", onPlaying);
+
+      try {
+        await audio.play();
+      } catch (error) {
+        console.warn("[HyPRA][avatar] 服务端音频播放被浏览器拦截：", error);
+        stopAudio();
+        setTimeline(null);
+        return "blocked";
+      }
+
+      const reason = await waitAudioFinished(
+        audio,
+        audioTimeoutMs(segment.durationMs, segment.textLength),
+        signal,
+      );
+      if (reason === "timeout") {
+        console.warn("[HyPRA][avatar] 服务端音频未收到结束事件，已按超时收尾");
+      } else if (reason === "error") {
+        // 音频元素报错（地址 404 / 解码失败）时进度事件也会停，按提前结束处理
+        console.warn("[HyPRA][avatar] 服务端音频播放出错，已按提前结束处理");
+      }
+      stopAudio();
+      if (generation === generationRef.current) setTimeline(null);
+      return "played";
+    },
+    [stopAudio],
+  );
+
+  const speak = useCallback(
+    async (text: string, _ssml?: string, context?: SpeakContext) => {
+      if (!text.trim()) return;
+      if (!enabled) {
+        await browser.speak(text);
+        return;
+      }
+      const generation = ++generationRef.current;
+      stopAudio();
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const segment = await fetchSegment(text, context, controller.signal);
+      if (generation !== generationRef.current || !mountedRef.current) return;
+      if (!segment) {
+        // 后端没给音频（服务未部署 / 已降级）→ 别让用户等到静音
+        setTimeline(null);
+        await browser.speak(text);
+        return;
+      }
+      await playSegmentAudio(segment, generation, controller.signal);
+    },
+    [browser, enabled, fetchSegment, playSegmentAudio, stopAudio],
+  );
+
+  /**
+   * 逐段播报（**流水线**：取一段 → 播一段 → 同时预取下一段）。
+   *
+   * 为什么不再"整段合成"（曾经的做法，已实测推翻）：
+   * 合成耗时随文本**近似线性增长**（实测 15 字 2.99s、46 字 8.75s），
+   * 整段合成意味着用户盯着文字干等 8 秒才出声。逐段后首段只需 2~3 秒，
+   * 而且**字幕与该段语音同时出现**（onChunk 就在 play() 之前）。
+   *
+   * 预取深度刻意只留 1 段：GPU 单卡上并发请求只会排队（实测并发总时长 ≈ 串行），
+   * 多排队没有收益，用户打断后还会留下一堆没用的合成。
+   * 另一个刚好合适的巧合：一句的播放时长 ≈ 一句的合成耗时，所以"边播边取"天然无缝。
+   */
+  const speakChunks = useCallback(
+    async (
+      chunks: SpeechChunk[],
+      onChunk?: (index: number) => void,
+      context?: SpeakContext,
+    ) => {
+      if (chunks.length === 0) return;
+      if (!enabled) {
+        await browser.speakChunks(chunks, onChunk);
+        return;
+      }
+      const generation = ++generationRef.current;
+      stopAudio();
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      // 预取队列：始终让队列里排着接下来的 PREFETCH_DEPTH 段
+      const queue: Promise<FetchedSegment | null>[] = [];
+      let nextToFetch = 0;
+      const enqueue = () => {
+        while (nextToFetch < chunks.length && queue.length < PREFETCH_DEPTH) {
+          queue.push(fetchSegment(chunks[nextToFetch].text, context, controller.signal));
+          nextToFetch += 1;
+        }
+      };
+      enqueue();
+
+      for (let index = 0; index < chunks.length; index += 1) {
+        const segment = await (queue.shift() as Promise<FetchedSegment | null>);
+        if (generation !== generationRef.current || !mountedRef.current) return;
+        enqueue(); // 取走一段就补上，保持领先 PREFETCH_DEPTH 段
+        // 字幕与该段语音**同时**出现：这一行就在 play() 之前
+        onChunk?.(index);
+        if (!segment) {
+          // 只有这一段拿不到音频 → 只降级这一段，后面的段继续走服务端
+          setTimeline(null);
+          await browser.speak(chunks[index].text);
+          if (generation !== generationRef.current) return;
+          continue;
+        }
+        const outcome = await playSegmentAudio(segment, generation, controller.signal);
+        if (outcome === "blocked") return; // 被拦：整轮静音收尾，不逐段刷屏
+        if (generation !== generationRef.current) return;
+      }
+    },
+    [browser, enabled, fetchSegment, playSegmentAudio, stopAudio],
+  );
+  const interrupt = useCallback(() => {
+    generationRef.current += 1; // 作废进行中的播报
+    abortRef.current?.abort();
+    abortRef.current = null;
+    stopAudio();
+    setTimeline(null);
+    browser.interrupt(); // 同时打断可能正在进行的降级 TTS 播报
+  }, [browser, stopAudio]);
+
+  return {
+    // state / stateLabel / ready / setState 沿用降级实现：
+    // 状态机必须**只有一处**在维护，否则两个状态源会互相覆盖。
+    ...browser,
+    provider: "server",
+    stage: "ready",
+    detail: enabled ? "" : "服务端 TTS 未启用：使用浏览器原生 TTS",
+    timeline,
+    speak,
+    speakChunks,
+    interrupt,
   };
 }
