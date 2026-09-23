@@ -12,8 +12,8 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useTtsPreferences } from "@/hooks/useTtsPreferences";
-import type { TtsVoicesStatus } from "@/lib/types";
+import { useTtsPreferences } from "@/hooks/avatar/useTtsPreferences";
+import type { TtsVoicesStatus } from "@/lib/api/types";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {

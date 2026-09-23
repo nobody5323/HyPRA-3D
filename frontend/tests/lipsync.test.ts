@@ -17,8 +17,8 @@ import {
   normalizeViseme,
   sampleMouth,
   timelineDurationMs,
-} from "@/lib/lipsync";
-import type { VisemeFrame } from "@/lib/types";
+} from "@/lib/avatar/lipsync";
+import type { VisemeFrame } from "@/lib/api/types";
 
 /** 后端 `Viseme` 枚举的全部取值（backend/app/digital_human/models.py） */
 const BACKEND_VISEMES = ["sil", "A", "I", "U", "E", "O", "M", "F", "N", "S"];

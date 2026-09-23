@@ -32,7 +32,7 @@ import {
   subscribeSelectedModel,
   subscribeTtsEnginePreference,
   subscribeTtsVoice,
-} from "@/lib/avatar-config";
+} from "@/lib/avatar/avatar-config";
 
 const STORAGE_KEY = "hypra.avatar.renderer";
 

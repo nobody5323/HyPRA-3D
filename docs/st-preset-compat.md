@@ -354,11 +354,11 @@ ST 预设正文大量使用 `{{...}}` 宏。**P3 已实现**，落在**独立模
 
 | 组件 / 模块 | 职责 |
 |---|---|
-| `components/StPresetPanel.tsx` | 折叠面板：导入（文件选择 + 拖放）、清单与选择、导出、恢复导入时、删除（内联二次确认）、上一轮生效摘要 |
-| `components/StPresetEditor.tsx` | 编辑器：采样参数、组装开关、条目清单（开关 / 拖拽 / ↑↓ / 展开编辑）、记忆注入、未生效特性与兼容提示 |
-| `lib/st-preset.ts` | 纯逻辑：字段元信息、顺序表与条目合并、排序、补丁深合并、token 估算 |
-| `lib/api.ts` / `lib/types.ts` | 7 个端点封装 + 与后端对齐的类型 |
-| `hooks/useChatSession.ts` | `stPresetId` 状态 + `POST /chat` 传 `st_preset_id` + 收集 `st_preset` 元信息 |
+| `components/studio/StPresetPanel.tsx` | 折叠面板：导入（文件选择 + 拖放）、清单与选择、导出、恢复导入时、删除（内联二次确认）、上一轮生效摘要 |
+| `components/studio/StPresetEditor.tsx` | 编辑器：采样参数、组装开关、条目清单（开关 / 拖拽 / ↑↓ / 展开编辑）、记忆注入、未生效特性与兼容提示 |
+| `lib/studio/st-preset.ts` | 纯逻辑：字段元信息、顺序表与条目合并、排序、补丁深合并、token 估算 |
+| `lib/api/client.ts` / `lib/api/types.ts` | 7 个端点封装 + 与后端对齐的类型 |
+| `hooks/chat/useChatSession.ts` | `stPresetId` 状态 + `POST /chat` 传 `st_preset_id` + 收集 `st_preset` 元信息 |
 
 交互要点：
 - **乐观更新 + 防抖提交**（500ms）：改本地 state 立即反馈，补丁经 `mergePatch` 累积后一次提交；
@@ -385,7 +385,7 @@ ST 预设正文大量使用 `{{...}}` 宏。**P3 已实现**，落在**独立模
 | P3 | 宏解析扩展 | 宏单测 + 未知宏保留 | ✅ 已实现（独立模块 `macros.py`，24 项测试） |
 | P4 | API + graph 分派 + 记忆扩展注入 | 接口测试 + 组装端到端测试（mock LLM） | ✅ 已实现（33 项测试） |
 | P5 | 前端预设面板 | 前端测试 + lint/build | ✅ 已实现（`StPresetPanel`） |
-| P6 | 前端条目编辑器 | 同上 | ✅ 已实现（`StPresetEditor` + `lib/st-preset.ts`） |
+| P6 | 前端条目编辑器 | 同上 | ✅ 已实现（`StPresetEditor` + `lib/studio/st-preset.ts`） |
 | P7 | README / 文档同步 / 合规声明段落 | 全量 pytest + 前端 build | ⬜ 待做 |
 
 ---

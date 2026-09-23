@@ -23,8 +23,8 @@ import {
   rowPatch,
   toOrderPatch,
   updateRow,
-} from "@/lib/st-preset";
-import type { StPresetDetail, StPromptItem } from "@/lib/types";
+} from "@/lib/studio/st-preset";
+import type { StPresetDetail, StPromptItem } from "@/lib/api/types";
 
 function makeItem(overrides: Partial<StPromptItem> = {}): StPromptItem {
   return {

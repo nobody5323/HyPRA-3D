@@ -18,8 +18,8 @@ import {
   STATIC_PORTRAIT_CAPABILITIES,
   normalizeMotion,
   resolvePortraitId,
-} from "@/lib/avatar-renderer";
-import { AVATAR_STATE_LABELS } from "@/lib/types";
+} from "@/lib/avatar/avatar-renderer";
+import { AVATAR_STATE_LABELS } from "@/lib/api/types";
 
 /** 后端 EmotionLabel 的 8 类（逐字复制，作为一致性基准） */
 const BACKEND_EMOTION_LABELS = [

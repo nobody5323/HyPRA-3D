@@ -11,13 +11,13 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useChatSession } from "@/hooks/useChatSession";
-import type { AvatarController } from "@/hooks/useAvatar";
-import { deleteSession, getSessionHistory, postChat, postSpeak } from "@/lib/api";
-import { writeActiveSessionId } from "@/lib/session-store";
-import type { ChatResponse, SessionHistory, SpeakCommand } from "@/lib/types";
+import { useChatSession } from "@/hooks/chat/useChatSession";
+import type { AvatarController } from "@/hooks/avatar/useAvatar";
+import { deleteSession, getSessionHistory, postChat, postSpeak } from "@/lib/api/client";
+import { writeActiveSessionId } from "@/lib/chat/session-store";
+import type { ChatResponse, SessionHistory, SpeakCommand } from "@/lib/api/types";
 
-vi.mock("@/lib/api", () => ({
+vi.mock("@/lib/api/client", () => ({
   ApiError: class ApiError extends Error {
     constructor(
       readonly status: number,

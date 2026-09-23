@@ -7,13 +7,13 @@
 
 import { describe, expect, it } from "vitest";
 
-import { PORTRAIT_IDS } from "@/lib/avatar-renderer";
+import { PORTRAIT_IDS } from "@/lib/avatar/avatar-renderer";
 import {
   PORTRAIT_BASE_PATH,
   PORTRAIT_MANIFEST,
   resolveEmotionPortrait,
   resolvePortraitEntry,
-} from "@/lib/portrait-assets";
+} from "@/lib/avatar/portrait-assets";
 
 describe("PORTRAIT_MANIFEST", () => {
   it("8 类情绪都有条目，文件名与 id 同名", () => {

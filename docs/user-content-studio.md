@@ -2,7 +2,7 @@
 
 > 让用户自己创建对话角色（人设 + 背景故事）与世界设定（按条件触发的世界书条目）。
 > 数据契约、接口与不变量的唯一权威说明；实现见 `backend/app/studio/` 与
-> `backend/app/api/studio.py`，前端面板见 `frontend/components/StudioPanel.tsx`。
+> `backend/app/api/studio.py`，前端面板见 `frontend/components/studio/StudioPanel.tsx`。
 
 ## 1. 定位
 

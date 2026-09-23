@@ -16,7 +16,7 @@
  * 不登记模型内容。换模型 = 放目录 + 改本文件。
  */
 
-import type { AvatarPortraitLayout } from "../avatar-renderer";
+import type { AvatarPortraitLayout } from "@/lib/avatar/avatar-renderer";
 
 /** 模型根目录（Next.js `public/` 下的路径） */
 export const LIVE2D_MODEL_BASE_PATH = "/live2d";

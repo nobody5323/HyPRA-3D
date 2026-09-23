@@ -20,7 +20,7 @@ import {
   postChat,
   resolveMediaUrl,
   uploadKnowledge,
-} from "@/lib/api";
+} from "@/lib/api/client";
 
 /** 构造一个最小的 fetch 响应替身（只提供 api.ts 实际用到的成员）。 */
 function jsonResponse(body: unknown, status = 200): Response {

@@ -9,8 +9,8 @@
 
 import { describe, expect, it } from "vitest";
 
-import { BUILT_IN_MODEL_SOURCE, resolveAvatarModelSource } from "@/lib/avatar-model-source";
-import type { AvatarModelInfo } from "@/lib/types";
+import { BUILT_IN_MODEL_SOURCE, resolveAvatarModelSource } from "@/lib/avatar/avatar-model-source";
+import type { AvatarModelInfo } from "@/lib/api/types";
 
 function makeModel(overrides: Partial<AvatarModelInfo>): AvatarModelInfo {
   return {

@@ -139,7 +139,7 @@ async function speakChunks(ssmlChunks) {
 }
 ```
 
-> 真实实现见 `frontend/hooks/useAvatar.ts` 的 `speakOnce` / `speak` / `speakChunks`
+> 真实实现见 `frontend/hooks/avatar/useAvatar.ts` 的 `speakOnce` / `speak` / `speakChunks`
 > （含 voice_end 丢失时的超时兜底，避免 await 永久挂起）。
 
 ### 断线重连
@@ -225,7 +225,7 @@ async function speakChunks(ssmlChunks) {
 不接受外部音频；即「魔珐形象 + GPT-SoVITS 声音」当前不可行，
 要么用魔珐音色，要么用自研渲染器（`POST /media/avatar` 的音频 + 时间轴）。
 
-**选择规则**（`frontend/lib/avatar-config.ts` 的 `resolveVoiceSource`，有单测）：
+**选择规则**（`frontend/lib/avatar/avatar-config.ts` 的 `resolveVoiceSource`，有单测）：
 
 ```
 魔珐渲染中 ? xmov

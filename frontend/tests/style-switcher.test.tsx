@@ -9,8 +9,8 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { StyleSwitcher } from "@/components/StyleSwitcher";
-import type { StyleCatalog } from "@/lib/types";
+import { StyleSwitcher } from "@/components/settings/StyleSwitcher";
+import type { StyleCatalog } from "@/lib/api/types";
 
 const CATALOG: StyleCatalog = {
   default_style_id: "modern-conversational",

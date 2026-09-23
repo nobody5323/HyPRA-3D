@@ -12,7 +12,7 @@ import {
   readDraft,
   writeActiveSessionId,
   writeDraft,
-} from "@/lib/session-store";
+} from "@/lib/chat/session-store";
 
 beforeEach(() => {
   window.localStorage.clear();

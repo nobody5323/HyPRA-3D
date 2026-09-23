@@ -10,8 +10,8 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { PORTRAIT_MANIFEST } from "@/lib/portrait-assets";
-import { createStaticPortraitRenderer } from "@/lib/static-portrait-renderer";
+import { PORTRAIT_MANIFEST } from "@/lib/avatar/portrait-assets";
+import { createStaticPortraitRenderer } from "@/lib/avatar/static-portrait-renderer";
 
 /**
  * 可控的 `Image` 替身。

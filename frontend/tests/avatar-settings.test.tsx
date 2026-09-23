@@ -10,9 +10,9 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { AvatarSettings } from "@/components/AvatarSettings";
-import type { AvatarModelsState } from "@/hooks/useAvatarModels";
-import type { TtsVoicesStatus } from "@/lib/types";
+import { AvatarSettings } from "@/components/avatar/AvatarSettings";
+import type { AvatarModelsState } from "@/hooks/avatar/useAvatarModels";
+import type { TtsVoicesStatus } from "@/lib/api/types";
 
 const models: AvatarModelsState = {
   models: [],

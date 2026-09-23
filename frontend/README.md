@@ -63,7 +63,7 @@ cd .. && docker compose up -d --build   # 拉起 qdrant + backend + frontend
 | 能力 | 说明 |
 |---|---|
 | 对话 UI | 多轮对话、Enter 发送、打字中提示、错误提示 |
-| **具身状态机** | 待机 / 聆听中 / 思考中 / 说话中（`hooks/useAvatar.ts`） |
+| **具身状态机** | 待机 / 聆听中 / 思考中 / 说话中（`hooks/avatar/useAvatar.ts`） |
 | 字幕 | 消费后端 `speak.display_text`（已剥离 SSML 标签） |
 | 情绪视觉 | 情绪标签 + 强度条 + 数字人光效随情绪变化 |
 | 文风切换 | 清单来自后端 `GET /chat/styles`（预设与代码分离，新增 YAML 无需改前端） |
@@ -115,8 +115,8 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 | **记忆与行动可见性** | `MemoryTrace`：本轮命中世界书条目 / 个人记忆条数 / 情景记忆 / 语义事实 / 是否已后台写入 / 提示词 token；`AgentBadge`：MCP 服务器连接数、工具数、工具清单与错误 |
 | **分段播报（流式分段）** | 对话区「分段播报」开关（**默认关闭**）：走 `POST /media/speak`（`streaming=true`）取 `chunks`（纯文本，字幕随段推进）与 `ssml_chunks`（逐段 SSML，由后端生成，前端不自拼标签），段间自动 `interactiveidle` 过渡 |
 | **断线退避重连** | `avatar.onError` → 指数退避重建 SDK（1s → 2s → 4s，最多 3 次），期间 `stage = "reconnecting"`；重连用尽才降级为浏览器语音 |
-| **契约层** | `lib/types.ts` 与后端响应一一对应；`lib/api.ts` 统一 `ApiError(status, detail)`（知识库 409 需读结构体），并把后端的空对象 `{}` 规范化为 `null` |
-| **会话持久化** | 消息唯一来源是**后端**（会话落 SQLite）；前端只在 localStorage 记「当前会话 id」（`lib/session-store.ts`），刷新后拉历史恢复。`SessionList` 提供历史列表 / 新建对话 / 打开历史会话；输入草稿也按角色本地保留 |
+| **契约层** | `lib/api/types.ts` 与后端响应一一对应；`lib/api/client.ts` 统一 `ApiError(status, detail)`（知识库 409 需读结构体），并把后端的空对象 `{}` 规范化为 `null` |
+| **会话持久化** | 消息唯一来源是**后端**（会话落 SQLite）；前端只在 localStorage 记「当前会话 id」（`lib/chat/session-store.ts`），刷新后拉历史恢复。`SessionList` 提供历史列表 / 新建对话 / 打开历史会话；输入草稿也按角色本地保留 |
 
 > 分段播报的段间停顿属于真机听感问题（SDK 状态切换经 WebSocket 下发），
 > 因此默认关闭、由界面开关控制，不动已验证的整段播报主路径。

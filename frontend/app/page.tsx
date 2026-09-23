@@ -15,42 +15,45 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { AgentBadge } from "@/components/AgentBadge";
-import { AvatarSettings } from "@/components/AvatarSettings";
-import { AvatarStage } from "@/components/AvatarStage";
-import { ChatPanel } from "@/components/ChatPanel";
-import { KnowledgePanel } from "@/components/KnowledgePanel";
-import { LlmSettings } from "@/components/LlmSettings";
-import { MemoryTrace } from "@/components/MemoryTrace";
-import { MoodIndicator } from "@/components/MoodIndicator";
-import { PersonaSwitcher } from "@/components/PersonaSwitcher";
-import { PresetSwitcher } from "@/components/PresetSwitcher";
-import { SessionList } from "@/components/SessionList";
-import { StPresetPanel } from "@/components/StPresetPanel";
-import { StudioPanel } from "@/components/StudioPanel";
-import { StyleSwitcher } from "@/components/StyleSwitcher";
-import { SubtitleBar } from "@/components/SubtitleBar";
-import { useBrowserAvatar, useServerTtsAvatar, useXmovAvatar } from "@/hooks/useAvatar";
-import { useTtsPreferences } from "@/hooks/useTtsPreferences";
-import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
-import { useChatSession } from "@/hooks/useChatSession";
+import { AgentBadge } from "@/components/settings/AgentBadge";
+import { AvatarSettings } from "@/components/avatar/AvatarSettings";
+import { AvatarStage } from "@/components/avatar/AvatarStage";
+import { ChatPanel } from "@/components/chat/ChatPanel";
+import { KnowledgePanel } from "@/components/studio/KnowledgePanel";
+import { LlmSettings } from "@/components/settings/LlmSettings";
+import { MemoryTrace } from "@/components/chat/MemoryTrace";
+import { MoodIndicator } from "@/components/chat/MoodIndicator";
+import { PersonaSwitcher } from "@/components/settings/PersonaSwitcher";
+import { PluginCenter } from "@/components/settings/PluginCenter";
+import { PresetSwitcher } from "@/components/settings/PresetSwitcher";
+import { SessionList } from "@/components/chat/SessionList";
+import { StPresetPanel } from "@/components/studio/StPresetPanel";
+import { StudioPanel } from "@/components/studio/StudioPanel";
+import { StyleSwitcher } from "@/components/settings/StyleSwitcher";
+import { SubtitleBar } from "@/components/chat/SubtitleBar";
+import { useBrowserAvatar, useServerTtsAvatar, useXmovAvatar } from "@/hooks/avatar/useAvatar";
+import { useTtsPreferences } from "@/hooks/avatar/useTtsPreferences";
+import { useAvatarCredentials } from "@/hooks/avatar/useAvatarCredentials";
+import { useChatSession } from "@/hooks/chat/useChatSession";
 import {
   getHealth,
   getLlmConfig,
   getPersonas,
   getPresets,
   getStyles,
-} from "@/lib/api";
+} from "@/lib/api/client";
 import type {
   McpServerStatus,
   PersonaCatalog,
+  PluginStatus,
+  PluginsSummary,
   PresetCatalog,
   StyleCatalog,
-} from "@/lib/types";
-import { useAvatarModels } from "@/hooks/useAvatarModels";
-import { useLipSyncTimeline } from "@/hooks/useLipSyncTimeline";
-import { resolveAvatarModelSource } from "@/lib/avatar-model-source";
-import { resolveVoiceSource } from "@/lib/avatar-config";
+} from "@/lib/api/types";
+import { useAvatarModels } from "@/hooks/avatar/useAvatarModels";
+import { useLipSyncTimeline } from "@/hooks/avatar/useLipSyncTimeline";
+import { resolveAvatarModelSource } from "@/lib/avatar/avatar-model-source";
+import { resolveVoiceSource } from "@/lib/avatar/avatar-config";
 
 const CONTAINER_ID = "avatar-container"; // 用于 DOM 元素的 id
 const CONTAINER_SELECTOR = "#avatar-container"; // 传给 SDK 的 CSS 选择器（兜底）
@@ -83,6 +86,9 @@ export default function HomePage() {
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
   /** MCP 外部服务连接状态（行动层可见性证据） */
   const [mcpServers, setMcpServers] = useState<McpServerStatus[]>([]);
+  // 插件体系状态（AGENTS.md §9）：随 /health 轮询刷新，驱动「能力中心」面板
+  const [plugins, setPlugins] = useState<PluginStatus[]>([]);
+  const [pluginsSummary, setPluginsSummary] = useState<PluginsSummary | null>(null);
   /** 模型预设档清单（选择器数据源；后端不可用时为 null，选择器不渲染） */
   const [presetCatalog, setPresetCatalog] = useState<PresetCatalog | null>(null);
   /** 文风清单（来自 GET /chat/styles，替代原先前端硬编码的 4 项） */
@@ -245,6 +251,8 @@ export default function HomePage() {
       const online = health?.status === "ok";
       setBackendOnline(online);
       setMcpServers(health?.mcp ?? []);
+      setPlugins(health?.plugins ?? []);
+      setPluginsSummary(health?.plugins_summary ?? null);
       if (!online) timer = setTimeout(check, 5000);
     };
     check();
@@ -499,6 +507,7 @@ export default function HomePage() {
             disabled={session.busy}
             lastRun={session.stPresetMeta}
           />
+          <PluginCenter plugins={plugins} summary={pluginsSummary} />
           <KnowledgePanel companionId={session.personaId} disabled={session.busy} />
           {/* min-h 兑底：知识库面板展开时对话区不被压到不可用高度 */}
           <div className="min-h-[320px] flex-1">

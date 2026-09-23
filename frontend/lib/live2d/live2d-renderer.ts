@@ -22,7 +22,7 @@ import {
   type AvatarRenderer,
   type AvatarRendererMode,
   type AvatarRendererStatus,
-} from "../avatar-renderer";
+} from "@/lib/avatar/avatar-renderer";
 import {
   CUBISM_SHADER_BASE_URL,
   type CubismBridge,
@@ -37,9 +37,9 @@ import {
   type Live2DParameterMap,
   type Live2DPresets,
 } from "./config";
-import { sampleMouth } from "../lipsync";
+import { sampleMouth } from "@/lib/avatar/lipsync";
 import type { Live2DModelEntry } from "./model-assets";
-import type { VisemeFrame } from "../types";
+import type { VisemeFrame } from "@/lib/api/types";
 
 /** 模型加载阶段（比 `AvatarRendererStatus` 更细，供诊断面板展示） */
 export type Live2DLoadStage = "idle" | "loading" | "ready" | "failed";

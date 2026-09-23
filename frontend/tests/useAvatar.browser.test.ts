@@ -10,8 +10,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useBrowserAvatar } from "@/hooks/useAvatar";
-import type { SpeechChunk } from "@/hooks/useAvatar";
+import { useBrowserAvatar } from "@/hooks/avatar/useAvatar";
+import type { SpeechChunk } from "@/hooks/avatar/useAvatar";
 
 /** SpeechSynthesisUtterance 替身（只保留实现用到的成员）。 */
 class FakeUtterance {

@@ -7,7 +7,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { PORTRAIT_IDS } from "@/lib/avatar-renderer";
+import { PORTRAIT_IDS } from "@/lib/avatar/avatar-renderer";
 import {
   FALLBACK_MOTION_GROUP,
   LIVE2D_PARAMETER_MAP,

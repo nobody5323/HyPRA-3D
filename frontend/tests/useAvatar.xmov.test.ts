@@ -12,7 +12,7 @@ import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MockInstance } from "vitest";
 
-import { useXmovAvatar } from "@/hooks/useAvatar";
+import { useXmovAvatar } from "@/hooks/avatar/useAvatar";
 
 const CREDENTIALS = { appId: "test-app", appSecret: "test-secret" };
 

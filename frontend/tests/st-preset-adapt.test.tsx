@@ -7,8 +7,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { StPresetAdaptPanel } from "@/components/StPresetAdaptPanel";
-import type { StAdaptResult, StPresetDetail } from "@/lib/types";
+import { StPresetAdaptPanel } from "@/components/studio/StPresetAdaptPanel";
+import type { StAdaptResult, StPresetDetail } from "@/lib/api/types";
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {

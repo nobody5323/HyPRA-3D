@@ -11,8 +11,8 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { useServerTtsAvatar } from "@/hooks/useAvatar";
-import type { SpeechChunk } from "@/hooks/useAvatar";
+import { useServerTtsAvatar } from "@/hooks/avatar/useAvatar";
+import type { SpeechChunk } from "@/hooks/avatar/useAvatar";
 
 /** 可精确驱动的 Audio 替身（真实浏览器里 playing / ended / timeupdate 都是异步事件）。 */
 class FakeAudio {

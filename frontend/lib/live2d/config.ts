@@ -11,7 +11,7 @@ import {
   resolvePortraitId,
   type AvatarMotion,
   type PortraitId,
-} from "../avatar-renderer";
+} from "@/lib/avatar/avatar-renderer";
 import rawParameterMap from "./parameter-map.json";
 import rawPresets from "./presets.json";
 

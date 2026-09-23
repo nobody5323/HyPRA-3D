@@ -110,7 +110,7 @@ frontend/
 
 ## 四、核心实现要点
 
-### 4.1 SDK 封装（`hooks/useAvatar.ts`）
+### 4.1 SDK 封装（`hooks/avatar/useAvatar.ts`）
 
 对外只暴露一个与实现无关的控制器接口（`AvatarController`），
 魔珐 SDK 与浏览器原生 TTS 是它的两个实现——页面按凭证与降级状态**在渲染期直接选择**，
@@ -149,7 +149,7 @@ interface AvatarController {
 - 断线自动重连：`onError` 按指数退避（1s → 2s → 4s，最多 3 次）重建 SDK，
   期间 `stage = "reconnecting"`；用尽后才降级。重新连上后重连计数归零。
 
-### 4.2 对话编排（`hooks/useChatSession.ts`）
+### 4.2 对话编排（`hooks/chat/useChatSession.ts`）
 
 ```ts
 // ① 聆听 → ② 思考（等后端）→ ③ 播报（含字幕）→ ④ 回待机
@@ -212,7 +212,7 @@ setState("idle");
 
 ## 五、后端接口契约（已全部对接）
 
-所有类型定义集中在 `frontend/lib/types.ts`；`lib/api.ts` 统一出口，
+所有类型定义集中在 `frontend/lib/api/types.ts`；`lib/api/client.ts` 统一出口，
 非 2xx 一律抛 `ApiError(status, detail)`（知识库 409 判重需要读 `detail` 结构体）。
 
 ### `POST /chat` — 一轮完整对话
