@@ -60,18 +60,19 @@ def list_plugins() -> dict:
 
 @router.post("/{plugin_id}/enabled")
 def set_plugin_enabled(plugin_id: str, payload: PluginToggleRequest) -> dict:
-    """启用 / 禁用插件。core 层不可禁用（返回 400）。"""
+    """启用 / 禁用插件。core 层不可禁用（返回 400）。
+
+    状态**落盘**（`data/plugins/<id>/state.json`）：重启后保持，不会回弹到 manifest 默认值。
+    启停同时立即生效——启用即 setup、禁用即停跑，界面与实际一致。
+    """
     manager = get_plugin_manager()
     try:
-        manager.registry.set_enabled(plugin_id, payload.enabled)
+        manager.set_enabled(plugin_id, payload.enabled)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=f"插件不存在：{plugin_id}") from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    # 启用后立即 setup（否则要等下次重启才生效，体验上像"点了没反应"）
-    if payload.enabled:
-        manager.setup_all()
     return {"id": plugin_id, "enabled": payload.enabled, "plugins": manager.status()}
 
 
@@ -104,8 +105,10 @@ def put_plugin_settings(plugin_id: str, payload: PluginSettingsPayload) -> dict:
         raise HTTPException(status_code=404, detail=f"插件不存在：{plugin_id}")
 
     manager.save_settings(plugin_id, payload.values)
-    # 目录插件的 build(ctx) 可能要重跑（如数据目录变更后重新读取）
-    manager.setup_all()
+    # 目录插件的 build(ctx) 可能要重跑（如数据目录变更后重新读取）；
+    # 用 reload_all 而非 setup_all：只 setup 会把插件退回 LOADED，
+    # 界面上的「运行中」会变成「已加载」——刚存完配置就像能力掉了。
+    manager.reload_all()
     return {"id": plugin_id, "values": payload.values, "plugins": manager.status()}
 
 

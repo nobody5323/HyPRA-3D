@@ -47,8 +47,9 @@ class PluginManager:
     def discover(self) -> list[PluginRegistration]:
         """扫描插件目录，把第三方插件注册进注册表（内置插件由 `builtin.py` 注册）。
 
-        发现阶段**只读 manifest**，不执行插件代码——避免"加载即执行"的风险。
-        依赖缺失（`entry` 指向的文件不存在）的插件标记 FAILED 并跳过。
+        发现阶段**只读文件**（manifest 与各插件目录下的 state.json），不执行插件代码——
+        避免"加载即执行"的风险。依赖缺失（`entry` 指向的文件不存在）的插件标记 FAILED 并跳过。
+        末尾恢复落盘的启用状态，因此调用一次即同时完成「发现 + 状态还原」。
         """
         found: list[PluginRegistration] = []
         manifests = []
@@ -83,6 +84,10 @@ class PluginManager:
                     registration.entry_path = entry_path
             self.registry.register(registration)
             found.append(registration)
+
+        # 全部插件（内置 + 目录）都已入册后再恢复启用状态：
+        # 目录插件按 loading_order 注册，恢复要覆盖全体，故放在循环外。
+        self.load_enabled_states()
         return found
 
     # ---------------- 入口模块动态加载 ----------------
@@ -150,6 +155,89 @@ class PluginManager:
         self._settings[plugin_id] = values
         return path
 
+    # ---------------- 启用状态 ----------------
+    #
+    # 注册表的 `_enabled_overrides` 是**运行期**覆盖；不落盘的话重启即回弹到
+    # manifest 默认值。对 `enabled: false` 的插件（如 tavern-bridge）表现为
+    # 「点启用 → 重启又没了」——开关形同虚设，故状态存 `data/plugins/<id>/state.json`
+    # （与 settings.json 同级：配置与插件代码分离，换插件不丢用户选择）。
+
+    def _state_path(self, plugin_id: str) -> Path:
+        return self.data_dir / "plugins" / plugin_id / "state.json"
+
+    def _save_enabled_state(self, plugin_id: str, enabled: bool) -> None:
+        """写启用状态；写失败只告警——本次运行仍然生效，不该因磁盘问题阻断开关。"""
+        path = self._state_path(plugin_id)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"enabled": enabled}, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            logger.warning("插件 %s 启用状态写入失败（本次运行仍生效）：%s", plugin_id, exc)
+
+    def load_enabled_states(self) -> dict[str, bool]:
+        """恢复落盘的启用状态（重启后开关不回弹）。
+
+        缺失或损坏一律回落到 `manifest.enabled` 默认值；core 层不读覆盖（恒启用）。
+        """
+        restored: dict[str, bool] = {}
+        for reg in self.registry.all():
+            plugin_id = reg.manifest.id
+            if reg.manifest.is_core:
+                continue
+            path = self._state_path(plugin_id)
+            if not path.is_file():
+                continue
+            try:
+                state = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # 状态损坏不应阻断启动
+                logger.warning("插件 %s 启用状态读取失败（用默认值）：%s", plugin_id, exc)
+                continue
+            # 严格判 bool：手改过的 "true" / 1 不应被当作启用
+            if isinstance(state, dict) and isinstance(state.get("enabled"), bool):
+                self.registry.set_enabled(plugin_id, state["enabled"])
+                restored[plugin_id] = state["enabled"]
+        return restored
+
+    def set_enabled(self, plugin_id: str, enabled: bool) -> None:
+        """启用 / 禁用插件，并让状态变更**立即且持久**地生效。
+
+        与直接调 `registry.set_enabled()` 的区别（这是管理 API 的入口）：
+        ① 落盘，重启后保持；② 启用即 setup，禁用即停跑——否则禁用后 `status()`
+        仍报「运行中」，界面与实际不符。
+        """
+        reg = self.registry.get(plugin_id)
+        if reg is None:
+            raise KeyError(f"插件不存在：{plugin_id}")
+        # core 层拒绝禁用，异常由此抛出（语义见 AGENTS.md §9.2）
+        self.registry.set_enabled(plugin_id, enabled)
+        self._save_enabled_state(plugin_id, enabled)
+        if enabled:
+            self.reload_all()
+        else:
+            self._teardown(reg)
+
+    def reload_all(self) -> list[str]:
+        """重新 setup + start（配置变更 / 运行期启用后让新状态真正生效）。
+
+        只 setup 不 start 会把插件从 STARTED 退回 LOADED，状态视图随之从
+        「运行中」变成「已加载」——用户刚保存完配置就看到能力“下线”。
+        """
+        self.setup_all()
+        return self.start_all()
+
+    def _teardown(self, reg: PluginRegistration) -> None:
+        """停掉单个插件并回到 DISCOVERED，使状态视图与「已禁用」一致。"""
+        if reg.state is PluginState.STARTED and reg.shutdown is not None:
+            try:
+                reg.shutdown()
+            except Exception as exc:  # 关闭失败只记日志
+                logger.warning("插件 %s 关闭异常：%s", reg.manifest.id, exc)
+        reg.state = PluginState.DISCOVERED
+        self._contexts.pop(reg.manifest.id, None)
+
     # ---------------- 生命周期 ----------------
 
     def setup_all(self, settings: dict[str, dict] | None = None) -> list[str]:
@@ -210,6 +298,7 @@ class PluginManager:
                 logger.warning("插件 %s 关闭异常：%s", reg.manifest.id, exc)
             finally:
                 reg.state = PluginState.DISCOVERED
+        self._contexts.clear()
 
     # ---------------- 状态视图 ----------------
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -47,7 +48,12 @@ def test_list_plugins_exposes_capability_index(client: TestClient) -> None:
 # =============================================================
 
 
-def test_toggle_builtin_plugin(client: TestClient) -> None:
+def test_toggle_builtin_plugin(client: TestClient, tmp_path, monkeypatch) -> None:
+    from app.api import plugins as plugins_api
+
+    # 启用状态会落盘：把数据目录指到 tmp_path，避免污染真实的 backend/data
+    monkeypatch.setattr(plugins_api.get_plugin_manager(), "data_dir", tmp_path)
+
     response = client.post("/plugins/tools-builtin/enabled", json={"enabled": False})
     assert response.status_code == 200
 
@@ -59,6 +65,33 @@ def test_toggle_builtin_plugin(client: TestClient) -> None:
 
     # 还原，避免影响其它用例
     client.post("/plugins/tools-builtin/enabled", json={"enabled": True})
+
+
+def test_toggle_persists_state_file(client: TestClient, tmp_path, monkeypatch) -> None:
+    """启停落盘：重启后保持，不会回弹到 manifest 默认值。"""
+    from app.api import plugins as plugins_api
+
+    monkeypatch.setattr(plugins_api.get_plugin_manager(), "data_dir", tmp_path)
+
+    client.post("/plugins/tools-builtin/enabled", json={"enabled": False})
+    try:
+        state_path = tmp_path / "plugins" / "tools-builtin" / "state.json"
+        assert state_path.is_file()
+        assert json.loads(state_path.read_text(encoding="utf-8")) == {"enabled": False}
+    finally:
+        client.post("/plugins/tools-builtin/enabled", json={"enabled": True})
+
+
+def test_put_settings_keeps_plugin_started(client: TestClient, tmp_path, monkeypatch) -> None:
+    """保存配置后插件仍为 STARTED——只 setup 不 start 会让界面从「运行中」退成「已加载」。"""
+    from app.api import plugins as plugins_api
+
+    monkeypatch.setattr(plugins_api.get_plugin_manager(), "data_dir", tmp_path)
+
+    body = client.put("/plugins/tools-builtin/settings", json={"values": {}}).json()
+    tools_plugin = next(p for p in body["plugins"] if p["id"] == "tools-builtin")
+    assert tools_plugin["state"] == "started"
+    assert tools_plugin["enabled"] is True
 
 
 def test_toggle_unknown_plugin_404(client: TestClient) -> None:
