@@ -427,6 +427,54 @@ export interface SkillCatalog {
 }
 
 // =============================================================
+// 数字人模型来源（GET /media/avatar/models/sources，见 AGENTS.md §9.10 第 15 项）
+// =============================================================
+//
+// 与 `listAvatarModels()` 的分工：那个只列**已装**的（可直接选用），
+// 这个还回答「还有哪些可以获取」，并带作者与授权信息。
+
+/** 来源级状态 */
+export interface AvatarModelSourceStatus {
+  id: string;
+  /**
+   * 是否**配了**来源位置。
+   *
+   * 注意它不等价于「读到东西了」：路径配了但文件读不到时也是 true，
+   * 此时 `count` 为 0——所以界面要说「配了但没读到」，而不是「没配」。
+   */
+  available: boolean;
+  description: string;
+  count: number;
+}
+
+/** 一个可用模型（已装 / 可获取） */
+export interface AvatarModelDescriptor {
+  id: string;
+  displayName: string;
+  kind: AvatarModelKind;
+  source: string;
+  /** 已装进本机模型库（可直接选用）；false 表示「可获取」 */
+  installed: boolean;
+  entry: string;
+  description: string;
+  previewUrl: string;
+  author: string;
+  /** 授权说明 —— 模型不可自由分发，用户据此判断能不能用 */
+  license: string;
+  /** 获取地址（本项目只给链接，不代下载） */
+  homepage: string;
+  extra: Record<string, unknown>;
+}
+
+/** GET /media/avatar/models/sources */
+export interface AvatarModelSources {
+  sources: AvatarModelSourceStatus[];
+  models: AvatarModelDescriptor[];
+  installedCount: number;
+  availableCount: number;
+}
+
+// =============================================================
 // 个人记忆 / 知识库（backend/app/api/knowledge.py）
 // =============================================================
 

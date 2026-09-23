@@ -3,6 +3,7 @@
 import type {
   AvatarModelInfo,
   AvatarModelKind,
+  AvatarModelSources,
   AvatarTimeline,
   ChatResponse,
   HealthStatus,
@@ -546,6 +547,21 @@ export function avatarModelFileUrl(modelId: string, filePath: string): string {
     .map(encodeURIComponent)
     .join("/");
   return `${API_BASE}/media/avatar/models/${encodeURIComponent(modelId)}/files/${encoded}`;
+}
+
+/**
+ * 模型来源：本机库（已装）+ 清单（可获取）。
+ *
+ * 与 `listAvatarModels()` 的分工：那个只列**已装**的（可直接选用），
+ * 这个还回答「还有哪些可以获取」，并带作者与授权信息。
+ *
+ * 清单里的条目**没有本地文件**，本项目也不代下载（模型不可自由分发，
+ * 见 `docs/license-compliance.md`）——界面只展示「去哪拿」。
+ */
+export async function listAvatarModelSources(): Promise<AvatarModelSources> {
+  const res = await fetch(`${API_BASE}/media/avatar/models/sources`, { cache: "no-store" });
+  if (!res.ok) await throwApiError(res, "读取模型来源");
+  return (await res.json()) as AvatarModelSources;
 }
 
 // =============================================================

@@ -13,6 +13,7 @@
 import { useRef, useState } from "react";
 
 import type { AvatarModelsState } from "@/hooks/avatar/useAvatarModels";
+import { ModelSourcePanel } from "@/components/avatar/ModelSourcePanel";
 import { PORTRAIT_IDS } from "@/lib/avatar/avatar-renderer";
 import { PORTRAIT_LABELS } from "@/lib/avatar/portrait-assets";
 import type { AvatarModelInfo, AvatarModelKind } from "@/lib/api/types";
@@ -287,6 +288,10 @@ export function ModelLibraryPanel({ models }: { models: AvatarModelsState }) {
             );
           })}
         </ul>
+
+        {/* 「还有哪些能获取」与「已装了什么」放在同一面板：用户看到列表为空时，
+            下一步该去哪里找，就在同一屏上 */}
+        <ModelSourcePanel />
       </div>
     </section>
   );
