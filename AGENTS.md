@@ -25,6 +25,8 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
 
     backend/            # Python 后端
       app/
+        core/           # core 能力清单（§9.10 的 9 项）：**只聚合导出，不含实现**；
+                        #   是「哪些能力不可禁用」的单一事实来源（P8 轻档，未移动文件）
         plugins/        # 插件体系宿主（框架层，见 §9）：registry / manifest / context / manager
                         #   —— 与业务实现解耦，不反向依赖 app 内其它模块
         api/            # FastAPI 路由（chat / studio / knowledge / llm / media / avatar_models / st_presets）
@@ -449,7 +451,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P5** | Skill 体系（独立于插件，可随时插入） | ✅ 已完成（`backend/skills/` + `app/skills/` + `study_skill` + `/skills/*` + 前端面板） |
 | **P6** | Live2D 模型来源插件 | ✅ 已完成（`app/digital_human/model_sources/` + `plugins/live2d-model-source/` + `GET /media/avatar/models/sources` + 前端「可获取的模型」） |
 | **P7** | 插件市场（远期） | 待做 |
-| **P8** | 目录重排（`app/core` / `app/builtin` 分层，见上方说明） | 待做 |
+| **P8** | 目录重排（`app/core` / `app/builtin` 分层） | ✅ 已完成（**轻档**：只新增 `app/core/__init__.py` 声明 9 项 core 的公开符号，**不移动任何文件**；后续如需物理重排，边界已经写死在那儿，测试会卡住漂移） |
 
 > **不做「为插件化而插件化」**：拆分必须同时产出「多一个实现」或「可禁用」的实际价值，
 > 否则保留现状（工厂模式已足够）。每个 builtin 拆分都要有对应的测试。
