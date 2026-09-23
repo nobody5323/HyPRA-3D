@@ -1,0 +1,95 @@
+{
+  "name": "hypra-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "description": "HyPRA 桌面端：透明桌宠窗口（Electron 外壳，渲染层走 Vite 独立入口）",
+  "main": "dist/main/index.js",
+  "scripts": {
+    "postinstall": "node scripts/ensure-electron-binary.mjs",
+    "dev": "npm run build:main && concurrently -k \"npm:dev:renderer\" \"npm:dev:main\" \"npm:dev:electron\"",
+    "dev:renderer": "vite --host 127.0.0.1",
+    "dev:main": "tsc -p tsconfig.electron.json --watch --preserveWatchOutput",
+    "dev:electron": "wait-on tcp:127.0.0.1:5173 && cross-env HYPRA_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build:main": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "build": "npm run typecheck && npm run build:renderer && npm run build:main && npm run verify:assets",
+    "start": "electron .",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.electron.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "verify:assets": "node scripts/verify-release-assets.mjs",
+    "verify:release": "node scripts/verify-release-assets.mjs --release",
+    "install:model": "node scripts/install-live2d-model.mjs",
+    "icon": "node scripts/make-app-icon.mjs",
+    "pack": "npm run build && npm run icon && electron-builder --dir && npm run verify:release",
+    "dist:win": "npm run build && npm run icon && electron-builder --win && npm run verify:release"
+  },
+  "build": {
+    "appId": "dev.hypra.desktop",
+    "productName": "HyPRA",
+    "asar": true,
+    "electronDist": "node_modules/electron/dist",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "assets/icon.png",
+      "package.json",
+      "!dist/**/*.moc",
+      "!dist/**/*.moc3",
+      "!dist/**/*.model3.json",
+      "!dist/**/*.motion3.json",
+      "!dist/**/*.exp3.json",
+      "!dist/**/*.physics3.json",
+      "!dist/**/*.pose3.json",
+      "!dist/**/*.cdi3.json",
+      "!dist/**/*.wav",
+      "!dist/**/*.mp3",
+      "!dist/**/*.pth",
+      "!dist/**/*.ckpt",
+      "!dist/**/*.local.json"
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        },
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "HyPRA 桌宠",
+      "artifactName": "HyPRA-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "HyPRA-${version}-portable.${ext}"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^6.1.1",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^44.4.4",
+    "electron-builder": "^26.15.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "^5.7.3",
+    "vite": "^8.0.0",
+    "vitest": "^5.0.1",
+    "wait-on": "^8.0.1"
+  }
+}

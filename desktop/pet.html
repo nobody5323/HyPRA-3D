@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      生产 CSP：桌宠窗只允许加载自身资源，且只能连本机后端（FastAPI，默认 8000）。
+      开发环境下 vite.config.ts 的 devServerCsp 插件会按需放宽 HMR 所需的两项。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:*; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>HyPRA 桌宠</title>
+  </head>
+  <body>
+    <div id="pet-root"></div>
+    <script type="module" src="/src/renderer/pet/main.tsx"></script>
+  </body>
+</html>

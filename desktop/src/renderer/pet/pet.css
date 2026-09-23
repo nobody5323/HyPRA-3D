@@ -1,0 +1,514 @@
+/*
+ * 桌宠窗样式。
+ *
+ * 三条约束：
+ * 1. 整页必须完全透明（窗口本身是 transparent），只有角色与控件可见；
+ * 2. 所有尺寸/字号都乘 `--pet-scale`（由 App 按主进程的缩放设置注入）——
+ *    窗口尺寸由主进程按同一比例调整，两边必须等比，否则布局会错位；
+ * 3. 布局用绝对定位而不是文档流：窗口只有 380×480（缩放前），
+ *    任何一个元素长高都会把角色挤出可视区。
+ */
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: transparent;
+  cursor: default;
+  -webkit-user-select: none;
+  user-select: none;
+  font-family: "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  color: #4a3f31;
+}
+
+#pet-root {
+  height: 100%;
+}
+
+.petShell {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  --mood-color: #e0a24e;
+}
+
+.petShell[data-click-through="true"] {
+  /* 穿透模式下光标不再提示可拖动（此时只有解锁入口可点） */
+  cursor: default;
+}
+
+/* ---------- 角色区（同时是拖动热区） ---------- */
+
+.petStage {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding-top: calc(var(--pet-scale, 1) * 56px);
+  padding-bottom: calc(var(--pet-scale, 1) * 52px);
+  cursor: grab;
+  touch-action: none;
+}
+
+.petStageDragging {
+  cursor: grabbing;
+}
+
+.petGlow {
+  position: absolute;
+  width: calc(var(--pet-scale, 1) * 280px);
+  height: calc(var(--pet-scale, 1) * 280px);
+  border-radius: 999px;
+  background: radial-gradient(circle, color-mix(in srgb, var(--mood-color) 32%, transparent), transparent 62%);
+  filter: blur(calc(var(--pet-scale, 1) * 16px));
+  pointer-events: none;
+  transition: background 600ms ease;
+}
+
+.petBody {
+  position: relative;
+  width: calc(var(--pet-scale, 1) * 200px);
+  height: calc(var(--pet-scale, 1) * 200px);
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 36% 26%, #ffffff 0 16%, transparent 42%),
+    linear-gradient(160deg, #fdf8f1, #f0e4d4);
+  box-shadow:
+    inset -10px -14px 26px rgba(160, 132, 98, 0.16),
+    inset 8px 10px 22px rgba(255, 255, 255, 0.9),
+    0 18px 36px rgba(93, 74, 52, 0.16);
+  overflow: hidden;
+}
+
+.petStageDragging .petBody {
+  box-shadow:
+    inset -10px -14px 26px rgba(160, 132, 98, 0.16),
+    inset 8px 10px 22px rgba(255, 255, 255, 0.9),
+    0 26px 46px rgba(93, 74, 52, 0.22);
+}
+
+/* ---------- 形象渲染（Live2D / 立绘，两种模式共用一块区域） ---------- */
+
+.petAvatar {
+  position: absolute;
+  inset: 0;
+}
+
+.petAvatarCanvas,
+.petAvatarImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.petAvatarCanvas {
+  object-fit: cover;
+}
+
+.petAvatarImage {
+  object-fit: contain;
+}
+
+/* 只有当前生效的渲染器可见：Live2D 可用时显示 canvas，降级时显示立绘 */
+.petAvatar[data-availability="available"] .petAvatarImage,
+.petAvatar[data-availability="missing"] .petAvatarCanvas,
+.petAvatar[data-availability="pending"] .petAvatarCanvas {
+  display: none;
+}
+
+/* ---------- 语音字幕气泡 ---------- */
+
+.petBubble {
+  position: absolute;
+  top: calc(var(--pet-scale, 1) * 10px);
+  left: calc(var(--pet-scale, 1) * 12px);
+  right: calc(var(--pet-scale, 1) * 12px);
+  margin: 0;
+  padding: calc(var(--pet-scale, 1) * 8px) calc(var(--pet-scale, 1) * 12px);
+  border-radius: calc(var(--pet-scale, 1) * 12px);
+  background: rgba(253, 248, 241, 0.94);
+  box-shadow: 0 6px 18px rgba(93, 74, 52, 0.18);
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  line-height: 1.5;
+  max-height: calc(var(--pet-scale, 1) * 84px);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  word-break: break-word;
+  pointer-events: none;
+}
+
+/* ---------- 穿透模式下的解锁入口 ---------- */
+
+.petUnlock {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: calc(var(--pet-scale, 1) * 8px) calc(var(--pet-scale, 1) * 18px);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 999px;
+  background: rgba(43, 34, 25, 0.76);
+  color: #fdf8f1;
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  cursor: pointer;
+}
+
+.petUnlock:hover {
+  background: rgba(43, 34, 25, 0.88);
+}
+
+/* ---------- 底部状态与工具条 ---------- */
+
+.petDock {
+  position: absolute;
+  left: calc(var(--pet-scale, 1) * 8px);
+  right: calc(var(--pet-scale, 1) * 8px);
+  bottom: calc(var(--pet-scale, 1) * 8px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: calc(var(--pet-scale, 1) * 6px);
+}
+
+.petDockBadge {
+  padding: calc(var(--pet-scale, 1) * 2px) calc(var(--pet-scale, 1) * 8px);
+  border-radius: 999px;
+  background: rgba(253, 248, 241, 0.86);
+  font-size: calc(var(--pet-scale, 1) * 10px);
+  color: #6b5b45;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.petDockBadgeWarn {
+  background: rgba(196, 112, 106, 0.9);
+  color: #fff8f4;
+}
+
+.petDockBadgeMood {
+  background: color-mix(in srgb, var(--mood-color) 30%, rgba(253, 248, 241, 0.9));
+}
+
+.petToolbar {
+  display: flex;
+  gap: calc(var(--pet-scale, 1) * 6px);
+  opacity: 0.62;
+  transition: opacity 0.18s ease;
+}
+
+.petToolbar:hover {
+  opacity: 1;
+}
+
+.petToolbar button,
+.petChatHeader button,
+.petPanelHeader button,
+.petChatForm button {
+  padding: calc(var(--pet-scale, 1) * 4px) calc(var(--pet-scale, 1) * 12px);
+  border: 1px solid rgba(255, 255, 255, 0.75);
+  border-radius: 999px;
+  background: rgba(253, 248, 241, 0.86);
+  color: #4a3f31;
+  font-size: calc(var(--pet-scale, 1) * 11px);
+  cursor: pointer;
+}
+
+.petToolbar button:hover,
+.petChatHeader button:hover,
+.petPanelHeader button:hover,
+.petChatForm button:hover:not(:disabled) {
+  background: #fdf8f1;
+}
+
+.petChatForm button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ---------- 对话面板 ---------- */
+
+.petChat {
+  position: absolute;
+  left: calc(var(--pet-scale, 1) * 8px);
+  right: calc(var(--pet-scale, 1) * 8px);
+  top: calc(var(--pet-scale, 1) * 34px);
+  bottom: calc(var(--pet-scale, 1) * 8px);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 6px);
+  padding: calc(var(--pet-scale, 1) * 8px);
+  border-radius: calc(var(--pet-scale, 1) * 14px);
+  background: rgba(253, 248, 241, 0.97);
+  box-shadow: 0 12px 30px rgba(93, 74, 52, 0.22);
+}
+
+.petChatHeader,
+.petPanelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  font-weight: 600;
+}
+
+.petChatList {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 6px);
+  padding-right: 2px;
+}
+
+.petChatList p {
+  margin: 0;
+  padding: calc(var(--pet-scale, 1) * 6px) calc(var(--pet-scale, 1) * 10px);
+  border-radius: calc(var(--pet-scale, 1) * 10px);
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  line-height: 1.5;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.petChatUser {
+  align-self: flex-end;
+  max-width: 84%;
+  background: #e7dccb;
+}
+
+.petChatAssistant {
+  align-self: flex-start;
+  max-width: 92%;
+  background: #f4ece0;
+}
+
+.petChatEmpty,
+.petChatThinking {
+  color: #8a7a62;
+  font-style: italic;
+}
+
+.petChatError {
+  margin: 0;
+  color: #b4524a;
+  font-size: calc(var(--pet-scale, 1) * 11px);
+}
+
+.petChatForm {
+  display: flex;
+  gap: calc(var(--pet-scale, 1) * 6px);
+}
+
+.petChatForm input {
+  flex: 1;
+  min-width: 0;
+  padding: calc(var(--pet-scale, 1) * 6px) calc(var(--pet-scale, 1) * 10px);
+  border: 1px solid #d9cbb6;
+  border-radius: calc(var(--pet-scale, 1) * 10px);
+  background: #fffdf9;
+  font-size: calc(var(--pet-scale, 1) * 12px);
+  font-family: inherit;
+  color: inherit;
+}
+
+.petChatForm input:focus {
+  outline: 2px solid #b99a6d;
+  outline-offset: 1px;
+}
+
+/* ---------- 设置面板 ---------- */
+
+.petPanel {
+  position: absolute;
+  left: calc(var(--pet-scale, 1) * 8px);
+  right: calc(var(--pet-scale, 1) * 8px);
+  top: calc(var(--pet-scale, 1) * 8px);
+  bottom: calc(var(--pet-scale, 1) * 8px);
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 8px);
+  padding: calc(var(--pet-scale, 1) * 10px);
+  border-radius: calc(var(--pet-scale, 1) * 14px);
+  background: rgba(253, 248, 241, 0.97);
+  box-shadow: 0 12px 30px rgba(93, 74, 52, 0.22);
+}
+
+.petPanelBody {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 8px);
+  font-size: calc(var(--pet-scale, 1) * 11px);
+}
+
+.petField {
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 6px);
+}
+
+.petField input[type="range"] {
+  width: 100%;
+  accent-color: #b99a6d;
+}
+
+.petHint {
+  margin: 0;
+  color: #8a7a62;
+  line-height: 1.55;
+}
+
+.petWarning {
+  margin: 0;
+  padding: calc(var(--pet-scale, 1) * 6px) calc(var(--pet-scale, 1) * 8px);
+  border-radius: calc(var(--pet-scale, 1) * 8px);
+  background: rgba(196, 112, 106, 0.14);
+  color: #9a4a43;
+  line-height: 1.55;
+}
+
+.petWarning code {
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.06);
+  font-size: 0.95em;
+}
+
+.petFacts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: calc(var(--pet-scale, 1) * 4px) calc(var(--pet-scale, 1) * 8px);
+  margin: 0;
+}
+
+.petFacts dt {
+  color: #8a7a62;
+}
+
+.petFacts dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+kbd {
+  padding: 0 4px;
+  border: 1px solid #d9cbb6;
+  border-radius: 4px;
+  background: #fffdf9;
+  font-family: inherit;
+  font-size: 0.92em;
+}
+
+/* ---------- 右键菜单 ---------- */
+
+.petMenuBackdrop {
+  position: absolute;
+  inset: 0;
+}
+
+.petMenu {
+  position: absolute;
+  min-width: calc(var(--pet-scale, 1) * 168px);
+  padding: calc(var(--pet-scale, 1) * 4px);
+  border-radius: calc(var(--pet-scale, 1) * 10px);
+  background: rgba(253, 248, 241, 0.98);
+  box-shadow: 0 12px 28px rgba(93, 74, 52, 0.26);
+}
+
+.petMenuItem {
+  display: flex;
+  align-items: center;
+  gap: calc(var(--pet-scale, 1) * 6px);
+  width: 100%;
+  padding: calc(var(--pet-scale, 1) * 5px) calc(var(--pet-scale, 1) * 8px);
+  border: 0;
+  border-radius: calc(var(--pet-scale, 1) * 6px);
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: calc(var(--pet-scale, 1) * 11px);
+  text-align: left;
+  cursor: pointer;
+}
+
+.petMenuItem:hover:not(:disabled) {
+  background: #f0e7d9;
+}
+
+.petMenuItem:disabled {
+  color: #b4a894;
+  cursor: not-allowed;
+}
+
+.petMenuCheck {
+  width: 1em;
+  color: #96703a;
+}
+
+.petMenuSeparator {
+  height: 1px;
+  margin: calc(var(--pet-scale, 1) * 4px) calc(var(--pet-scale, 1) * 6px);
+  background: #e6dccd;
+}
+
+/* ---------- 情绪 → 光晕配色（与 tailwind 的 mood.* 一致） ---------- */
+
+.petShell [data-emotion="happy"] {
+  --mood-color: #e0a24e;
+}
+
+.petShell [data-emotion="calm"] {
+  --mood-color: #6e9bb5;
+}
+
+.petShell [data-emotion="sad"] {
+  --mood-color: #7e8fa8;
+}
+
+.petShell [data-emotion="anxious"] {
+  --mood-color: #d08b5e;
+}
+
+.petShell [data-emotion="tired"] {
+  --mood-color: #8b87a8;
+}
+
+.petShell [data-emotion="angry"] {
+  --mood-color: #c4706a;
+}
+
+.petShell [data-emotion="surprised"] {
+  --mood-color: #d4a94f;
+}
+
+.petShell [data-emotion="neutral"] {
+  --mood-color: #9a948c;
+}
+
+/* ---------- 浏览器调试模式提示 ---------- */
+
+.petNotice {
+  max-width: 80%;
+  margin: auto;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: rgba(253, 248, 241, 0.92);
+  font-size: 12px;
+  line-height: 1.5;
+  text-align: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .petToolbar,
+  .petGlow {
+    transition: none;
+  }
+}

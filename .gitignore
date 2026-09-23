@@ -25,6 +25,15 @@ dist/
 build/
 *.tsbuildinfo
 
+# ===== 桌面端 Electron =====
+# 安装包与免安装产物（体积大，且可能混入本地模型/密钥），不入库
+desktop/release/
+# 构建时生成的应用图标（由 scripts/make-app-icon.mjs 产出）
+desktop/assets/
+# 本地模型与 Cubism SDK（桌宠渲染资源，自备且不可自由分发）
+desktop/public/live2d/
+desktop/public/vendor/cubism/
+
 # ===== 数据与媒体产物（勿提交）=====
 # 本地向量/数据库文件与生成的视频语音体积大且含隐私，一律不入库
 *.db
@@ -35,6 +44,10 @@ media/
 *.mp4
 *.mp3
 *.wav
+
+# ===== 本地私有资料（自备 SDK/模型包、开发留档、旧备份、生成缓存）=====
+# 与源码无关但需要留在本机的文件统一放这里，保证根目录只出现项目本身
+_local/
 
 # ===== 编辑器 / 系统 =====
 .vscode/
