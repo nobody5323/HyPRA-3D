@@ -54,6 +54,7 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
           prompt_manager.py  # 分层注入与 token 预算（PromptManager）
         tts/            # 语音：音色表 / 音频处理 / GPT-SoVITS 接入
         digital_human/  # 具身驱动：魔珐星云 SDK 对接 + SSML + viseme + 模型库
+                        #   model_sources/ 模型来源（本机库 / 清单），见 §9.10 第 15 项
         config.py       # 全部可配置项（.env 读入，含本地/云双模式开关）
         main.py         # FastAPI 应用工厂 + 路由注册 + 生命周期（MCP 连接/断开）
       mcp_servers/      # 本项目**自带**的 MCP Server（独立进程，不属于 app 包，见其 README.md）
@@ -61,6 +62,7 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
       skills/           # 内置技能包（每技能一个 <id>/SKILL.md，入库随项目分发）
       plugins/          # 第一方插件（目录 + manifest.json 形态，见 §9.3）
         tavern-bridge/  #   酒馆数据只读接入（首个 datasource 插件）
+        live2d-model-source/  #   数字人模型来源（第二个 datasource；只读，不代下载）
       scripts/          # 一次性运维/实验脚本（预设导入 / A-B / 探针），不参与运行时
       tests/            # pytest：目录与 app/ 分层一一对应（test_app / test_llm / test_memory / …）
       data/             # 运行时数据（SQLite / 预设覆盖层 / logs/）—— gitignore
@@ -317,8 +319,14 @@ manifest 示例（`plugins/tavern_bridge/manifest.json`）：
 }
 ```
 
-**权限是架构约束，不是口头承诺**：宿主在插件注册文件访问能力时**强制校验** `permissions`，
+**权限是架构约束，不是口头承诺**：宿主在把能力交给插件前**强制校验** `permissions`，
 `write: false` 的插件拿不到写句柄（§8 的「绝不修改酒馆数据」由此保证）。
+
+白名单项支持两类占位符：插件自己的配置键（`${tavern_dir}`）与**宿主内置变量**
+`${data_dir}`（宿主数据目录）。内置变量的存在理由：插件常需要读宿主放在 `data` 下的
+公共资源（如本机模型库），而这个位置是**宿主决定的**——让 manifest 写死相对路径、
+或让用户重填一遍绝对路径，都不合理。未解析的项（用户没配）连同该项一起跳过：
+拿不到就不给读。
 
 ### 9.4 能力面（capability）
 
@@ -326,7 +334,7 @@ manifest 示例（`plugins/tavern_bridge/manifest.json`）：
 | --- | --- | --- |
 | `provider` | 提供某类能力的实现（**按接口注册**，供工厂选中） | LLM / 数字人 / 记忆后端 |
 | `tool` | 注册 function calling 工具 | `tools-builtin` / MCP / 酒馆接入 |
-| `datasource` | 读取外部数据 → 输出**中性结构化对象**（映射到宿主模型由宿主做） | `tavern-bridge` |
+| `datasource` | 读取外部数据 → 输出**中性结构化对象**（映射到宿主模型由宿主做） | `tavern-bridge` / `live2d-model-source` |
 | `prompt` | 往注入点插提示词片段 | `tavern-bridge` / `st-format-adapter` |
 | `hook` | 订阅对话生命周期事件 | 记忆构建 / regex_scripts 执行 |
 | `settings` | 声明式配置（JSON Schema） | 全部 |
@@ -414,7 +422,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | 12 | `tts` | `tts`（从 digital_human 分出） | 待拆 |
 | 13 | `st-format-adapter` | `datasource` / `prompt`（包装 st_compat） | 待包装 |
 | 14 | `preset-ai-adaptation` | `prompt`（包装 adaptation） | 待包装 |
-| 15 | `live2d-model-source` | `datasource`（模型来源） | 待实现 |
+| 15 | `live2d-model-source` | `datasource`（模型来源） | ✅ 已实现 |
 | 16 | **`tavern-bridge`** | `datasource` / `tool` / `settings`（酒馆只读接入） | ✅ 目录插件形态 |
 
 > **粒度约定**：provider 类插件按**能力族**注册——一个工厂内含多个实现名
@@ -435,7 +443,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P4** | 跨会话记忆构建（`TavernMemoryImporter` 会话→记忆 + 导入 API） | ✅ 已完成 |
 | **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | ✅ 已完成（parser → `knowledge/parser/`，tokenizer → `retrieval/tokenize/`，emotion 兜底策略留 core 内；均用 `__init__` 兼容层重导出，既有调用方零改动） |
 | **P5** | Skill 体系（独立于插件，可随时插入） | ✅ 已完成（`backend/skills/` + `app/skills/` + `study_skill` + `/skills/*` + 前端面板） |
-| **P6** | Live2D 模型来源插件 | 待做 |
+| **P6** | Live2D 模型来源插件 | ✅ 已完成（`app/digital_human/model_sources/` + `plugins/live2d-model-source/` + `GET /media/avatar/models/sources` + 前端「可获取的模型」） |
 | **P7** | 插件市场（远期） | 待做 |
 | **P8** | 目录重排（`app/core` / `app/builtin` 分层，见上方说明） | 待做 |
 
