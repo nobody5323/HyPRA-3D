@@ -38,7 +38,8 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
                         #   注：**工作记忆（滚动窗口）不在本目录**，由 app/session/ 承载
         session/        # 会话与工作记忆：滚动窗口上下文 + 会话持久化（SQLite）
         mcp/            # MCP **Client**：连接外部 MCP server，把工具接入 Agent 行动层
-        tools/          # function calling 工具（情绪/记忆写入/内置工具注册表）
+        tools/          # function calling 工具（情绪/记忆写入/内置工具注册表/技能学习）
+        skills/         # Skill 体系：渐进式加载的能力说明（§9.6，独立于插件）
         worldbook/      # 世界书条目：YAML + 关键词/正则/向量三重触发匹配
         studio/         # 用户创作：自建角色卡 / 背景故事 / 世界书条目的存储与编辑（内置只读，
                         #   数据落 backend/data/studio，设计见 docs/user-content-studio.md）
@@ -57,6 +58,7 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
         main.py         # FastAPI 应用工厂 + 路由注册 + 生命周期（MCP 连接/断开）
       mcp_servers/      # 本项目**自带**的 MCP Server（独立进程，不属于 app 包，见其 README.md）
                         #   ⚠️ 与 app/mcp（Client）区分：这里是被连接的「外部服务」侧
+      skills/           # 内置技能包（每技能一个 <id>/SKILL.md，入库随项目分发）
       plugins/          # 第一方插件（目录 + manifest.json 形态，见 §9.3）
         tavern-bridge/  #   酒馆数据只读接入（首个 datasource 插件）
       scripts/          # 一次性运维/实验脚本（预设导入 / A-B / 探针），不参与运行时
@@ -339,13 +341,27 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 理由：插件**不写 React 组件**，避开运行时加载前端代码的全部代价（React 单例、版本契约、CSS 隔离）。
 这同时是 §9.7 「不做 plugin UI」的替代方案，不是权宜之计。
 
-### 9.6 Skill 体系（借鉴 Alife `SkillService`）
+### 9.6 Skill 体系（借鉴 Alife `SkillService`）—— ✅ 已实现
 
 - 位置：`backend/skills/<id>/SKILL.md`（内置）+ `backend/data/skills/`（用户添加）
 - `SKILL.md` = YAML frontmatter（`name` / `description` / `when_to_use`）+ Markdown 正文
 - **渐进式注入**：常驻只注 `name: description` 清单（几十 token）；模型调 `study_skill(name)` 才把正文吐回上下文
-- 禁用：`skills.disabled` 列表（对标 Alife `SkillConfig.Blacklist`）
+- 禁用：`SKILLS_DISABLED` + 界面启停（**落盘** `data/skills.json`，与插件同理由）
 - 与 pi 的 skills 同范式，格式可对齐
+
+落地要点（`app/skills/` + `app/tools/skills.py` + `app/api/skills.py`）：
+
+| 环节 | 位置 |
+| --- | --- |
+| 解析与扫描 | `skills/loader.py`（容错 BOM / 缺 frontmatter / YAML 写坏；目录形与单文件形都收） |
+| 装载与启停 | `skills/registry.py`（内置优先于用户同名；全局单例，`create_app` 装载） |
+| 常驻清单 | `registry.catalog_text()` → `PromptManager` 的 skills 层（priority 75） |
+| 按需正文 | `tools/skills.py: study_skill`（**当轮生效**，不常驻上下文）；空技能库时不注册 |
+| 管理接口 | `GET /skills`、`GET /skills/{id}`、`POST /skills/{id}/enabled`、`POST /skills/reload` |
+| 前端 | `components/settings/SkillPanel.tsx`（清单来自 `/health`，正文展开时才拉） |
+
+`/skills/reload` 与 §9.7「插件不做热重载」不矛盾：技能是**文件形态**的，
+重扫只重读几个 Markdown；插件重载要重跑插件代码。
 
 ### 9.7 v1 明确不做
 
@@ -418,7 +434,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P3b** | 插件管理 API（`/plugins/*`：列表 / 启停 / 配置读写） | ✅ 已完成 |
 | **P4** | 跨会话记忆构建（`TavernMemoryImporter` 会话→记忆 + 导入 API） | ✅ 已完成 |
 | **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | ✅ 已完成（parser → `knowledge/parser/`，tokenizer → `retrieval/tokenize/`，emotion 兜底策略留 core 内；均用 `__init__` 兼容层重导出，既有调用方零改动） |
-| **P5** | Skill 体系（独立于插件，可随时插入） | 待做 |
+| **P5** | Skill 体系（独立于插件，可随时插入） | ✅ 已完成（`backend/skills/` + `app/skills/` + `study_skill` + `/skills/*` + 前端面板） |
 | **P6** | Live2D 模型来源插件 | 待做 |
 | **P7** | 插件市场（远期） | 待做 |
 | **P8** | 目录重排（`app/core` / `app/builtin` 分层，见上方说明） | 待做 |
