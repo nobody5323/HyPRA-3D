@@ -16,6 +16,7 @@ from app.memory.warm.inmemory_store import InMemoryWarmStore
 from app.prompts.persona.loader import load_builtin_presets
 from app.rag.prompt_manager import PromptManager
 from app.worldbook.loader import load_builtin_entries
+from app.worldbook.models import WorldBookEntry
 
 PERSONA_ID = "therapist-elder-sister"
 
@@ -64,6 +65,58 @@ def test_load_persona_replaces_state_vars(nodes: ChatNodes) -> None:
     assert "小林" in out["persona_text"]
     assert "低落" in out["persona_text"]
     assert "{{" not in out["persona_text"]
+
+
+def test_load_persona_appends_background_after_prompt(nodes: ChatNodes) -> None:
+    """角色层 = 人设正文 → [背景故事]，顺序固定（背景排在正文之后）。"""
+    persona = nodes.presets[PERSONA_ID]
+    body = "苏澄在海边长大。"
+    nodes.presets[PERSONA_ID] = persona.model_copy(update={"background": body})
+
+    out = nodes.load_persona(_state())
+
+    text = out["persona_text"]
+    assert text.index(body) > text.index(persona.prompt[:12])
+    assert "[背景故事]" in text
+
+
+def test_load_persona_without_background_has_no_empty_block(nodes: ChatNodes) -> None:
+    """没有背景故事时不该凭空多出一个空块（内置角色默认如此）。"""
+    out = nodes.load_persona(_state())
+    assert "[背景故事]" not in out["persona_text"]
+
+
+def test_load_persona_unknown_persona_warns_instead_of_crashing(nodes: ChatNodes) -> None:
+    """预设快照里没有的角色 → 告警且不注入人设，而不是 KeyError 打掉整轮。"""
+    out = nodes.load_persona(_state(persona_id="user-just-deleted"))
+    assert out["persona_text"] == ""
+    assert any("user-just-deleted" in warning for warning in out["warnings"])
+
+
+def test_worldbook_recall_filters_scoped_entries_by_companion(nodes: ChatNodes) -> None:
+    """专属条目只在其归属角色的轮次里命中（节点层把 companion_id 传下去）。"""
+    nodes.entries = [
+        *nodes.entries,
+        WorldBookEntry(
+            id="user-secret",
+            title="专属设定",
+            content="只有她知道的事",
+            keys=["秘密"],
+            scope="user-other",
+        ),
+    ]
+
+    mine = nodes.worldbook_recall(_state(user_input="我有个秘密"))
+    assert [entry.id for entry in mine["worldbook_hits"]] == []
+
+    theirs = nodes.worldbook_recall(
+        _state(
+            user_input="我有个秘密",
+            persona_id="user-other",
+            companion_id="user-other",
+        )
+    )
+    assert [entry.id for entry in theirs["worldbook_hits"]] == ["user-secret"]
 
 
 def test_worldbook_recall_triggers(nodes: ChatNodes) -> None:

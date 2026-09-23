@@ -101,3 +101,43 @@ def test_vector_hit_respects_disabled() -> None:
     """停用条目即使向量命中也不参与匹配。"""
     entry = _entry(id="vec", keys=[], regex=[], vector_text="语义文本", enabled=False)
     assert match_entries([entry], "随便说点什么", vector_index=_FakeIndex({"vec"})) == []
+
+
+# ---------- 归属（scope）----------
+
+
+def test_scoped_entry_only_matches_its_owner() -> None:
+    """归属某个角色的条目只在该角色下触发（用户给自建角色写的专属设定）。"""
+    entry = _entry(id="mine", scope="user-lin")
+    assert match_entries([entry], "今天路过一家咖啡馆", companion_id="user-lin") == [entry]
+    assert match_entries([entry], "今天路过一家咖啡馆", companion_id="user-other") == []
+
+
+def test_global_entry_matches_every_companion() -> None:
+    """全局条目（scope="*"，内置条目的默认值）对每个角色都生效。"""
+    entry = _entry()
+    assert entry.scope == "*"
+    assert match_entries([entry], "路过咖啡馆", companion_id="user-lin") == [entry]
+
+
+def test_missing_companion_id_only_matches_global() -> None:
+    """不传 companion_id 时只匹配全局条目（fail-safe：宁可少注入也不串味）。"""
+    global_entry = _entry(id="global")
+    scoped_entry = _entry(id="scoped", scope="user-lin")
+    hits = match_entries([global_entry, scoped_entry], "路过咖啡馆")
+    assert [h.id for h in hits] == ["global"]
+
+
+def test_scope_filter_applies_to_vector_channel() -> None:
+    """向量通道命中的专属条目也必须被归属过滤拦住。
+
+    回归点：向量通道是按 id 命中集合判定的，若归属检查发生在命中判定之后
+    （或根本不查），专属设定会从向量通道漏给别的角色。
+    """
+    entry = _entry(id="vec", keys=[], regex=[], vector_text="语义文本", scope="user-lin")
+    index = _FakeIndex({"vec"})
+    assert (
+        match_entries([entry], "无关文本", vector_index=index, companion_id="user-lin")
+        == [entry]
+    )
+    assert match_entries([entry], "无关文本", vector_index=index, companion_id="user-other") == []

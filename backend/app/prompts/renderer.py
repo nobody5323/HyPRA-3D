@@ -94,3 +94,34 @@ def render_persona_prompt(
         truncated=truncated,
         estimated_tokens=estimate_tokens(layer_text),
     )
+
+
+#: 背景故事块在提示词里的标题（与「[记忆回忆]」等块标题同一套写法）
+BACKGROUND_SECTION_TITLE = "[背景故事]"
+
+
+def render_persona_background(
+    persona: PersonaPreset,
+    state_values: dict[str, str] | None = None,
+) -> RenderedPrompt:
+    """渲染角色卡的**背景故事**（用户自建角色才有；内置角色默认为空）。
+
+    为什么与 `render_persona_prompt` 分开、而不直接拼进去：两者在提示词里的位置
+    不同——人设正文是角色层的开头（身份与说话方式），背景故事是角色层的末尾
+    （随后才是世界书、记忆等层）；且背景留空是常态，分开调用才能让调用方决定
+    「要不要多这一块」。
+
+    空背景返回 `text=""` 的 RenderedPrompt（调用方据此跳过拼接）。
+    宏（`{{变量}}`）的解析与正文同源，因此背景里也能写 `{{user_name}}`。
+    """
+    if not persona.background.strip():
+        return RenderedPrompt(persona=persona, text="")
+
+    text, warnings = resolve_template(persona.background, state_values)
+    section = f"{BACKGROUND_SECTION_TITLE}\n{text}" if text.strip() else ""
+    return RenderedPrompt(
+        persona=persona,
+        text=section,
+        warnings=warnings,
+        estimated_tokens=estimate_tokens(section),
+    )

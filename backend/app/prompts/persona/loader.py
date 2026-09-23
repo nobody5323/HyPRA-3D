@@ -24,6 +24,14 @@ class PersonaPreset(BaseModel):
     tags: list[str] = Field(default_factory=list, description="标签")
     creator: str = Field(default="hypra-original", description="内容作者标记")
     prompt: str = Field(description="人设正文（支持 {{变量}} 宏）")
+    background: str = Field(
+        default="",
+        description=(
+            "背景故事（常驻注入，排在人设正文之后、世界书之前）。"
+            "刻意与人设正文分开：人设管「是谁、怎么说话」，背景管「过往与世界观」，"
+            "用户自建角色时两块内容的写法差别很大"
+        ),
+    )
     variables: list[str] = Field(default_factory=list, description="声明用到的状态变量名")
 
     @property
