@@ -4,12 +4,16 @@
 跨域：前端（Next.js，默认 3000）与后端（8000）不同源，必须配置 CORS，
 否则浏览器会拦截请求（表现为前端一直显示「后端未连接」）。
 
-生命周期：启动时连接 MCP 服务器（把外部工具接入 Agent 行动层），关闭时断开。
+生命周期分两段（设计见 `AGENTS.md §9.3`）：
+- **静态注册**在 `create_app()`：内置插件写入注册表（只做元数据，无副作用）；
+- **动态启停**在 lifespan：发现第三方插件 → setup → start；关闭时逆序 shutdown。
+任一插件失败都只告警，**不阻断宿主启动**。
 """
 
 import asyncio
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,12 +25,16 @@ from app.api import (
     knowledge_router,
     llm_router,
     media_router,
+    plugins_router,
     st_presets_router,
     studio_router,
 )
 from app.config import cors_origin_list, get_settings
 from app.digital_human.factory import GPT_SOVITS_NAMES
 from app.mcp.manager import configure_manager, get_mcp_manager
+from app.plugins.builtin import register_all_builtin
+from app.plugins.manager import PluginManager, get_plugin_manager, set_plugin_manager
+from app.plugins.registry import get_registry, set_registry
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +45,15 @@ def create_app() -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):  # noqa: ARG001 - FastAPI 约定签名
-        """启动时连 MCP、关闭时断开（连接失败只告警，不阻断启动）。"""
+        """启动：生效插件 + 连 MCP；关闭：逆序释放（任一失败只告警，不阻断启动）。
+
+        注意：插件的**发现**已在 `create_app()` 完成（只读 manifest），
+        这里只做**启停**（会执行插件代码）。
+        """
+        plugin_manager = get_plugin_manager()
+        plugin_manager.setup_all()
+        plugin_manager.start_all()
+
         manager = None
         if settings.mcp_enabled:
             manager = configure_manager(
@@ -61,6 +77,7 @@ def create_app() -> FastAPI:
                 asyncio.to_thread(media_module.warmup_digital_human_provider)
             )
         yield
+        plugin_manager.shutdown_all()
         if manager is not None:
             await asyncio.to_thread(manager.stop_all)
 
@@ -71,10 +88,27 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
-    # 跨域配置（来源可用 CORS_ORIGINS 覆盖；"*" 表示允许全部）
+    # 插件的**静态阶段**在应用工厂里完成：注册内置插件 + 发现目录插件。
+    # 两者都只读 manifest、不执行插件代码，因此即使测试只取 /health、不走 lifespan，
+    # 插件列表也是完整的（管理 UI 能看到“已安装但未启用”的插件）。
+    set_registry(None)
+    plugin_registry = get_registry()
+    register_all_builtin(plugin_registry)
+    plugin_manager = PluginManager(
+        plugin_registry,
+        data_dir=Path(settings.plugins_dir).parent,
+        # 顺序即优先级：第一方插件先于第三方同名插件（discover 里「内置优先」）
+        plugin_dirs=[settings.builtin_plugins_dir, settings.plugins_dir],
+    )
+    plugin_manager.discover()
+    set_plugin_manager(plugin_manager)
+
+    # 跨域配置（来源可用 CORS_ORIGINS 覆盖；"*" 表示允许全部；
+    # CORS_ORIGIN_REGEX 额外放行本机回环地址的任意端口——桌面端与 Web 端端口不固定）
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cors_origin_list(settings),
+        allow_origin_regex=settings.cors_origin_regex or None,
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -82,11 +116,14 @@ def create_app() -> FastAPI:
 
     @app.get("/health")
     def health() -> dict:
-        """健康检查：确认服务与配置加载正常，并附带外部能力（MCP）连接状态。"""
+        """健康检查：服务与配置正常性 + 外部能力（MCP）与插件体系统计。"""
+        manager = get_plugin_manager()
         return {
             "status": "ok",
             "app": settings.app_name,
             "mcp": get_mcp_manager().status(),
+            "plugins": manager.status(),
+            "plugins_summary": manager.summary(),
         }
 
     app.include_router(chat_router)
@@ -96,6 +133,7 @@ def create_app() -> FastAPI:
     app.include_router(avatar_models_router)
     app.include_router(st_presets_router)
     app.include_router(studio_router)
+    app.include_router(plugins_router)
     return app
 
 

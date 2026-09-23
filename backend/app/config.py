@@ -38,6 +38,13 @@ class Settings(BaseSettings):
         "http://localhost:3000,http://127.0.0.1:3000,"
         "http://localhost:8000,http://127.0.0.1:8000"
     )
+    # 追加的正则白名单：本机回环地址下的**任意端口**。
+    #
+    # 为什么需要它：前端不一定跑在 3000——桌面端（Electron）内置的静态资源服务
+    # 从 34567 起找可用端口，Web 端也可能改端口。端口写死会让这些来源被 CORS 拦掉，
+    # 表现为界面一直「后端未连接」（curl 却正常，所以很难定位）。
+    # 置空字符串可关闭（只用上面的固定列表）。
+    cors_origin_regex: str = r"^http://(localhost|127\.0\.0\.1)(:\d+)?$"
 
     # ---- 冷层（本地 SQLite）----
     # 数据库文件位置（相对 backend 运行目录；默认 backend/data/memory.db）
@@ -96,6 +103,19 @@ class Settings(BaseSettings):
     # 用户自撰内容落 backend/data/studio（backend/data/ 已被 .gitignore 覆盖）。
     # 属**用户本地数据**：不进仓库、不随发行物分发。
     studio_dir: str = "data/studio"
+
+    # ---- 插件体系（设计见 AGENTS.md §9）----
+    # 第三方插件目录（每个插件一个子目录 + manifest.json）；内置插件由代码注册。
+    # 其父目录同时用作插件自有状态目录：<data_dir>/plugins/<plugin_id>/。
+    plugins_dir: str = "data/plugins"
+
+    # 第一方插件目录（入库，随项目分发）：目录 + manifest.json 形态。
+    # 与 builtin.py 里“代码内注册”的插件互补——前者适合可拆卸的功能插件，
+    # 后者适合平台基础的 provider 族（见 §9.10）。
+    builtin_plugins_dir: str = "plugins"
+
+    # 酒馆会话导入记录（幂等去重：只记“哪些会话已导入哪个陪伴对象”）
+    tavern_import_state_file: str = "data/tavern_import.json"
 
     # 上传的数字人模型库（Live2D 模型包 / 静态立绘）。
     #

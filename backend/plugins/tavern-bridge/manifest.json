@@ -1,0 +1,32 @@
+{
+  "id": "tavern-bridge",
+  "display_name": "酒馆数据接入",
+  "version": "0.1.0",
+  "layer": "builtin",
+  "category": "datasource",
+  "description": "只读接入本地 SillyTavern 数据（世界书 / 角色卡 / 会话历史），用于设定注入与跨会话长期记忆构建。绝不修改酒馆数据。",
+  "homepage": "https://github.com/nobody5323/HyPRA-3D-",
+  "loading_order": 200,
+  "capabilities": ["datasource", "tool", "settings"],
+  "permissions": {
+    "filesystem": {
+      "read": ["${tavern_dir}"],
+      "write": false
+    },
+    "network": {
+      "hosts": []
+    }
+  },
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "tavern_dir": {
+        "type": "string",
+        "title": "酒馆数据目录",
+        "description": "SillyTavern 的用户数据目录，例如 D:\\\\AB\\\\SillyTavern\\\\data\\\\default-user（也可填其上级目录，插件会自动识别）"
+      }
+    }
+  },
+  "enabled": false,
+  "entry": "plugin.py"
+}

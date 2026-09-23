@@ -8,6 +8,7 @@
 - media.py         POST /media/avatar（数字人驱动数据）+ POST /media/speak + GET /media/audio/{file}
                    + GET /media/tts/voices（语音引擎与音色清单）
 - knowledge.py     POST /knowledge/upload + GET /knowledge/list + DELETE /knowledge/{doc_id}
+- plugins.py       /plugins/*（插件列表 / 启停 / 配置，以及酒馆会话→长期记忆的导入）
 """
 
 from app.api.avatar_models import router as avatar_models_router
@@ -15,6 +16,7 @@ from app.api.chat import router as chat_router
 from app.api.knowledge import router as knowledge_router
 from app.api.llm import router as llm_router
 from app.api.media import router as media_router
+from app.api.plugins import router as plugins_router
 from app.api.st_presets import router as st_presets_router
 from app.api.studio import router as studio_router
 
@@ -24,6 +26,7 @@ __all__ = [
     "knowledge_router",
     "llm_router",
     "media_router",
+    "plugins_router",
     "st_presets_router",
     "studio_router",
 ]
