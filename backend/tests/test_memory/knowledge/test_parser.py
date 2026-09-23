@@ -11,7 +11,16 @@ import pytest
 from docx import Document
 from pypdf import PdfWriter
 
-from app.memory.knowledge.parser import ParseError, parse
+from app.memory.knowledge.parser import (
+    SUPPORTED_SUFFIXES,
+    DocxParser,
+    MarkdownParser,
+    ParseError,
+    PdfParser,
+    PlainTextParser,
+    parse,
+    select_parser,
+)
 
 
 def _docx_bytes(paragraphs: list[str], *, table: list[list[str]] | None = None) -> bytes:
@@ -138,3 +147,44 @@ def test_empty_file_raises() -> None:
 def test_whitespace_only_text_raises() -> None:
     with pytest.raises(ParseError, match="没有可提取的文字内容"):
         parse("空白.txt", "   \n\n  ".encode("utf-8"))
+
+
+# =============================================================
+# 解析器选择（拆分新增：一种格式一个实现）
+# =============================================================
+
+
+def test_select_parser_picks_implementation_by_suffix() -> None:
+    assert isinstance(select_parser("a.txt"), PlainTextParser)
+    assert isinstance(select_parser("a.LOG"), PlainTextParser)      # 扩展名大小写不敏感
+    assert isinstance(select_parser("a.md"), MarkdownParser)
+    assert isinstance(select_parser("a.markdown"), MarkdownParser)
+    assert isinstance(select_parser("a.pdf"), PdfParser)
+    assert isinstance(select_parser("a.docx"), DocxParser)
+
+
+def test_supported_suffixes_cover_every_parser() -> None:
+    """`SUPPORTED_SUFFIXES` 由实现聚合而来，不会与实现脱节。"""
+    for parser in (PlainTextParser(), MarkdownParser(), PdfParser(), DocxParser()):
+        assert parser.suffixes <= SUPPORTED_SUFFIXES, parser.name
+        assert parser.name in {"text", "md", "pdf", "docx"}
+
+
+def test_missing_optional_dependency_is_actionable(monkeypatch) -> None:
+    """缺可选依赖时只影响该格式，并给出可执行的安装提示。
+
+    惰性导入是这次拆分顺带修掉的：原来顶层 `from pypdf import ...`，
+    少装一个包会让整个 parser 模块 import 失败——连 .txt 上传也起不来。
+    """
+    monkeypatch.setattr(PdfParser, "available", lambda self: False)
+
+    with pytest.raises(ParseError, match="pip install pypdf"):
+        parse("文档.pdf", b"%PDF-1.4")
+    # 其它格式不受影响
+    assert parse("导语.txt", "你好".encode("utf-8")).source_type == "text"
+
+
+def test_source_type_distinguishes_text_and_markdown() -> None:
+    """两者处理一样但 source_type 必须不同——chunker 靠它决定分块策略。"""
+    assert parse("a.txt", b"plain").source_type == "text"
+    assert parse("a.md", b"# heading").source_type == "md"

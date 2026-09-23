@@ -3,7 +3,7 @@
 本模块是**唯一的**「业务代码 → 插件体系」粘合层（`AGENTS.md §9.1`）：其余模块不需要
 知道插件体系的存在，因此这一步是**零重构**的——只做包装，不改任何既有实现。
 
-被收编的 7 项（对应 §9.1 盘点表）：
+被收编的 9 项（对应 §9.1 盘点表 + §9.11 P2）：
 
     llm-providers       → LLM provider 工厂（mock / dashscope / siliconflow / openai-compatible）
     avatar-providers    → 数字人驱动工厂（local / xmov / gpt_sovits）
@@ -12,9 +12,15 @@
     session-store       → 会话持久化（memory / sqlite）
     tools-builtin       → 4 个情感陪伴工具（情绪日记 / 趋势 / 呼吸 / 记忆检索）
     mcp-bridge          → MCP Client（外部工具接入）
+    tokenizer           → 中文分词（jieba / char-bigram）—— P2 从模块级函数拆为可替换策略
+    knowledge-parser    → 文档解析（text / md / pdf / docx）—— P2 同上
 
 统一约定：provider 工厂签名为 `(name: str, **kwargs) -> 实现`，`name` 是**实现名**
 （如 `"qdrant"`），由调用方透传；插件负责适配既有工厂的各自签名。
+
+注：情绪兜底策略（§9.11 P2 的第三项）**刻意不收编到这里**——它属于 core 的
+`emotion-pipeline`（关掉它情绪链路就不成立，见 §9.2），只在 core 内部抽了接口，
+由 `EMOTION_FALLBACK` 配置选择实现。放进 builtin 会让它变成可禁用，语义不符。
 """
 
 from __future__ import annotations
@@ -103,13 +109,38 @@ def _builtin_tools() -> list[Any]:
     return [registry.get(name) for name in registry.names()]
 
 
+def _tokenizer(name: str, **kwargs: Any) -> Any:  # noqa: ARG001 - 保留统一签名
+    """按实现名取分词器；空则走 auto（有 jieba 用 jieba，否则降级 bigram）。"""
+    from app.rag.retrieval.tokenize.factory import create_tokenizer
+
+    return create_tokenizer(name or "auto")
+
+
+def _parser(name: str, **kwargs: Any) -> Any:  # noqa: ARG001 - 保留统一签名
+    """按**格式名**取文档解析器；name 为空时返回按文件名自动选的 `parse` 入口。
+
+    parser 与其余 provider 不同：它不「按名创建」而是**按上传文件的扩展名**选，
+    所以这里把能力面开成两层——`provider("parser", "pdf")` 取具体实现，
+    `provider("parser")` 取自动选择的入口。
+    """
+    from app.memory.knowledge.parser import factory
+
+    if not name:
+        return factory.parse
+    for parser in factory.PARSERS:
+        if parser.name == name:
+            return parser
+    known = " | ".join(parser.name for parser in factory.PARSERS)
+    raise ValueError(f"未知文档格式：{name!r}（可选 {known}）")
+
+
 # =============================================================
 # 注册入口
 # =============================================================
 
 
 def build_builtin_registrations() -> list[PluginRegistration]:
-    """构造 7 个内置插件的注册对象（不写入注册表，便于测试检查）。"""
+    """构造全部内置插件的注册对象（不写入注册表，便于测试检查）。"""
     return [
         PluginRegistration(
             manifest=_builtin_manifest(
@@ -196,6 +227,34 @@ def build_builtin_registrations() -> list[PluginRegistration]:
                 loading_order=160,
             ),
             providers={"mcp_manager": _mcp_manager},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "tokenizer",
+                "中文分词",
+                category="retrieval",
+                description=(
+                    "BM25 稀疏检索的分词器：jieba（主）/ char-bigram（零依赖降级）；"
+                    "由 TOKENIZER_BACKEND 选择"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                loading_order=170,
+            ),
+            providers={"tokenizer": _tokenizer},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "knowledge-parser",
+                "文档解析",
+                category="retrieval",
+                description=(
+                    "个人记忆的上传解析：text / md / pdf / docx；"
+                    "pdf 与 docx 的可选依赖惰性导入，缺失只影响该格式"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                loading_order=180,
+            ),
+            providers={"parser": _parser},
         ),
     ]
 

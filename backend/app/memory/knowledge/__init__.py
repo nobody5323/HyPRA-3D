@@ -13,8 +13,11 @@
 模块构成：
 
 - `base.py`           数据模型（KnowledgeDoc / KnowledgeChunk / KnowledgeHit）与接口
+- `parser/`           上传文件 → 纯文本（text / md / pdf / docx 各一个实现）
 - `cleaner.py`        清洗去噪（去格式残留，保留 Markdown 结构）
 - `dedup.py`          三级去重（文件 MD5 / 内容 MD5 / MinHash 近似）
+- `chunker.py`        分块（语义边界优先，句级回退）
+- `retriever.py`      混合检索（BM25 + 稠密向量 → RRF）
 - `inmemory_store.py` 内存实现（零依赖，开发与测试）
 - `qdrant_store.py`   Qdrant 实现（分块 + 元数据双 collection）
 - `factory.py`        按配置创建实现（memory | qdrant）

@@ -30,7 +30,7 @@ def test_app_registers_builtin_plugins() -> None:
 def test_registry_has_all_capabilities() -> None:
     summary = get_registry().capabilities_summary()
     for capability in ("llm", "digital_human", "warm_store", "knowledge_store",
-                       "session_store", "mcp_manager"):
+                       "session_store", "mcp_manager", "tokenizer", "parser"):
         assert capability in summary, f"缺少能力：{capability}"
 
 

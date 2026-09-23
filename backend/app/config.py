@@ -135,6 +135,12 @@ class Settings(BaseSettings):
     qdrant_url: str = "http://localhost:6333"
     qdrant_api_key: str = ""
 
+    # ---- 中文分词（BM25 稀疏检索通道）----
+    # auto（默认，jieba 可用则用，否则降级字符 bigram）| jieba（强制，未装则报错）
+    # | char-bigram（零依赖，CI / 离线演示）
+    # 拆分与工厂见 app/rag/retrieval/tokenize/（AGENTS.md §9.11 P2）
+    tokenizer_backend: str = "auto"
+
     # ---- LLM 提供商（评审自填：dashscope | siliconflow | openai-compatible | mock）----
     llm_provider: str = "mock"  # 默认 mock：无 key 也可跑通对话链路（占位回复）
     llm_api_key: str = ""
@@ -144,6 +150,12 @@ class Settings(BaseSettings):
     # 推理模型开关：qwen3 等推理模型默认会先生成大量思考 token（实测慢 4-5 倍），
     # 情感陪伴场景不需要长思考，默认关闭（None = 不传该参数，兼容非推理模型）
     llm_enable_thinking: bool = False
+
+    # ---- 情绪兜底策略（主通道是 LLM function calling，固定不可换）----
+    # regex（默认，关键词/正则）| neutral（不判断，恒中性）
+    # 选 neutral 的场合：正则读不懂否定（「我不开心」会命中 HAPPY 的「开心」），
+    # 而情绪会驱动 3D 表情与记忆加权——宁可中性也不要判反。见 app/tools/emotion/。
+    emotion_fallback: str = "regex"
 
     # ---- 个人记忆（知识库：用户上传的私人语料）----
     knowledge_enabled: bool = True

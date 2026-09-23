@@ -377,7 +377,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 **core（9 项，不可禁用）**：`prompt-assembly`（assemble/renderer/sanitize + prompt_manager）、
 `memory-facade`（memory/store.py + decay + cold/extractor）、`conversation-graph`（graph/）、
 `session-window`（session/context.py）、`worldbook-matcher`（matcher + vector_index）、
-`emotion-pipeline`（tools/emotion.py）、`embodiment-timeline`（digital_human/ssml + viseme + models）、
+`emotion-pipeline`（tools/emotion/）、`embodiment-timeline`（digital_human/ssml + viseme + models）、
 `retrieval-fusion`（rag/retrieval/hybrid.py）、`api-skeleton`（api/ + config.py + main.py）
 
 **builtin（15 项，可禁用/替换）**：
@@ -392,8 +392,8 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | 6 | `tools-builtin` | `tool`（4 个情感陪伴工具） | ✅ 已收编 |
 | 7 | `mcp-bridge` | `mcp_manager`（MCP Client） | ✅ 已收编 |
 | 8 | `embedding` | `embedding`（deterministic / cloud） | 待拆（现藏在 warm factory 内） |
-| 9 | `tokenizer` | `tokenizer`（jieba / bigram） | 待抽接口 |
-| 10 | `knowledge-parser` | `parser`（text / md / pdf / docx） | 待抽接口 |
+| 9 | `tokenizer` | `tokenizer`（jieba / bigram） | ✅ 已收编 |
+| 10 | `knowledge-parser` | `parser`（text / md / pdf / docx） | ✅ 已收编 |
 | 11 | `knowledge-chunker` | `chunker` | 待抽接口 |
 | 12 | `tts` | `tts`（从 digital_human 分出） | 待拆 |
 | 13 | `st-format-adapter` | `datasource` / `prompt`（包装 st_compat） | 待包装 |
@@ -417,7 +417,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P3** | `tavern-bridge` 插件（目录插件通路：PNG 角色卡 / 世界书 / 会话只读接入） | ✅ 已完成 |
 | **P3b** | 插件管理 API（`/plugins/*`：列表 / 启停 / 配置读写） | ✅ 已完成 |
 | **P4** | 跨会话记忆构建（`TavernMemoryImporter` 会话→记忆 + 导入 API） | ✅ 已完成 |
-| **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | 待做 |
+| **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | ✅ 已完成（parser → `knowledge/parser/`，tokenizer → `retrieval/tokenize/`，emotion 兜底策略留 core 内；均用 `__init__` 兼容层重导出，既有调用方零改动） |
 | **P5** | Skill 体系（独立于插件，可随时插入） | 待做 |
 | **P6** | Live2D 模型来源插件 | 待做 |
 | **P7** | 插件市场（远期） | 待做 |

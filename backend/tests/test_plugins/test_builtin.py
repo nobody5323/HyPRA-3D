@@ -1,9 +1,11 @@
-"""内置插件收编测试：既有 7 个扩展点被正确包装且行为不变。"""
+"""内置插件收编测试：既有扩展点被正确包装且行为不变。"""
 
+import pytest
+
+from app.plugins.builtin import build_builtin_registrations, register_all_builtin
 from app.plugins.capabilities import CapabilityType, PluginLayer
 from app.plugins.manifest import PluginManifest
 from app.plugins.registry import PluginRegistry
-from app.plugins.builtin import build_builtin_registrations, register_all_builtin
 
 EXPECTED_IDS = [
     "llm-providers",
@@ -13,14 +15,17 @@ EXPECTED_IDS = [
     "session-store",
     "tools-builtin",
     "mcp-bridge",
+    # P2（§9.11）拆分后新收编的两项
+    "tokenizer",
+    "knowledge-parser",
 ]
 
 
-def test_all_seven_points_are_registered() -> None:
+def test_all_builtin_points_are_registered() -> None:
     registry = PluginRegistry()
     ids = register_all_builtin(registry)
     assert ids == EXPECTED_IDS
-    assert len(registry) == 7
+    assert len(registry) == len(EXPECTED_IDS)
 
 
 def test_all_builtin_are_builtin_layer() -> None:
@@ -89,6 +94,78 @@ def test_datasource_capability_not_yet_provided() -> None:
 
     assert "datasource" not in registry.capabilities_summary()
     assert CapabilityType.DATASOURCE.value == "datasource"
+
+
+# ---------- P2 拆分后新收编的两项 ----------
+
+
+def test_tokenizer_via_registry() -> None:
+    """经注册表取分词器——既有的 `tokenize()` 模块函数与它结果一致。"""
+    from app.rag.retrieval.tokenize import create_tokenizer, tokenize
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    assert registry.provider("tokenizer", "char-bigram").name == "char-bigram"
+    # 空实现名 → auto（跟随环境）
+    assert registry.provider("tokenizer").name == create_tokenizer("auto").name
+    # 能力可替换但不改变既有调用方的行为
+    text = "最近压力有点大"
+    assert tokenize(text) == create_tokenizer("auto").tokenize(text)
+
+    try:
+        registry.provider("tokenizer", "bert")
+    except ValueError as exc:
+        assert "未知分词器后端" in str(exc)
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未知分词器应抛出 ValueError")
+
+
+def test_parser_via_registry() -> None:
+    """parser 的能力面分两层：按格式取实现，或取自动选择的入口。"""
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    pdf = registry.provider("parser", "pdf")
+    assert pdf.name == "pdf"
+    assert ".pdf" in pdf.suffixes
+
+    # 空实现名 → 自动选择的 parse 入口（既有多数调用方的用法）
+    auto = registry.provider("parser")
+    result = auto("笔记.txt", "你好".encode("utf-8"))
+    assert result.source_type == "text"
+
+    try:
+        registry.provider("parser", "rtf")
+    except ValueError as exc:
+        assert "未知文档格式" in str(exc)
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未知格式应抛出 ValueError")
+
+
+def test_disabling_split_plugins_does_not_break_retrieval() -> None:
+    """可禁用性验证：禁用分词/解析插件不影响模块级入口（它们不经过注册表）。
+
+    这一点很重要——注册表是**能力账本**，不是运行时唯一通路；否则禁用插件
+    会把检索链路直接打断（而 §9.2 说 builtin 层是可禁用的）。
+    """
+    from app.memory.knowledge.parser import parse
+    from app.rag.retrieval.tokenize import tokenize
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    assert registry.provider("tokenizer") is not None
+    registry.set_enabled("tokenizer", False)
+    registry.set_enabled("knowledge-parser", False)
+
+    # 能力账本里不再有提供者
+    with pytest.raises(KeyError, match="没有启用的插件提供能力"):
+        registry.provider("tokenizer")
+
+    # 但既有调用方不经注册表，照常工作
+    assert tokenize("压力大")
+    assert parse("a.txt", b"hi").source_type == "text"
 
 
 def test_disabling_builtin_removes_its_tools() -> None:

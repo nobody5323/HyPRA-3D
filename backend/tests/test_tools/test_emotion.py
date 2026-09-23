@@ -10,7 +10,10 @@ from app.tools.emotion import (
     EMOTION_TOOL_NAME,
     EmotionLabel,
     EmotionResult,
+    NeutralFallback,
+    RegexFallback,
     build_emotion_tool,
+    create_fallback,
     extract_emotion_fallback,
     has_emotion_keyword,
     parse_emotion_result,
@@ -137,3 +140,62 @@ def test_fallback_intensity_by_label() -> None:
 def test_has_emotion_keyword() -> None:
     assert has_emotion_keyword("我好累") is True
     assert has_emotion_keyword("今天周三") is False
+
+
+# ---------- 兜底策略（拆分新增：可替换）----------
+
+
+def test_create_fallback_explicit() -> None:
+    assert create_fallback("regex").name == "regex"
+    assert create_fallback("neutral").name == "neutral"
+    assert create_fallback("").name == "regex"   # 缺省回默认
+
+
+def test_create_fallback_unknown_raises() -> None:
+    with pytest.raises(ValueError, match="未知兜底策略"):
+        create_fallback("gpt")
+
+
+def test_default_fallback_reads_settings(monkeypatch) -> None:
+    """`extract_emotion_fallback` 的实际策略由配置决定。"""
+    from app.config import get_settings
+
+    monkeypatch.setenv("EMOTION_FALLBACK", "neutral")
+    assert get_settings().emotion_fallback == "neutral"
+    # neutral 下「我很焦虑」不再被规则命中
+    assert extract_emotion_fallback("我很焦虑").emotion == EmotionLabel.NEUTRAL
+    assert extract_emotion_fallback("我很焦虑").evidence == "未启用关键词兜底"
+
+
+def test_neutral_fallback_is_always_neutral() -> None:
+    """宁可中性也不要判反：正则读不懂否定（「我不开心」会命中「开心」）。
+
+    这个测试同时把那个已知缺陷钉住——将来若修了正则，这里的断言需要重新讨论。
+    """
+    fallback = NeutralFallback()
+
+    for text in ["我很焦虑", "今天太开心了", "我不开心"]:
+        result = fallback.detect(text)
+        assert result.emotion == EmotionLabel.NEUTRAL
+        assert result.source == "fallback"
+        assert result.reply  # 仍不空转：给通用承接回复
+
+    # 对照：正则策略确实会在否定句上判反
+    assert RegexFallback().detect("我不开心").emotion == EmotionLabel.HAPPY
+
+
+def test_regex_fallback_matches_module_entry() -> None:
+    """`extract_emotion_fallback`（默认配置）与 RegexFallback 行为一致。"""
+    for text in ["我好累", "今天周三", "明天要交报告很焦虑"]:
+        assert extract_emotion_fallback(text).emotion == RegexFallback().detect(text).emotion
+
+
+def test_fallback_implementations_agree_on_shape() -> None:
+    """两个实现的输出形状一致——调用方不该关心当前选了哪个策略。"""
+    for fallback in (RegexFallback(), NeutralFallback()):
+        result = fallback.detect("测试")  # 不传入具体情绪词
+        assert isinstance(result, EmotionResult)
+        assert isinstance(result.emotion, EmotionLabel)
+        assert 0.0 <= result.intensity <= 1.0
+        assert 0.0 <= result.confidence <= 1.0
+        assert result.label_zh and result.facial_expression

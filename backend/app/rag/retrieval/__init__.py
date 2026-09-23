@@ -1,6 +1,6 @@
 """rag.retrieval：混合检索底座（稠密向量 + BM25 稀疏 → RRF 融合）。
 
-- tokenize.py  中文分词（jieba；缺失时降级为字符 bigram）
+- tokenize/   中文分词（jieba；缺失时降级为字符 bigram；工厂按 TOKENIZER_BACKEND 选）
 - bm25.py      BM25 增量索引（支持增删，IDF 按当前语料计算）
 - hybrid.py    RRF 融合（纯函数）
 
