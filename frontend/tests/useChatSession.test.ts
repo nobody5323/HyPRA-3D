@@ -13,9 +13,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useChatSession } from "@/hooks/useChatSession";
 import type { AvatarController } from "@/hooks/useAvatar";
-import { deleteSession, getSessionHistory, postChat } from "@/lib/api";
+import { deleteSession, getSessionHistory, postChat, postSpeak } from "@/lib/api";
 import { writeActiveSessionId } from "@/lib/session-store";
-import type { ChatResponse, SessionHistory } from "@/lib/types";
+import type { ChatResponse, SessionHistory, SpeakCommand } from "@/lib/types";
 
 vi.mock("@/lib/api", () => ({
   ApiError: class ApiError extends Error {
@@ -88,6 +88,7 @@ beforeEach(() => {
   window.localStorage.clear();
   vi.mocked(getSessionHistory).mockReset();
   vi.mocked(postChat).mockReset();
+  vi.mocked(postSpeak).mockReset();
   vi.mocked(deleteSession).mockReset();
 });
 
@@ -237,5 +238,102 @@ describe("useChatSession 历史恢复", () => {
     expect(result.current.messages).toHaveLength(1); // 当前会话不受影响
     expect(result.current.sessionId).toBe("s-cur");
     expect(result.current.sessionVersion).toBe(before + 1);
+  });
+});
+
+/**
+ * 播报上下文：服务端 TTS（GPT-SoVITS）用本轮情绪去换后端的表情时间轴，
+ * 而情绪是本轮对话的产物、hook 调用时还不知道，所以必须**跟着 speak 传进去**。
+ * 这里锁「传了」与「没情绪时传 null/默认强度」（漏传会静默变成中性表情）。
+ */
+describe("useChatSession 播报上下文", () => {
+  it("整段播报带上本轮情绪与强度", async () => {
+    vi.mocked(postChat).mockResolvedValue(
+      chatResponse({
+        emotion: {
+      label: "anxious",
+      label_zh: "焦虑",
+      intensity: 0.8,
+      confidence: 0.9,
+      facial_expression: "frowning_worry",
+      source: "llm",
+    },
+        speak: {
+          ssml: "<speak>嗯</speak>",
+          display_text: "嗯，我在。",
+          voice: "V1",
+          emotion: "anxious",
+          ka_action: "",
+          tone: "柔声",
+          intensity: 0.8,
+        },
+      }),
+    );
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+
+    await act(async () => {
+      await result.current.send("在吗");
+    });
+
+    expect(vi.mocked(fakeAvatar.speak)).toHaveBeenCalledWith("嗯，我在。", "<speak>嗯</speak>", {
+      emotion: "anxious",
+      intensity: 0.8,
+    });
+  });
+
+  it("分段播报同样带上（音频整段合成靠它对齐表情）", async () => {
+    vi.mocked(postChat).mockResolvedValue(
+      chatResponse({ emotion: {
+      label: "anxious",
+      label_zh: "焦虑",
+      intensity: 0.8,
+      confidence: 0.9,
+      facial_expression: "frowning_worry",
+      source: "llm",
+    }, reply: "第一段。第二段。" }),
+    );
+    vi.mocked(postSpeak).mockResolvedValue({
+      ssml: "<speak>第一段。第二段。</speak>",
+      display_text: "第一段。第二段。",
+      voice: "V1",
+      emotion: "anxious",
+      ka_action: "",
+      tone: "柔声",
+      intensity: 0.8,
+      chunks: ["第一段。", "第二段。"],
+      ssml_chunks: ["<speak>第一段。</speak>", "<speak>第二段。</speak>"],
+    } as SpeakCommand);
+
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+    act(() => {
+      result.current.setStreamingSpeech(true);
+    });
+
+    await act(async () => {
+      await result.current.send("在吗");
+    });
+
+    expect(vi.mocked(fakeAvatar.speakChunks)).toHaveBeenCalledWith(
+      [
+        { text: "第一段。", ssml: "<speak>第一段。</speak>" },
+        { text: "第二段。", ssml: "<speak>第二段。</speak>" },
+      ],
+      expect.any(Function),
+      { emotion: "anxious", intensity: 0.8 },
+    );
+  });
+
+  it("没有情绪时传 null 与默认强度（后端据此用中性表情）", async () => {
+    vi.mocked(postChat).mockResolvedValue(chatResponse({ emotion: null }));
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+
+    await act(async () => {
+      await result.current.send("在吗");
+    });
+
+    expect(vi.mocked(fakeAvatar.speak)).toHaveBeenCalledWith("嗯，我在。", undefined, {
+      emotion: null,
+      intensity: 0.5,
+    });
   });
 });

@@ -26,6 +26,7 @@ from app.memory.warm.embedding import DeterministicEmbeddingProvider
 from app.memory.warm.inmemory_store import InMemoryWarmStore
 from app.prompts.st_compat import StPresetStore
 from app.session.sqlite_repository import SqliteSessionRepository
+from app.studio import StudioStore
 
 
 @pytest.fixture(autouse=True)
@@ -33,6 +34,9 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     """自动替换 chat/media 模块的外部依赖为隔离实现。"""
     # MCP 默认关闭：环境变量优先于 .env，即使本地配了清单也不会连
     monkeypatch.setenv("MCP_ENABLED", "false")
+    # 数字人驱动固定为本地：测试不得依赖本机 .env（本机可能配了 gpt_sovits，
+    # 启动预热会真的去连 127.0.0.1:9880 → 破坏「测试不联网」原则）
+    monkeypatch.setenv("DIGITAL_HUMAN_PROVIDER", "local")
     # 同时注入空管理器：graph 构建时不会注册任何 MCP 工具
     set_mcp_manager(McpManager())
 
@@ -54,6 +58,9 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     media_module.set_digital_human_provider(LocalDigitalHumanProvider())
     # ST 预设存储：指向临时目录（绝不碰 backend/data/presets，也不依赖本机状态）
     chat_module.set_st_preset_store(StPresetStore(tmp_path / "st_presets"))
+    # 创作工坊：**用户目录**指向临时目录（内置资源仍从包目录读——那是项目内容，
+    # 不属于「本机状态」），否则测试会读到开发机上的自建角色，结果无法复现
+    chat_module.set_studio_store(StudioStore(tmp_path / "studio"))
     # 模型运行时配置：指向临时文件 + 清空进程内缓存
     # （绝不碰 backend/data/llm_runtime.json，也不受本机已保存的模型切换影响）
     monkeypatch.setenv("LLM_RUNTIME_PATH", str(tmp_path / "llm_runtime.json"))
@@ -72,6 +79,7 @@ def isolated_chat_dependencies(tmp_path, monkeypatch):
     chat_module.set_session_repository(None)
     chat_module.set_llm_provider(None)
     chat_module.set_st_preset_store(None)
+    chat_module.set_studio_store(None)
     llm_module.reset_llm_config_cache()
     media_module.set_digital_human_provider(None)
     set_mcp_manager(None)

@@ -233,15 +233,16 @@ def test_delete_session_missing_returns_404() -> None:
     assert client.delete("/chat/sessions/whatever").status_code == 422
 
 
-def test_delete_session_rejects_other_persona(monkeypatch) -> None:
-    """不能删其它陪伴对象的会话（与 POST /chat 的同属校验一致）。"""
+def test_delete_session_rejects_other_persona() -> None:
+    """不能删其它陪伴对象的会话（与 POST /chat 的同属校验一致）。
+
+    第二个角色走创作工坊**真实创建**（而不是 monkeypatch 内部字典）：
+    这样用例覆盖的就是用户自建角色后端的真实路径。
+    """
     from app.api import chat as chat_module
 
-    persona = chat_module._presets["therapist-elder-sister"]
-    monkeypatch.setitem(
-        chat_module._presets,
-        "second-persona",
-        persona.model_copy(update={"id": "second-persona"}),
+    other = chat_module.get_studio_store().create_persona(
+        name="第二个角色", title="Second Persona", prompt="你是另一个人。"
     )
 
     created = client.post(
@@ -249,7 +250,7 @@ def test_delete_session_rejects_other_persona(monkeypatch) -> None:
     ).json()
     resp = client.delete(
         f"/chat/sessions/{created['session_id']}",
-        params={"persona_id": "second-persona"},
+        params={"persona_id": other.id},
     )
     assert resp.status_code == 404
     assert "不属于" in resp.json()["detail"]
@@ -290,20 +291,18 @@ def test_chat_applies_current_mood_to_existing_session() -> None:
     assert not any("current_mood" in warning for warning in body["warnings"])
 
 
-def test_chat_rejects_session_owned_by_other_persona(monkeypatch) -> None:
+def test_chat_rejects_session_owned_by_other_persona() -> None:
     """会话必须属于同一个陪伴对象。
 
     否则会把 B 角色的轮次写进 A 角色的会话，破坏「会话按对象隔离」的契约。
-    当前只有一个内置人设，这里临时注册第二个来构造该组合。
+    第二个角色走创作工坊真实创建，并失效对话图（与生产路径一致）。
     """
     from app.api import chat as chat_module
 
-    persona = chat_module._presets["therapist-elder-sister"]
-    monkeypatch.setitem(
-        chat_module._presets,
-        "second-persona",
-        persona.model_copy(update={"id": "second-persona"}),
+    other = chat_module.get_studio_store().create_persona(
+        name="第二个角色", title="Second Persona", prompt="你是另一个人。"
     )
+    chat_module.invalidate_chat_graph()
 
     created = client.post(
         "/chat", json={"text": "你好", "persona_id": "therapist-elder-sister"}
@@ -312,10 +311,60 @@ def test_chat_rejects_session_owned_by_other_persona(monkeypatch) -> None:
 
     resp = client.post(
         "/chat",
-        json={"text": "换个角色聊", "session_id": session_id, "persona_id": "second-persona"},
+        json={"text": "换个角色聊", "session_id": session_id, "persona_id": other.id},
     )
     assert resp.status_code == 404
     assert "不属于" in resp.json()["detail"]
+
+
+def test_chat_with_user_created_persona() -> None:
+    """用户自建角色：创建后立即可对话，人设 + 背景 + 专属世界书全部生效。
+
+    这条用例覆盖创作工坊接入对话链路的整条路径：存储写入 → 对话图重建 →
+    人设渲染（含背景故事块）→ 世界书按归属过滤。
+    """
+    from app.api import chat as chat_module
+
+    store = chat_module.get_studio_store()
+    persona = store.create_persona(
+        name="小岸",
+        title="Seaside Friend",
+        prompt="你是{{user_name}}的朋友小岸，说话简短。",
+        background="小岸在海边长大，听得懂潮水的声音。",
+    )
+    store.create_entry(
+        title="小岸的猫",
+        content="小岸养着一只叫「浪花」的白猫。",
+        keys=["猫"],
+        scope=persona.id,
+    )
+    chat_module.invalidate_chat_graph()
+
+    # ① 立刻出现在人设清单里，并标记为「我的」
+    catalog = client.get("/chat/personas").json()
+    mine = [item for item in catalog["personas"] if item["id"] == persona.id]
+    assert mine and mine[0]["builtin"] is False
+
+    # ② 直接对话：人设正文与背景故事都进入系统提示
+    resp = client.post(
+        "/chat",
+        json={"text": "你家的猫怎么样", "persona_id": persona.id, "user_name": "小林"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "小岸" in body["system_prompt"]
+    assert "小岸在海边长大，听得懂潮水的声音。" in body["system_prompt"]
+    assert "[背景故事]" in body["system_prompt"]
+    # ③ 专属世界书条目命中（「浪花」只在专属条目里出现）
+    assert "浪花" in body["system_prompt"]
+
+    # ④ 同一句话在**另一个**角色下不注入专属设定（归属隔离）
+    other = client.post(
+        "/chat", json={"text": "你家的猫怎么样", "persona_id": "therapist-elder-sister"}
+    )
+    assert other.status_code == 200
+    assert "浪花" not in other.json()["system_prompt"]
+    assert "[背景故事]" not in other.json()["system_prompt"]
 
 
 def test_chat_reports_knowledge_hits() -> None:

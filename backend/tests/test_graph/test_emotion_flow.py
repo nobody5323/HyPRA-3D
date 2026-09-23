@@ -8,6 +8,7 @@ from app.graph.chat_graph import build_chat_graph
 from app.graph.nodes import ChatNodes
 from app.llm.base import AgentResult, ChatMessage, LLMProvider, ToolCall
 from app.llm.mock import MockLLMProvider
+from app.llm.reasoning import REASONING_MIN_TOKENS
 from app.memory.cold.models import Fact, FactType
 from app.memory.cold.sqlite_store import SqliteColdStore
 from app.memory.store import MemoryStore
@@ -277,3 +278,148 @@ def test_remember_turn_accepts_emotion(memory: MemoryStore) -> None:
     assert stats["memory"] == 1
     facts = memory.cold.list_facts("c1")
     assert all(f.emotion_tag == "anxious" for f in facts) if facts else True
+
+
+# ---------- 生成链路的健壮性（实测缺陷的回归用例）----------
+
+
+def _nodes_with(provider: LLMProvider) -> ChatNodes:
+    """用指定 provider 构建节点（其余依赖用内存实现）。"""
+    return ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=MemoryStore(SqliteColdStore(db_path=":memory:"), InMemoryWarmStore()),
+        llm_provider=provider,
+    )
+
+
+def test_forced_tool_call_rejected_does_not_break_turn() -> None:
+    """模型拒绝强制 tool_choice（实测 DeepSeek 系直接 400）→ 不得让整轮对话失败。
+
+    回归背景：降级分支用 tool_choice 强制指定情绪工具，但推理模型的服务端
+    会回 `Thinking mode does not support this tool_choice`；旧实现没捕获，
+    无预设的对话直接 500，有预设时异常被吞、只剩一个空回复。
+    """
+
+    class _RejectingProvider(MockLLMProvider):
+        """工具循环给纯文本，但强制 tool_choice 会被服务端拒绝。"""
+
+        def chat_with_tool_loop(self, messages, tools, executor, **kwargs):
+            return AgentResult(reply="我在听，你慢慢说。", tool_calls=[], rounds=1)
+
+        def chat_with_tools(self, messages, tools, *, tool_choice="auto", **kwargs):
+            raise RuntimeError(
+                "Error code: 400 - Thinking mode does not support this tool_choice"
+            )
+
+    nodes = _nodes_with(_RejectingProvider())
+
+    out = nodes.generate_reply(
+        _state(messages=[{"role": "user", "content": "我最近总是失眠，压力好大"}])
+    )
+
+    # 回复没丢（沿用工具循环拿到的文本，不重复生成）
+    assert out["reply"] == "我在听，你慢慢说。"
+    # 情绪退回关键词兜底（这里命中「失眠/压力」）
+    assert out["emotion"].source == "fallback"
+    assert any("强制结构化情绪输出失败" in w for w in out["warnings"])
+
+
+def test_empty_reply_is_explained_in_warnings() -> None:
+    """模型确实没产出正文 → warnings 必须说明原因，而不是静默空串。"""
+
+    class _EmptyProvider(MockLLMProvider):
+        def chat_with_tool_loop(self, messages, tools, executor, **kwargs):
+            return AgentResult(reply="", tool_calls=[], rounds=1)
+
+        def chat(self, messages, **kwargs):
+            return ""
+
+        def take_generation_note(self) -> str:
+            return "回复为空：max_tokens=350，已被长度上限截断（finish_reason=length）。"
+
+    nodes = _nodes_with(_EmptyProvider())
+
+    out = nodes.generate_reply(_state(messages=[{"role": "user", "content": "你好"}]))
+
+    assert out["reply"] == ""
+    assert any("长度上限截断" in w for w in out["warnings"])
+
+
+def test_empty_reply_is_retried_with_wider_budget() -> None:
+    """空回复 + 已知原因（推理模型吃光额度）→ 自动放大额度重试一次。
+
+    回归背景（实测）：新进程首次请求时 provider 还没观测到 reasoning_content，
+    max_tokens 仍是 350 → 首轮恒为空。不重试的话用户的第一句话永远是空白。
+    """
+    budgets: list[int | None] = []
+
+    class _ReasoningFirstProvider(MockLLMProvider):
+        """工具循环给空文本；第一次 chat 空、第二次（放大额度后）成功。"""
+
+        model = "deepseek-flash"
+
+        def chat_with_tool_loop(self, messages, tools, executor, **kwargs):
+            return AgentResult(reply="", tool_calls=[], rounds=1)
+
+        def chat(self, messages, **kwargs):
+            budgets.append(kwargs.get("max_tokens"))
+            return "" if len(budgets) == 1 else "我在听，你慢慢说。"
+
+        def take_generation_note(self) -> str:
+            return "" if len(budgets) > 1 else "回复为空：max_tokens=350，已被长度上限截断。"
+
+    nodes = _nodes_with(_ReasoningFirstProvider())
+
+    out = nodes.generate_reply(_state(messages=[{"role": "user", "content": "你好"}]))
+
+    assert out["reply"] == "我在听，你慢慢说。"
+    assert len(budgets) == 2
+    assert budgets[1] >= REASONING_MIN_TOKENS
+    # 重试成功后不再报「空回复」告警
+    assert not any("长度上限截断" in w for w in out["warnings"])
+
+
+def test_reasoning_model_gets_max_token_headroom() -> None:
+    """推理模型：采样解析要抬高 max_tokens（否则思考吃光额度、正文为空）。
+
+    回归背景（实测）：内置档把 max_tokens 压到 400「防长篇大论」，
+    对推理模型等于「只准思考、不准说话」—— deepseek-flash 在 350 时正文恒为空。
+    """
+
+    class _ReasoningProvider(MockLLMProvider):
+        model = "deepseek-reasoner"
+
+    nodes = _nodes_with(_ReasoningProvider())
+
+    out = nodes.assemble_prompt(_state(persona_text="（测试语料）人设正文", user_input="你好"))
+
+    assert out["sampling"].max_tokens >= REASONING_MIN_TOKENS
+
+
+def test_observed_reasoning_also_gets_headroom() -> None:
+    """模型名不带标记（如 deepseek-flash）但观测到思考 → 同样抬高额度。"""
+
+    class _FlashProvider(MockLLMProvider):
+        model = "deepseek-flash"
+        saw_reasoning = True
+
+    nodes = _nodes_with(_FlashProvider())
+
+    out = nodes.assemble_prompt(_state(persona_text="（测试语料）人设正文", user_input="你好"))
+
+    assert out["sampling"].max_tokens >= REASONING_MIN_TOKENS
+
+
+def test_ordinary_model_keeps_profile_max_tokens() -> None:
+    """普通模型不得被抬高额度（长度上限是「防长篇大论」的正常取舍）。"""
+
+    class _PlainProvider(MockLLMProvider):
+        model = "qwen2.5-7b-instruct"
+        saw_reasoning = False
+
+    nodes = _nodes_with(_PlainProvider())
+
+    out = nodes.assemble_prompt(_state(persona_text="（测试语料）人设正文", user_input="你好"))
+
+    assert out["sampling"].max_tokens < REASONING_MIN_TOKENS

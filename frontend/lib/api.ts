@@ -1,6 +1,9 @@
 /** 后端接口封装（与 backend/app/api/*.py 一一对应）。 */
 
 import type {
+  AvatarModelInfo,
+  AvatarModelKind,
+  AvatarTimeline,
   ChatResponse,
   HealthStatus,
   KnowledgeDeleteResult,
@@ -16,14 +19,40 @@ import type {
   SessionHistory,
   SessionSummary,
   SpeakCommand,
+  StAdaptResult,
   StPresetCatalog,
   StPresetDetail,
   StPresetPatch,
   StPresetResponse,
+  StudioCatalog,
+  StudioEntryInput,
+  StudioEntryTestInput,
+  StudioEntryTestResult,
+  StudioEntryWriteResult,
+  StudioPersona,
+  StudioPersonaDeleteResult,
+  StudioPersonaInput,
+  StudioPersonaWriteResult,
+  StudioWorldBookEntry,
   StyleCatalog,
+  TtsVoicesStatus,
 } from "./types";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+
+/**
+ * 把后端返回的**相对**媒体地址补全为可直接加载的地址。
+ *
+ * 后端返回的是 `/media/audio/xxx.wav` 这类相对路径（它不知道自己对外暴露的
+ * 域名与端口）；直接交给 `new Audio()` / `<img src>` 会按**前端**源解析，
+ * 于是请求打到 localhost:3000 而 404——前后端不同源时必须补全。
+ */
+export function resolveMediaUrl(path: string): string {
+  const value = (path ?? "").trim();
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${API_BASE}${value.startsWith("/") ? "" : "/"}${value}`;
+}
 
 /**
  * 带 HTTP 状态码的接口错误。
@@ -360,6 +389,149 @@ export async function postSpeak(
 }
 
 // =============================================================
+// 口型 / 表情 / 动作时间轴（POST /media/avatar）
+// =============================================================
+
+export interface AvatarTimelineRequest {
+  text: string;
+  /** 情绪标签（英文，如 anxious） */
+  emotion?: string | null;
+  /** 情绪强度 0-1 */
+  intensity?: number;
+  voice?: string | null;
+}
+
+/**
+ * 取渲染无关的驱动时间轴（口型 / 表情 / 动作 + 可选音频）。
+ *
+ * 失败一律返回 `null`：口型只是锦上添花，**绝不能让播报链路因为时间轴拿不到而失败**
+ * （调用方拿到 null 就是“嘴不动”，其余一切照常）。
+ */
+export async function postAvatar(
+  body: AvatarTimelineRequest,
+  options: { signal?: AbortSignal } = {},
+): Promise<AvatarTimeline | null> {
+  try {
+    const res = await fetch(`${API_BASE}/media/avatar`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: body.text,
+        emotion: body.emotion ?? null,
+        intensity: body.intensity ?? 0.5,
+        voice: body.voice ?? null,
+      }),
+      signal: options.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as AvatarTimeline;
+  } catch {
+    // 含 AbortError（切换播报段时主动取消）——同样静默
+    return null;
+  }
+}
+
+// =============================================================
+// 语音引擎与音色（GET /media/tts/voices）
+// =============================================================
+
+/**
+ * 查询当前语音引擎与可选音色。
+ *
+ * 失败/异常一律返回 `null`：这只是「用不用服务端声音」的探测，
+ * 拿不到就按浏览器原生 TTS 走，**不该阻断页面加载**（与 postAvatar 同样的处理）。
+ */
+export async function fetchTtsVoices(
+  options: { signal?: AbortSignal } = {},
+): Promise<TtsVoicesStatus | null> {
+  try {
+    const res = await fetch(`${API_BASE}/media/tts/voices`, {
+      cache: "no-store",
+      signal: options.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as TtsVoicesStatus;
+  } catch {
+    return null;
+  }
+}
+
+// =============================================================
+// 数字人模型库（/media/avatar/models/*）
+// =============================================================
+
+/** 模型清单（后端不可用时返回空数组：界面退回到“只用内置模型”） */
+export async function listAvatarModels(): Promise<AvatarModelInfo[]> {
+  try {
+    const res = await fetch(`${API_BASE}/media/avatar/models`, { cache: "no-store" });
+    if (!res.ok) return [];
+    const data = (await res.json()) as { models?: AvatarModelInfo[] };
+    return data.models ?? [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 上传模型。
+ *
+ * `live2d` 传单个 zip（或整个模型目录打包）；`images` 传若干张图片。
+ * 失败时**抛出**带后端 detail 的错误：上传是用户主动发起的操作，
+ * 原因（格式不对 / 包里没 model3.json / 路径越界）必须让用户看到。
+ */
+export async function uploadAvatarModel(input: {
+  kind: AvatarModelKind;
+  name: string;
+  files: File[];
+}): Promise<AvatarModelInfo> {
+  const form = new FormData();
+  form.append("kind", input.kind);
+  form.append("name", input.name);
+  for (const file of input.files) form.append("files", file);
+
+  const res = await fetch(`${API_BASE}/media/avatar/models`, { method: "POST", body: form });
+  if (!res.ok) await throwApiError(res, "上传模型");
+  return (await res.json()) as AvatarModelInfo;
+}
+
+/** 更新模型（改名 / 指定情绪映射） */
+export async function updateAvatarModel(
+  modelId: string,
+  patch: { name?: string; expressionMap?: Record<string, string> },
+): Promise<AvatarModelInfo> {
+  const res = await fetch(`${API_BASE}/media/avatar/models/${encodeURIComponent(modelId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) await throwApiError(res, "更新模型");
+  return (await res.json()) as AvatarModelInfo;
+}
+
+/** 删除模型（连同其全部文件） */
+export async function deleteAvatarModel(modelId: string): Promise<void> {
+  const res = await fetch(`${API_BASE}/media/avatar/models/${encodeURIComponent(modelId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwApiError(res, "删除模型");
+}
+
+/**
+ * 模型内文件的 URL（给渲染器用）。
+ *
+ * 逐段编码：模型里带中文名（`开心兴奋.exp3.json`）与子目录，
+ * 直接拼接会把中文/斜杠/空格弄坏，导致表情文件全部 404。
+ */
+export function avatarModelFileUrl(modelId: string, filePath: string): string {
+  const encoded = filePath
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  return `${API_BASE}/media/avatar/models/${encodeURIComponent(modelId)}/files/${encoded}`;
+}
+
+// =============================================================
 // SillyTavern 预设（导入 / 编辑 / 导出，契约见 docs/st-preset-compat.md）
 // =============================================================
 
@@ -445,6 +617,32 @@ export async function patchStPreset(
   if (!res.ok) await throwApiError(res, "保存预设修改");
   const data = (await res.json()) as { detail: StPresetDetail };
   return data.detail;
+}
+
+/**
+ * AI 适配：把导入的酒馆预设改造成本项目的陪伴对话形态。
+ *
+ * 默认 `dryRun=true` —— 只返回建议（问题清单 + 覆盖层补丁 + 前后对照），
+ * 用户确认后再传 `dryRun=false` 落盘到覆盖层。原始导入文件始终只读。
+ */
+export async function adaptStPreset(
+  presetId: string,
+  options: { dryRun?: boolean; useModel?: boolean; signal?: AbortSignal } = {},
+): Promise<StAdaptResult> {
+  const res = await fetch(
+    `${API_BASE}/chat/st-presets/${encodeURIComponent(presetId)}/ai-adapt`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dry_run: options.dryRun ?? true,
+        use_model: options.useModel ?? true,
+      }),
+      signal: options.signal,
+    },
+  );
+  if (!res.ok) await throwApiError(res, "AI 适配预设");
+  return (await res.json()) as StAdaptResult;
 }
 
 /** 清空覆盖层，回到导入时的状态。 */
@@ -559,3 +757,174 @@ export async function testLlmConfig(input: LlmConfigInput): Promise<LlmTestResul
 }
 
 export { API_BASE };
+
+// =============================================================
+// 创作工坊（/chat/studio/*，backend/app/api/studio.py）
+// =============================================================
+
+/**
+ * 工坊写接口的公共封装。
+ *
+ * 失败一律抛 `ApiError`（带上后端 detail 原文）——工坊的报错都是「用户能自己改」
+ * 的那类（名字为空、正则写坏、内置只读），把原文显示出来比笼统的「保存失败」有用得多。
+ */
+async function studioJson<T>(
+  path: string,
+  method: "POST" | "PUT" | "PATCH" | "DELETE",
+  body: unknown,
+  action: string,
+): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!res.ok) await throwApiError(res, action);
+  return (await res.json()) as T;
+}
+
+/** 工坊的一次性加载：角色清单 + 世界书条目 + 写作提示（变量名 / 字段上限）。 */
+export async function getStudioCatalog(
+  options: { signal?: AbortSignal } = {},
+): Promise<StudioCatalog> {
+  const res = await fetch(`${API_BASE}/chat/studio/catalog`, {
+    cache: "no-store",
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "读取创作工坊");
+  return (await res.json()) as StudioCatalog;
+}
+
+/** 角色详情（含人设正文；内置角色也会返回，由界面置为只读）。 */
+export async function getStudioPersona(personaId: string): Promise<StudioPersona> {
+  const res = await fetch(
+    `${API_BASE}/chat/studio/personas/${encodeURIComponent(personaId)}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) await throwApiError(res, "读取角色");
+  return ((await res.json()) as { persona: StudioPersona }).persona;
+}
+
+/** 新建角色卡（id 由后端生成，创建后不可改——它是记忆隔离命名空间）。 */
+export async function createStudioPersona(
+  input: StudioPersonaInput,
+): Promise<StudioPersonaWriteResult> {
+  return studioJson<StudioPersonaWriteResult>(
+    "/chat/studio/personas",
+    "POST",
+    input,
+    "新建角色",
+  );
+}
+
+/** 更新角色卡（未提交的字段不会被修改）。 */
+export async function updateStudioPersona(
+  personaId: string,
+  input: Partial<StudioPersonaInput>,
+): Promise<StudioPersonaWriteResult> {
+  return studioJson<StudioPersonaWriteResult>(
+    `/chat/studio/personas/${encodeURIComponent(personaId)}`,
+    "PUT",
+    input,
+    "保存角色",
+  );
+}
+
+/**
+ * 删除角色卡。
+ *
+ * **只删角色卡**：该角色的会话与记忆都会保留，响应里的 `sessions` / `bound_entries`
+ * 是给界面做删除前提示用的影响面信息。
+ */
+export async function deleteStudioPersona(
+  personaId: string,
+): Promise<StudioPersonaDeleteResult> {
+  return studioJson<StudioPersonaDeleteResult>(
+    `/chat/studio/personas/${encodeURIComponent(personaId)}`,
+    "DELETE",
+    undefined,
+    "删除角色",
+  );
+}
+
+/** 复制角色（内置角色借此得到一份可编辑的副本）。 */
+export async function duplicateStudioPersona(
+  personaId: string,
+  name?: string,
+): Promise<StudioPersonaWriteResult> {
+  return studioJson<StudioPersonaWriteResult>(
+    `/chat/studio/personas/${encodeURIComponent(personaId)}/duplicate`,
+    "POST",
+    name ? { name } : {},
+    "复制角色",
+  );
+}
+
+/** 新建世界书条目。 */
+export async function createStudioEntry(
+  input: StudioEntryInput,
+): Promise<StudioEntryWriteResult> {
+  return studioJson<StudioEntryWriteResult>(
+    "/chat/studio/worldbook",
+    "POST",
+    input,
+    "新建条目",
+  );
+}
+
+/** 更新世界书条目（未提交的字段不会被修改）。 */
+export async function updateStudioEntry(
+  entryId: string,
+  input: Partial<StudioEntryInput>,
+): Promise<StudioEntryWriteResult> {
+  return studioJson<StudioEntryWriteResult>(
+    `/chat/studio/worldbook/${encodeURIComponent(entryId)}`,
+    "PUT",
+    input,
+    "保存条目",
+  );
+}
+
+/** 删除世界书条目（内置条目会返回 403）。 */
+export async function deleteStudioEntry(entryId: string): Promise<StudioEntryWriteResult> {
+  return studioJson<StudioEntryWriteResult>(
+    `/chat/studio/worldbook/${encodeURIComponent(entryId)}`,
+    "DELETE",
+    undefined,
+    "删除条目",
+  );
+}
+
+/**
+ * 启用 / 停用条目。
+ *
+ * 内置条目的开关只写**用户侧的停用偏好**（后端不修改内置 YAML）。
+ */
+export async function setStudioEntryEnabled(
+  entryId: string,
+  enabled: boolean,
+): Promise<StudioEntryWriteResult> {
+  return studioJson<StudioEntryWriteResult>(
+    `/chat/studio/worldbook/${encodeURIComponent(entryId)}/enabled`,
+    "PATCH",
+    { enabled },
+    enabled ? "启用条目" : "停用条目",
+  );
+}
+
+/**
+ * 「试触发」：用**草稿**（不落盘）判断一段样例文本是否命中。
+ *
+ * 草稿字段与保存时的校验规则完全一致（后端共用同一套清洗/校验），
+ * 因此不会出现「试的时候命中、存下来却不命中」。
+ */
+export async function testStudioEntry(
+  input: StudioEntryTestInput,
+): Promise<StudioEntryTestResult> {
+  return studioJson<StudioEntryTestResult>(
+    "/chat/studio/worldbook/test",
+    "POST",
+    input,
+    "试触发",
+  );
+}

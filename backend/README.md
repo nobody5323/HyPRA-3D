@@ -5,20 +5,27 @@
 ## 目录
 
     app/
-      api/           # FastAPI 路由（chat 已落地，memory/media 按需新增）
+      api/           # FastAPI 路由：chat / st_presets / studio / llm / media / knowledge
       session/       # 会话：上下文 + 内存存储（热层滚动窗口载体）
       prompts/       # 分层 System Prompt：人设预设 / 状态变量 / 世界书注入编排 / 渲染管道
-      worldbook/     # 世界书：条目模型 / YAML 加载 / 关键词+正则触发匹配
+      worldbook/     # 世界书：条目模型 / YAML 加载 / 关键词+正则+语义触发匹配
+      studio/        # 创作工坊：用户自建角色卡 / 世界书条目的本地存储与写入校验
+                     #   （内置只读，用户内容落 data/studio，与内置模型同构）
       memory/
         cold/        # 冷层：SQLite 结构化事实表 + 滚动增量摘要
         warm/        # 温层：WarmMemoryStore 接口 + 时间衰减 + 确定性 embedding + 内存实现
       llm/           # LLM 抽象：接口 / mock / 工厂 / 模型预设档（profiles.yaml）
+      tts/           # TTS 客户端：GPT-SoVITS（api_v2 /tts）+ 音频时长解析 + 音色表加载
+      digital_human/ # 数字人驱动：文本+情绪 → 音频 + 口型/表情/动作时间轴
+                     #   （local 零依赖 | xmov 魔珐自带 TTS | gpt_sovits 外部 TTS）
       tools/         # function calling 工具（内置：情绪日记/趋势/呼吸/记忆检索）
       mcp/           # MCP Client：把外部 MCP server 的工具接入 Agent 行动层
       config.py      # 配置（backend/.env 读取，双模式：本地 Docker 优先，云可切）
       main.py        # 应用工厂 + /health + 路由注册
-    tests/           # pytest（91 项，全离线无外部依赖）
-    data/            # 本地 SQLite 数据库（gitignore，不入库）
+    tests/           # pytest（全离线无外部依赖）
+    data/            # 本地数据（gitignore，不入库）
+      studio/        #   创作工坊：用户自建角色卡 / 世界书条目（+ 内置条目的停用偏好）
+      presets/       #   导入的酒馆预设（只解析与渲染，不发不存密钥类字段）
 
 > 开发/评审双模式与一键部署见根目录 [docs/deployment.md](../docs/deployment.md)。
 

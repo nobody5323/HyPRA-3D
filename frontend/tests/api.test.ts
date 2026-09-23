@@ -11,7 +11,16 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { ApiError, deleteSession, getSessionHistory, getSessions, postChat, uploadKnowledge } from "@/lib/api";
+import {
+  ApiError,
+  deleteSession,
+  fetchTtsVoices,
+  getSessionHistory,
+  getSessions,
+  postChat,
+  resolveMediaUrl,
+  uploadKnowledge,
+} from "@/lib/api";
 
 /** 构造一个最小的 fetch 响应替身（只提供 api.ts 实际用到的成员）。 */
 function jsonResponse(body: unknown, status = 200): Response {
@@ -157,5 +166,57 @@ describe("uploadKnowledge：判重（409）", () => {
     const form = init.body as FormData;
     expect(form.get("text")).toBe("一段文本");
     expect(form.get("force")).toBe("true");
+  });
+});
+
+describe("resolveMediaUrl：相对媒体地址补全", () => {
+  it("后端返回的相对路径补上前端配置的后端地址（否则会打到前端 3000 而 404）", () => {
+    expect(resolveMediaUrl("/media/audio/tts_abc.wav")).toBe(
+      "http://localhost:8000/media/audio/tts_abc.wav",
+    );
+  });
+
+  it("缺少前导斜杠也能补对", () => {
+    expect(resolveMediaUrl("media/audio/x.wav")).toBe("http://localhost:8000/media/audio/x.wav");
+  });
+
+  it("已是绝对地址时原样返回（不重复拼前缀）", () => {
+    const absolute = "https://cdn.example.com/a.wav";
+    expect(resolveMediaUrl(absolute)).toBe(absolute);
+  });
+
+  it("空值返回空串（调用方据此跳过播放）", () => {
+    expect(resolveMediaUrl("")).toBe("");
+  });
+});
+
+describe("fetchTtsVoices：语音引擎探测", () => {
+  it("正常返回引擎状态与音色清单", async () => {
+    const body = {
+      provider: "gpt_sovits",
+      server_tts: true,
+      configured: true,
+      default_voice: "gentle",
+      voices: [{ id: "gentle", label: "温柔", is_default: true }],
+      note: "",
+    };
+    stubFetch(jsonResponse(body));
+
+    await expect(fetchTtsVoices()).resolves.toEqual(body);
+  });
+
+  it("后端报错时返回 null 而不是抛错（探测失败不该阻断页面）", async () => {
+    stubFetch(jsonResponse({ detail: "boom" }, 500));
+    await expect(fetchTtsVoices()).resolves.toBeNull();
+  });
+
+  it("网络异常同样返回 null", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    await expect(fetchTtsVoices()).resolves.toBeNull();
   });
 });

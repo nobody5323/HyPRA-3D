@@ -47,3 +47,20 @@ Thumbs.db
 
 # ===== 里程碑总结留档（本地开发过程记录，不入库）=====
 summaries/
+
+# ---- Live2D / Cubism SDK 与模型（自备资源，不入库）----
+# Cubism SDK for Web（Core + Framework + Shaders）由 scripts/setup-cubism.mjs 落位
+frontend/vendor/cubism/
+frontend/public/vendor/cubism/
+# 模型资源：只有能自由分发的才可放开例外
+frontend/public/live2d/
+*.moc3
+*.model3.json
+*.physics3.json
+*.pose3.json
+*.cdi3.json
+*.exp3.json
+*.motion3.json
+
+# 自备资源压缩包（Live2D SDK / 模型包等一律不入库）
+*.zip

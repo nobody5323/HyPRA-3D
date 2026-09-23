@@ -27,6 +27,8 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
           persona/      #   人设预设（借鉴 SillyTavern 预设：预设与代码分离）
           state_vars/   #   动态状态变量定义（如 {{current_mood}}）
         worldbook/      # 世界书条目：JSON/YAML + 关键词/正则/向量触发规则
+        studio/         # 用户创作：自建角色卡 / 背景故事 / 世界书条目的存储与编辑（内置只读，
+                        #   数据落 backend/data/studio，设计见 docs/user-content-studio.md）
         memory/
           hot/          # 工作记忆：上下文滚动窗口（最近 N 轮）
           warm/         # 情景记忆：WarmMemoryStore 接口 + Qdrant/内存实现

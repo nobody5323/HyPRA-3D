@@ -92,6 +92,19 @@ class Settings(BaseSettings):
     # 内容属于**用户本地数据**：不进仓库、不随发行物分发。
     st_presets_dir: str = "data/presets"
 
+    # ---- 创作工坊（用户自建角色卡 / 世界书条目）----
+    # 用户自撰内容落 backend/data/studio（backend/data/ 已被 .gitignore 覆盖）。
+    # 属**用户本地数据**：不进仓库、不随发行物分发。
+    studio_dir: str = "data/studio"
+
+    # 上传的数字人模型库（Live2D 模型包 / 静态立绘）。
+    #
+    # 同样落 backend/data/（已被 .gitignore 覆盖）。刻意**不**写到
+    # frontend/public/：上传是运行期行为，而 public 属于构建产物（docker 镜像里只读），
+    # 且那样会让后端依赖前端目录结构。前端一律通过
+    # GET /media/avatar/models/{id}/files/{path} 取文件。
+    avatar_models_dir: str = "data/avatar_models"
+
     # ---- 文风预设（M5 风格系统）----
     # 与人设正交：人设管「是谁」，文风管「怎么说话」
     style_preset: str = "modern-conversational"
@@ -156,13 +169,41 @@ class Settings(BaseSettings):
     mcp_call_timeout: float = 30.0     # 单次 MCP 工具调用超时（秒）
 
     # ---- 数字人驱动（M5）----
-    digital_human_provider: str = "local"   # local（零依赖降级）| xmov（魔珐星云）
+    digital_human_provider: str = "local"   # local（零依赖降级）| xmov（魔珐星云）| gpt_sovits（自部署 TTS）
     xmov_app_id: str = ""                    # 魔珐控制台「密钥管理」获取
     xmov_secret: str = ""
     xmov_voice: str = "XMOV_LV_TTS__13"      # 基础音色；Pro 音色另计费
     xmov_host: str = "nebula-agent.xingyun3d.com"
     media_dir: str = "media"                 # 音频/视频产物目录（gitignore）
     avatar_enabled: bool = True              # 是否在 chat 后附带数字人驱动数据
+
+    # ---- GPT-SoVITS（自部署 TTS：给 Live2D / 静态立绘出真声音）----
+    #
+    # 开关就是上面的 digital_human_provider=gpt_sovits：**不再设第二个 TTS 开关**，
+    # 否则两个配置项会互相打架（谁生效？）。
+    # 服务未部署时无需改动配置：驱动自动降级为无音频，前端回落浏览器原生 TTS。
+    gpt_sovits_base_url: str = "http://127.0.0.1:9880"
+    # 参考音频路径：GPT-SoVITS 零样本克隆里「音色」= 参考音频 + 它对应的文字。
+    # 填**跑 GPT-SoVITS 那台机器**上可见的路径（不是本机相对路径）。
+    gpt_sovits_ref_audio: str = ""
+    gpt_sovits_prompt_text: str = ""
+    gpt_sovits_prompt_lang: str = "zh"
+    gpt_sovits_text_lang: str = "zh"
+    gpt_sovits_speed: float = 1.0
+    # 输出容器：wav（推荐，浏览器 <audio> 可直接播放）| ogg | aac | raw
+    # raw 是裸 PCM，放不了，别选。
+    gpt_sovits_media_type: str = "wav"
+    gpt_sovits_timeout: float = 60.0
+    # 额外请求参数（一行 JSON，原样透传给 GPT-SoVITS 的 /tts，用于按需调优）。
+    # 实测可用的例子：{"parallel_infer": false}（略快）。留空 = 全用服务端默认值。
+    # ⚠️ 核心字段（text / ref_audio_path / media_type 等）不允许被覆盖，会被忽略并记 warning。
+    gpt_sovits_extra_params: str = ""
+    # 启动时后台预热一次（让模型/显存预热，首个请求不偏慢）；失败只记日志
+    gpt_sovits_warmup: bool = True
+    # 音色表（JSON：{音色id: {ref_audio_path, prompt_text, prompt_lang, label}}）；
+    # 文件不存在 = 只用默认音色。属**用户本地数据**（backend/data/ 已被 gitignore）。
+    gpt_sovits_voices_file: str = "data/tts_voices.json"
+    gpt_sovits_default_voice: str = ""      # 空 = 用 gpt_sovits_ref_audio 作默认音色
 
 
 def get_settings() -> Settings:

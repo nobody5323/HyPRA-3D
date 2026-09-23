@@ -121,6 +121,124 @@ export interface ChatMessage {
   text: string;
 }
 
+/**
+ * 一帧口型（`POST /media/avatar` 的 `visemes` 项）。
+ *
+ * `viseme` 取值（后端 `Viseme` 枚举，共 10 种）：
+ * `sil` 静默 / `A` 大张口 / `I` 扁口 / `U` 圆口 / `E` 中开 / `O` 圆唇 /
+ * `M` 闭唇 / `F` 唇齿 / `N` 舌尖 / `S` 齿音。
+ */
+export interface VisemeFrame {
+  start_ms: number;
+  end_ms: number;
+  viseme: string;
+  char: string;
+}
+
+/** 表情时间轴帧（后端 face） */
+export interface FaceFrame {
+  start_ms: number;
+  end_ms: number;
+  expression: string;
+  intensity: number;
+}
+
+/** 动作时间轴帧（后端 body） */
+export interface BodyFrame {
+  start_ms: number;
+  end_ms: number;
+  gesture: string;
+  intensity: number;
+}
+
+/**
+ * 数字人驱动数据（`POST /media/avatar`）。
+ *
+ * 这是**渲染无关**的时间轴：口型 / 表情 / 动作 + 可选音频，
+ * 既可以驱动魔珐 SDK，也可以驱动 Live2D（本项目就是这么用的）。
+ */
+export interface AvatarTimeline {
+  text: string;
+  provider: string;
+  duration_ms: number;
+  has_audio: boolean;
+  audio_url: string | null;
+  audio_format: string;
+  visemes: VisemeFrame[];
+  face: FaceFrame[];
+  body: BodyFrame[];
+  meta: Record<string, unknown>;
+}
+
+// =============================================================
+// 语音引擎与音色（GET /media/tts/voices）
+// =============================================================
+
+/**
+ * 一个可选音色（GPT-SoVITS 音色表里的一项）。
+ *
+ * 不含参考音频路径：那是**服务端**的文件路径，后端刻意不下发。
+ */
+export interface TtsVoiceInfo {
+  id: string;
+  label: string;
+  /** 是否为未指定 voice 时的默认音色 */
+  is_default: boolean;
+}
+
+/** 当前语音引擎状态（前端据此决定用服务端音频还是浏览器原生 TTS）。 */
+export interface TtsVoicesStatus {
+  /** 当前数字人驱动：local | xmov | gpt_sovits */
+  provider: string;
+  /** 该驱动是否产出服务端音频（false = 应回落浏览器 TTS） */
+  server_tts: boolean;
+  /** 服务端 TTS 是否已配好（false = 会降级为无音频） */
+  configured: boolean;
+  /** 默认音色 id（空 = 后端配置里的默认参考音频） */
+  default_voice: string;
+  voices: TtsVoiceInfo[];
+  /**
+   * 后端是否配了「情绪 → 音色」自动映射。
+   *
+   * 为 true 时「不指定音色」的含义是「按本轮情绪选声音」，
+   * 前端据此把选项文案说清楚（否则用户会以为永远是同一个音色）。
+   */
+  emotion_voices: boolean;
+  /** 状态说明 / 不可用原因（可直接展示给用户） */
+  note: string;
+}
+
+// =============================================================
+// 数字人模型库（/media/avatar/models/*）
+// =============================================================
+
+/** 模型类型：Live2D 模型包 | 静态立绘 */
+export type AvatarModelKind = "live2d" | "images";
+
+/** 模型库里的一个模型（后端返回的元数据） */
+export interface AvatarModelInfo {
+  id: string;
+  name: string;
+  kind: AvatarModelKind;
+  createdAt: string;
+  updatedAt: string;
+  /**
+   * live2d 专用：入口 `model3.json` **相对 files/ 目录**的路径。
+   *
+   * 取文件统一用 `/media/avatar/models/{id}/files/{entry}`；
+   * 之所以也允许子目录（如 `CubismModel/pet.model3.json`），
+   * 是因为模型包经常多套一层文件夹。
+   */
+  entry: string | null;
+  /** live2d 专用：模型自带的表情名清单（供配置情绪→表情） */
+  expressions: string[];
+  /** images 专用：图片文件名清单（按上传顺序） */
+  images: string[];
+  /** images 专用：情绪 id → 图片文件名（由用户在前端逐个指定） */
+  expressionMap: Record<string, string>;
+  meta: Record<string, unknown>;
+}
+
 /** 具身状态机（赛题：Listen / Think / Speak / Interrupt） */
 export type AvatarState = "idle" | "listen" | "think" | "speak";
 
@@ -221,6 +339,8 @@ export interface PersonaInfo {
   title: string;
   description: string;
   tags: string[];
+  /** true = 内置角色（用户自建角色为 false）；后端 /chat/personas 提供 */
+  builtin?: boolean;
 }
 
 /** GET /chat/personas 响应 */
@@ -367,6 +487,8 @@ export interface StPresetDetail {
     use_sysprompt: boolean;
     squash_system_messages: boolean;
     names_behavior: number;
+    /** 推理模式（对应酒馆的 show_thoughts）；null = 预设未提供，跟随内置档 */
+    show_thoughts: boolean | null;
   };
   order: StPresetOrderEntry[];
   prompts: StPromptItem[];
@@ -398,6 +520,74 @@ export interface StPresetPatch {
   assembly?: Record<string, unknown>;
   /** use_sysprompt 开启时的覆盖文本（空串 = 清空） */
   system_prompt_override?: string;
+}
+
+// =============================================================
+// AI 适配（POST /chat/st-presets/{id}/ai-adapt）
+// 导入酒馆预设后，一键改造成本项目的陪伴对话形态
+// =============================================================
+
+/** 处置动作（与后端 rules.yaml 的 action 对应） */
+export type StAdaptAction = "auto_patch" | "llm_rewrite" | "preserve" | "review";
+
+/** 严重度（界面排序与配色用） */
+export type StAdaptSeverity = "high" | "medium" | "low";
+
+/** 一条体检发现 */
+export interface StAdaptFinding {
+  rule_id: string;
+  severity: StAdaptSeverity;
+  action: StAdaptAction;
+  /** preset = 预设级字段；content = 条目正文 */
+  scope: "preset" | "content";
+  identifier: string;
+  name: string;
+  /** 命中的原文片段（已截断） */
+  evidence: string;
+  message: string;
+  /** preserve 类：建议归拢到的槽位 */
+  anchor: string;
+}
+
+/** 一条条目改写的处置结果 */
+export interface StAdaptRewrite {
+  identifier: string;
+  name: string;
+  status: "applied" | "rejected" | "missing" | "skipped";
+  /** 拒绝原因，或采纳时的提示（如「改动幅度较大」） */
+  reason: string;
+  new_content: string;
+}
+
+/** 一条前后对照（供界面直接渲染） */
+export interface StAdaptDiffEntry {
+  scope: "preset" | "item" | "order";
+  identifier: string;
+  name: string;
+  field: string;
+  field_label: string;
+  before: unknown;
+  after: unknown;
+  /** 仅 scope=order：位置发生变化的条目 */
+  moved?: { identifier: string; name: string; from_index: number; to_index: number }[];
+}
+
+/** AI 适配结果 */
+export interface StAdaptResult {
+  preset_id: string;
+  dry_run: boolean;
+  applied: boolean;
+  model_used: boolean;
+  summary: Record<StAdaptSeverity, number>;
+  findings: StAdaptFinding[];
+  /** 内容保留、只调位置的条目（NSFW / 破限类） */
+  preserved: StAdaptFinding[];
+  rewrites: StAdaptRewrite[];
+  diff: StAdaptDiffEntry[];
+  patch: StPresetPatch;
+  warnings: string[];
+  /** 仅在 applied=true 时返回，供界面刷新编辑器 */
+  detail?: StPresetDetail;
 }
 
 // =============================================================
@@ -454,4 +644,158 @@ export interface LlmConfigInput {
   enable_thinking?: boolean | null;
   /** 是否写入本地运行时配置（重启后保留） */
   persist?: boolean;
+}
+
+// =============================================================
+// 创作工坊：用户自建角色卡 / 世界书条目（backend/app/api/studio.py）
+// =============================================================
+
+/** 角色清单项（**不含**人设正文——正文要调详情接口） */
+export interface StudioPersonaSummary {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  tags: string[];
+  /** true = 内置角色（只读，可「复制为我的角色」） */
+  builtin: boolean;
+}
+
+/** 角色卡详情（含正文，用于编辑） */
+export interface StudioPersona extends StudioPersonaSummary {
+  /** 人设正文（支持 {{user_name}} 等状态变量宏） */
+  prompt: string;
+  /** 背景故事（常驻注入，排在人设正文之后、世界书之前） */
+  background: string;
+  /** 声明用到的状态变量名（写作提示，仅展示） */
+  variables: string[];
+  creator: string;
+}
+
+/** 世界书条目（内置 + 我的；内置只读） */
+export interface StudioWorldBookEntry {
+  id: string;
+  title: string;
+  /** 归属：`*` = 对所有陪伴对象生效；或一个角色 id = 只对该角色生效 */
+  scope: string;
+  content: string;
+  /** 关键词（任一命中即触发） */
+  keys: string[];
+  /** 正则（任一命中即触发） */
+  regex: string[];
+  /** 语义触发文本（非空即启用向量通道） */
+  vector_text: string;
+  vector_threshold: number;
+  /** 是否参与触发（内置条目的开关是**用户侧**的停用偏好） */
+  enabled: boolean;
+  case_sensitive: boolean;
+  /** 注入优先级（越大越靠前） */
+  priority: number;
+  /** true = 内置条目（只读，可复制或停用） */
+  builtin: boolean;
+}
+
+/** 状态变量写作提示（catalog.state_vars） */
+export interface StudioStateVarHint {
+  name: string;
+  description: string;
+  default: string;
+  example: string;
+}
+
+/** 字段长度上限（后端 LIMITS）：界面用它做即时校验，避免前后端两套数字 */
+export type StudioLimits = Record<string, number>;
+
+/** GET /chat/studio/catalog 响应（工坊的一次性加载） */
+export interface StudioCatalog {
+  personas: StudioPersonaSummary[];
+  entries: StudioWorldBookEntry[];
+  /** 读盘警告（用户手改的坏文件被跳过等），界面应展示给用户 */
+  warnings: string[];
+  limits: StudioLimits;
+  /** 归属通配值（后端 SCOPE_ALL，通常为 "*"） */
+  scope_all: string;
+  state_vars: StudioStateVarHint[];
+}
+
+/** 角色写入响应（带回刷新后的 catalog，界面不必再拉一次） */
+export interface StudioPersonaWriteResult {
+  persona: StudioPersona;
+  catalog: StudioCatalog;
+}
+
+/** 世界书条目写入响应 */
+export interface StudioEntryWriteResult {
+  entry: StudioWorldBookEntry;
+  catalog: StudioCatalog;
+}
+
+/** 删除角色卡的响应（**只删角色卡**，会话与记忆保留） */
+export interface StudioPersonaDeleteResult {
+  deleted: string;
+  name: string;
+  /** 该角色名下还有多少段对话 */
+  sessions: number;
+  /** 有多少世界书条目只对该角色生效 */
+  bound_entries: number;
+  /** 后端给出的「什么被留下了」说明 */
+  kept: string;
+  catalog: StudioCatalog;
+}
+
+/** 新建角色卡的请求体（更新时传它的子集） */
+export interface StudioPersonaInput {
+  name: string;
+  prompt: string;
+  title?: string;
+  description?: string;
+  background?: string;
+  tags?: string[];
+  variables?: string[];
+}
+
+/** 世界书条目的请求体（更新时传它的子集） */
+export interface StudioEntryInput {
+  title: string;
+  content: string;
+  scope?: string;
+  keys?: string[];
+  regex?: string[];
+  vector_text?: string;
+  vector_threshold?: number;
+  case_sensitive?: boolean;
+  priority?: number;
+  enabled?: boolean;
+}
+
+/** 「试触发」请求体：草稿字段 + 一段样例文本（不落盘） */
+export interface StudioEntryTestInput {
+  /** 用来试触发的样例文本（模拟用户会说的话） */
+  text: string;
+  /** 按哪个陪伴对象试：`*` 模拟全局，或填角色 id 模拟该角色的会话 */
+  companion_id?: string;
+  title?: string;
+  content?: string;
+  keys?: string[];
+  regex?: string[];
+  vector_text?: string;
+  vector_threshold?: number;
+  case_sensitive?: boolean;
+}
+
+/** 「试触发」结果：**逐通道**给出结论，用户才知道该怎么改 */
+export interface StudioEntryTestResult {
+  matched: boolean;
+  /** 命中的关键词 */
+  keys_hit: string[];
+  /** 命中的正则模式 */
+  regex_hit: string[];
+  /** 语义相似度（未声明语义文本、或计算失败时为 null） */
+  vector_score: number | null;
+  vector_threshold: number;
+  scope: string;
+  /** 命中时会注入的文本（未命中为空串） */
+  injected_text: string;
+  estimated_tokens: number;
+  warnings: string[];
 }

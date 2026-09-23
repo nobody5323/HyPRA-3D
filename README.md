@@ -37,12 +37,24 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
   **MCP 协议**把外部 MCP server 的工具接入 Agent 行动层（`mcp__<服务器>__<工具>`），
   模型可自主调用外部能力「办事」；文本 + 情绪标签 → **SSML 播报指令**（含 KA 动作）→
   魔珐星云具身驱动 SDK 实时渲染，提供**渲染无关的驱动时间轴**，可降级接入任意 3D/2D 模型。
+- **可插拔语音（TTS）与音画同步**：声音与渲染解耦——魔珐 SDK 走它自带 TTS；
+  Live2D / 静态立绘可接**自部署 GPT-SoVITS**（零样本音色克隆、多音色可切）；
+  两者都不可用时自动回落到**浏览器原生 TTS**。服务端 TTS 路径下，音频与口型时间轴
+  **来自同一次请求**（音画同源），字幕按音频播放进度推进；任一句合成失败只降级那一句，
+  对话不中断。切换入口在前端「数字人设置 → 语音引擎」。
 - **酒馆（SillyTavern）预设兼容**：可直接导入你在酒馆里用的 **Chat Completion 预设 JSON**，按它的
   条目顺序、启用开关、注入深度（含 In-Chat `depth`）、`use_sysprompt` 覆盖、扩展注入槽与
   `{{char}}` / `{{getvar::}}` 等宏组装提示词；前端提供**参数面板 + 条目编辑器**
   （拖拽/↑↓ 排序、逐条开关、展开改正文/depth/role、记忆注入落点、导出回酒馆），
   并显式列出「该预设哪些部分在本项目不生效」而不静默失败。
   契约、组装语义与合规边界见 [`docs/st-preset-compat.md`](docs/st-preset-compat.md)。
+- **用户自定义角色与世界书（创作工坊）**：在界面里创建自己的陪伴角色（角色名 / 一句话定位 /
+  简介 / 标签 / **人设正文** / **背景故事**）与**按条件触发的世界设定**（关键词 / 正则 /
+  语义向量三通道，归属可选「所有角色」或某个专属角色），并带 **「试触发」**——输入一句用户
+  可能会说的话，逐通道显示会不会命中、为什么（命中了哪些关键词 / 哪个正则 / 语义相似度与阈值）；
+  内容写完后**下次对话即生效**（无需重启服务）。内置角色与条目一律只读（要改就「复制为我的」），
+  唯一例外是内置条目的**启用开关**——它写用户侧偏好，内置文件一字未改。
+  数据契约、接口与不变量见 [`docs/user-content-studio.md`](docs/user-content-studio.md)。
 
 ## 🧠 设计参照与文档
 
@@ -51,10 +63,11 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 | [`docs/competition-gap-analysis.md`](docs/competition-gap-analysis.md) | **赛题差距分析**（评审维度对照与行动优先级） |
 | [`docs/why-embodied-avatar.md`](docs/why-embodied-avatar.md) | **不可替代性论证**（为何情感陪伴需要具身数字人） |
 | [`docs/frontend-plan.md`](docs/frontend-plan.md) | 前端方案（Next.js + 魔珐 SDK + 具身状态机） |
-| [`docs/frontend-avatar-integration.md`](docs/frontend-avatar-integration.md) | 前端 SDK 接入指南（含 speak 注意事项与 FAQ） |
+| [`docs/frontend-avatar-integration.md`](docs/frontend-avatar-integration.md) | 前端 SDK 接入指南（含 speak 注意事项、外部 TTS 路径与 FAQ） |
 | [`docs/deployment.md`](docs/deployment.md) | 部署说明（Docker Compose 一键部署 / 开发模式） |
 | [`docs/sillytavern-memory-design-reference.md`](docs/sillytavern-memory-design-reference.md) | 记忆与提示词机制的设计参照调研 |
 | [`docs/st-preset-compat.md`](docs/st-preset-compat.md) | **酒馆预设兼容契约**（字段映射 / 组装语义 / 宏 / 不支持清单 / 合规边界） |
+| [`docs/user-content-studio.md`](docs/user-content-studio.md) | **创作工坊**（用户自定义角色 / 背景故事 / 世界书的数据契约、接口与不变量） |
 | [`AGENTS.md`](AGENTS.md) | 项目开发约定（架构分层、红线、验证要求） |
 
 ## 🚀 快速开始
@@ -77,6 +90,8 @@ npm install
 npm run dev             # 访问 http://localhost:3000
 # 数字人密钥可在页面右上角「数字人设置」里直接填写（即时生效，无需重新构建）；
 # 未填 / 初始化失败 → 自动降级为浏览器原生语音，对话、字幕、情绪均不受影响
+# 想给 Live2D / 静态立绘配「真声音」→ 在 .env 配 DIGITAL_HUMAN_PROVIDER=gpt_sovits
+# （需另起 GPT-SoVITS 服务；未部署时自动降级，无需改任何配置），见 docs/deployment.md
 ```
 
 评审模式（docker compose 一键部署，见 [`docs/deployment.md`](docs/deployment.md)）。
@@ -102,6 +117,10 @@ npm run dev             # 访问 http://localhost:3000
 
 > **本项目借鉴 SillyTavern 架构思想，但底层代码 100% 原创，不受 AGPL-3.0 协议传染。**
 > 项目内测试语料 / 世界书 / RAG 语料仅使用自创或公有领域内容。
+>
+> **关于语音与音色克隆（GPT-SoVITS）**：本项目只提供接入能力，不自带任何音色模型与参考音频。
+> 使用他人的声音做音色克隆可能**侵犯声音权 / 人格权**，请仅使用自己录制的声音、
+> 或已获得明确授权的素材。
 
 **关于「酒馆预设兼容」的合规边界**（详见 [`docs/st-preset-compat.md`](docs/st-preset-compat.md) §1）：
 
@@ -113,6 +132,15 @@ npm run dev             # 访问 http://localhost:3000
 实现上另有两道防护：导入时**剥离且不保存**端点/密钥类字段（避免误存用户凭证）；
 导入的预设文件**只读**，界面编辑写入独立的覆盖层文件（可随时「恢复导入时」）。
 
+**关于「创作工坊（用户自定义角色 / 世界书）」的合规边界**
+（详见 [`docs/user-content-studio.md`](docs/user-content-studio.md) §5）：
+
+| 类别 | 处理 |
+|---|---|
+| **发行内容**（仓库源码 / 内置角色与世界书 / 文档） | 全部自写，无第三方提示词原文 |
+| **用户自撰内容**（角色卡 / 背景故事 / 世界书条目） | 只落本机 `backend/data/studio/`（已 gitignore），**不入库、不随发行物分发** |
+| 用户对内置内容的偏好（如停用某条内置条目） | 写在用户侧的 `disabled_builtin.json`，发行物永不被运行期行为污染 |
+
 ## 📌 路线图
 
 - [x] M1 提示词架构（分层 System Prompt + 世界书三通道触发）
@@ -123,6 +151,7 @@ npm run dev             # 访问 http://localhost:3000
 - [x] M6 前端 + 魔珐 SDK 接入（对话 UI / 流式字幕 / 具身状态机 / 降级与退避重连）
 - [x] M6.5 前端对接全部后端接口（个人记忆上传、人设与文风清单、行动层状态、分段播报）
 - [x] M6.7 酒馆（SillyTavern）预设兼容（导入 / 组装语义 / 宏 / 前端参数面板与条目编辑器）
+- [x] M6.8 用户自定义角色与世界书（创作工坊：角色卡 / 背景故事 / 条目归属 / 试触发）
 - [ ] M7 100+ 轮长对话压测与记忆调优
 - [ ] M8 参赛文档与演示视频
 

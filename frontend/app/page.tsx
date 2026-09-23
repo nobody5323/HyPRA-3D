@@ -13,7 +13,7 @@
  * ——首屏即为正确 provider（不会先渲染一帧降级态），凭证重新保存后标记自动失效。
  */
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AgentBadge } from "@/components/AgentBadge";
 import { AvatarSettings } from "@/components/AvatarSettings";
@@ -27,34 +27,57 @@ import { PersonaSwitcher } from "@/components/PersonaSwitcher";
 import { PresetSwitcher } from "@/components/PresetSwitcher";
 import { SessionList } from "@/components/SessionList";
 import { StPresetPanel } from "@/components/StPresetPanel";
+import { StudioPanel } from "@/components/StudioPanel";
 import { StyleSwitcher } from "@/components/StyleSwitcher";
 import { SubtitleBar } from "@/components/SubtitleBar";
-import { useBrowserAvatar, useXmovAvatar } from "@/hooks/useAvatar";
+import { useBrowserAvatar, useServerTtsAvatar, useXmovAvatar } from "@/hooks/useAvatar";
+import { useTtsPreferences } from "@/hooks/useTtsPreferences";
 import { useAvatarCredentials } from "@/hooks/useAvatarCredentials";
 import { useChatSession } from "@/hooks/useChatSession";
-import { getHealth, getLlmConfig, getPersonas, getPresets, getStyles } from "@/lib/api";
+import {
+  getHealth,
+  getLlmConfig,
+  getPersonas,
+  getPresets,
+  getStyles,
+} from "@/lib/api";
 import type {
   McpServerStatus,
   PersonaCatalog,
   PresetCatalog,
   StyleCatalog,
 } from "@/lib/types";
+import { useAvatarModels } from "@/hooks/useAvatarModels";
+import { useLipSyncTimeline } from "@/hooks/useLipSyncTimeline";
+import { resolveAvatarModelSource } from "@/lib/avatar-model-source";
+import { resolveVoiceSource } from "@/lib/avatar-config";
 
 const CONTAINER_ID = "avatar-container"; // 用于 DOM 元素的 id
 const CONTAINER_SELECTOR = "#avatar-container"; // 传给 SDK 的 CSS 选择器（兜底）
+
+/**
+ * 试听文本：短、且能听出音色差异。
+ *
+ * 用固定一句而不是随机文本：试听是**对比音色**的，文本一变就不好对比了。
+ */
+const VOICE_PREVIEW_TEXT = "你好，我是苏澄。今天想聊点什么？";
 const SETTINGS_PANEL_ID = "avatar-settings-panel";
 const LLM_PANEL_ID = "llm-settings-panel";
+const STUDIO_PANEL_ID = "studio-panel";
 
 /** 键盘焦点样式（浅色主题：鼠尾草绿环） */
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-base";
 
 export default function HomePage() {
-  const { credentials, source, configured, revision, save, clear } = useAvatarCredentials();
+  const { credentials, source, configured, revision, save, clear, renderer, setRenderer } =
+    useAvatarCredentials();
   const [avatarError, setAvatarError] = useState<string | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   /** 对话模型设置面板开关 */
   const [llmOpen, setLlmOpen] = useState(false);
+  /** 创作工坊（自建角色 / 世界书）面板开关 */
+  const [studioOpen, setStudioOpen] = useState(false);
   /** 当前生效的模型名（顶栏展示；来源是 GET /llm/config） */
   const [llmModel, setLlmModel] = useState("");
   const [backendOnline, setBackendOnline] = useState<boolean | null>(null);
@@ -68,12 +91,34 @@ export default function HomePage() {
   const [personaCatalog, setPersonaCatalog] = useState<PersonaCatalog | null>(null);
   /** SDK 降级标记（记录是哪一版凭证降级的，凭证变化后自动失效） */
   const [degraded, setDegraded] = useState<{ version: string; reason: string } | null>(null);
+  /**
+   * 语音引擎与音色偏好（含 `GET /media/tts/voices` 探测）。
+   *
+   * 后端就绪后才探测（与其它清单接口一致）；探测失败 → status=null → 浏览器 TTS。
+   */
+  const tts = useTtsPreferences({ enabled: backendOnline === true });
 
   // 凭证版本：内容或修订号变化即视为「新一版」（重新保存后允许重连）
   const credentialsVersion = `${credentials?.appId ?? ""}:${credentials?.appSecret ?? ""}:${revision}`;
   const degradedNow = degraded?.version === credentialsVersion ? degraded : null;
-  const provider: "xmov" | "browser" = credentials && !degradedNow ? "xmov" : "browser";
-  const effectiveError = degradedNow?.reason ?? avatarError;
+
+  /**
+   * 渲染器选择（三层降级链的上层决策）。
+   *
+   * - `auto`：有密钥且未降级 → 魔珐；否则本地渲染器（Live2D → 静态立绘）
+   * - `local` / `static`：**强制本地**——这正是「填了密钥也想看 Live2D」的场景，
+   *   旧逻辑只看密钥有无，导致本地渲染器永远没机会跑
+   * - `xmov`：强制魔珐（无密钥时下面会给出明确原因）
+   */
+  const xmovRequested = renderer === "xmov" || (renderer === "auto" && Boolean(credentials));
+  const provider: "xmov" | "browser" =
+    xmovRequested && Boolean(credentials) && !degradedNow ? "xmov" : "browser";
+  const effectiveError =
+    degradedNow?.reason ??
+    avatarError ??
+    (renderer === "xmov" && !credentials
+      ? "已选择「魔珐星云 SDK」，但尚未填写 App ID / App Secret。"
+      : null);
 
   const browserAvatar = useBrowserAvatar();
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -86,9 +131,69 @@ export default function HomePage() {
       setDegraded({ version: credentialsVersion, reason }); // 保留失败原因（降级后仍可见）
     },
   });
-  const avatar = provider === "xmov" ? xmovAvatar : browserAvatar;
+
+  /** 服务端 TTS：音色取设置里选的那个（空串 = 后端默认音色） */
+  const serverTtsAvatar = useServerTtsAvatar({ voice: tts.voice });
+
+  /**
+   * 播报实现的选择规则（纯函数，见 `lib/avatar-config.ts` 的 `resolveVoiceSource`）：
+   * 魔珐路径只能用它自带 TTS，其余情况按「用户偏好 + 探测结果」决定。
+   */
+  const voiceSource = resolveVoiceSource({
+    xmovActive: provider === "xmov",
+    serverTtsAvailable: tts.serverTtsAvailable,
+    preference: tts.engine,
+  });
+  const avatar =
+    voiceSource === "xmov"
+      ? xmovAvatar
+      : voiceSource === "server"
+        ? serverTtsAvatar
+        : browserAvatar;
 
   const session = useChatSession(avatar);
+
+  /**
+   * 口型时间轴：交给本地渲染器驱动嘴型。
+   *
+   * 两条来源，优先用前者：
+   * - **服务端 TTS**：controller 的 `timeline`——与正在播放的音频**同源**（同一次
+   *   `/media/avatar` 请求），所以是真正的音画同步；
+   * - 浏览器 TTS：没有音频时长可用，只能另发一次请求让后端按文本估算
+   *   （`useLipSyncTimeline`），此时口型与语音本就不同源，只求“嘴会动”。
+   *
+   * 因此在服务端 TTS 路径上**刻意让 useLipSyncTimeline 保持 inactive**，
+   * 避免多打一次无用的请求，也避免两条时间轴互相覆盖。
+   */
+  const estimatedLipSync = useLipSyncTimeline({
+    active: avatar.provider !== "server" && avatar.state === "speak",
+    text: session.subtitle,
+    emotion: session.emotion?.label ?? null,
+    intensity: session.emotion?.intensity,
+  });
+  const lipSync = avatar.timeline ?? estimatedLipSync;
+
+  /**
+   * 试听指定音色（设置面板的「试听」按钮）。
+   *
+   * 直接复用服务端 TTS 控制器：播报的打断/降级/超时/音频释放只应该有一份实现，
+   * 且它已被 13 个用例覆盖（面板里不再写第二套播放逻辑）。
+   */
+  const previewVoice = useCallback(
+    async (voice: string) => {
+      await serverTtsAvatar.speak(VOICE_PREVIEW_TEXT, undefined, { voice });
+    },
+    [serverTtsAvatar],
+  );
+
+  /**
+   * 模型库与当前选中的模型。
+   *
+   * `source` 把「选中的模型」翻译成渲染器能用的 URL：没选/后端拿不到时
+   * 回落到内置模型，因此**不选任何模型也能正常演示**。
+   */
+  const avatarModels = useAvatarModels();
+  const modelSource = resolveAvatarModelSource(avatarModels.selected);
 
   /**
    * 「用户是否手动选过」标记：手动选过之后，后端声明的缺省值不再覆盖用户选择。
@@ -117,6 +222,17 @@ export default function HomePage() {
    * 与 `useCallback([], ...)`，引用是稳定的，单独抽出即可表达真实依赖。
    */
   const { setStyleId: changeStyle, setPersonaId: changePersona } = session;
+
+  /**
+   * 创作工坊改动后刷新「陪伴对象」清单（可能新增 / 删除 / 改名了角色）。
+   *
+   * 必须先 useCallback 固定引用：StudioPanel 把它当依赖链的一环
+   * （onCatalogChange → applyCatalog → load），每次渲染都给新函数会让面板
+   * 反复重新加载 catalog。
+   */
+  const handleStudioCatalog = useCallback(() => {
+    void getPersonas().then((next) => setPersonaCatalog(next));
+  }, []);
 
   // 后端健康检查：未就绪时每 5s 重试（后端稍后启动也能自动恢复），卸载时停止
   useEffect(() => {
@@ -200,7 +316,11 @@ export default function HomePage() {
                 : "bg-surface-raised text-ink-muted ring-line"
             }`}
           >
-            {provider === "xmov" ? "魔珐 SDK" : "浏览器 TTS"}
+            {provider === "xmov"
+              ? "魔珐 SDK"
+              : renderer === "static"
+                ? "静态立绘"
+                : "本地渲染器"}
           </span>
           <span
             role="status"
@@ -226,6 +346,15 @@ export default function HomePage() {
           </button>
           <button
             type="button"
+            aria-expanded={studioOpen}
+            aria-controls={STUDIO_PANEL_ID}
+            onClick={() => setStudioOpen((prev) => !prev)}
+            className={`rounded-full bg-surface-raised px-3 py-1 text-xs text-ink-muted ring-1 ring-line transition-colors hover:bg-surface-hover ${FOCUS_RING}`}
+          >
+            创作工坊
+          </button>
+          <button
+            type="button"
             aria-expanded={settingsOpen}
             aria-controls={SETTINGS_PANEL_ID}
             onClick={() => setSettingsOpen((prev) => !prev)}
@@ -235,7 +364,7 @@ export default function HomePage() {
                 : "bg-warning-soft text-warning-text ring-warning/30 hover:bg-warning/15"
             }`}
           >
-            {configured ? "数字人设置" : "配置数字人密钥"}
+            数字人设置
           </button>
         </div>
 
@@ -246,7 +375,25 @@ export default function HomePage() {
           source={source}
           save={save}
           clear={clear}
+          renderer={renderer}
+          onRendererChange={setRenderer}
+          ttsEngine={tts.engine}
+          onTtsEngineChange={tts.setEngine}
+          ttsVoice={tts.voice}
+          onTtsVoiceChange={tts.setVoice}
+          ttsStatus={tts.status}
+          onPreviewVoice={previewVoice}
+          models={avatarModels}
           panelId={SETTINGS_PANEL_ID}
+        />
+
+        <StudioPanel
+          open={studioOpen}
+          onClose={() => setStudioOpen(false)}
+          disabled={session.busy}
+          defaultScope={session.personaId}
+          panelId={STUDIO_PANEL_ID}
+          onCatalogChange={handleStudioCatalog}
         />
 
         <LlmSettings
@@ -268,10 +415,13 @@ export default function HomePage() {
             state={avatar.state}
             emotion={session.emotion}
             provider={avatar.provider}
+            renderer={renderer}
+            source={modelSource}
+            lipSync={lipSync}
             containerId={CONTAINER_ID}
             containerRef={containerRef}
-            stage={avatar.provider === "xmov" ? xmovAvatar.stage : "ready"}
-            detail={avatar.provider === "xmov" ? xmovAvatar.detail : ""}
+            stage={avatar.stage}
+            detail={avatar.detail}
           />
           <SubtitleBar text={session.subtitle} active={avatar.state === "speak"} />
 
@@ -290,9 +440,11 @@ export default function HomePage() {
             </div>
           )}
 
-          {!configured && (
+          {/* 本地渲染路径的提示（xmov 模式下由 SDK 自己的状态行负责） */}
+          {provider === "browser" && (
             <p className="text-center text-xs text-ink-soft">
-              当前使用浏览器语音演示。点击右上角「配置数字人密钥」可启用真实 3D 数字人。
+              正在使用本地渲染器（Live2D / 静态立绘），对话与情绪联动不受影响。
+              右上角「数字人设置」可切换渲染方式或填入魔珐密钥。
             </p>
           )}
         </div>

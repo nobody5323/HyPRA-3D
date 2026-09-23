@@ -8,6 +8,8 @@
 外部依赖（人设/世界书/记忆/LLM/组装器）由构造参数注入。
 """
 
+from dataclasses import replace
+
 from app.llm.base import ChatMessage, LLMProvider
 from app.llm.profiles import (
     ModelProfile,
@@ -15,12 +17,13 @@ from app.llm.profiles import (
     resolve_profile,
     resolve_sampling,
 )
+from app.llm.reasoning import ensure_reasoning_headroom, is_reasoning_model
 from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider
 from app.prompts.assemble import assemble_worldbook_section
 from app.prompts.persona.loader import PersonaPreset
-from app.prompts.renderer import render_persona_prompt
+from app.prompts.renderer import render_persona_background, render_persona_prompt
 from app.prompts.sanitize import sanitize_reply
 from app.prompts.st_compat import (
     MARKER_WORLD_INFO_AFTER,
@@ -55,6 +58,11 @@ _APPLICABLE_SAMPLING = (
     "presence_penalty",
     "max_tokens",
 )
+
+
+def _join_blocks(*blocks: str) -> str:
+    """用空行连接非空文本块（角色层 = 人设正文 + 背景故事）。"""
+    return "\n\n".join(block.strip() for block in blocks if block.strip())
 
 
 class ChatNodes:
@@ -107,26 +115,74 @@ class ChatNodes:
     def _merge_warnings(state: ChatState, new: list[str]) -> list[str]:
         return [*state.get("warnings", []), *new]
 
+    def _ensure_thinking_headroom(self, sampling: ResolvedSampling) -> ResolvedSampling:
+        """推理模型：抬高 max_tokens 下限（思考 token 会先吃掉额度）。
+
+        为什么放在采样解析的最后一步：文风预设的采样优先级最高，会把
+        `max_tokens` 压到 350 这类小值；对推理模型而言那等于「只准思考、不准说话」——
+        实测 deepseek-flash 在 max_tokens=350 时正文恒为空（思考占了 582 token）。
+
+        识别分两条腿：模型名匹配（覆盖已知）+ 运行期观测（provider 见过
+        `reasoning_content` 就标记），因为存在名字里没有标记的推理模型。
+        """
+        model = getattr(self.llm, "model", "") or ""
+        observed = bool(getattr(self.llm, "saw_reasoning", False))
+        if not (is_reasoning_model(model) or observed):
+            return sampling
+
+        adjusted = ensure_reasoning_headroom(
+            sampling.max_tokens, model, assume_reasoning=observed
+        )
+        if adjusted == sampling.max_tokens:
+            return sampling
+        return replace(sampling, max_tokens=adjusted)
+
     # ---------- ① 人设渲染 ----------
 
     def load_persona(self, state: ChatState) -> dict:
-        """渲染角色人设（状态变量替换）。"""
-        persona = self.presets[state["persona_id"]]
+        """渲染角色人设 + 背景故事（状态变量替换）。
+
+        角色层 = 人设正文 + 可选背景故事，顺序固定：
+
+            人设正文 → [背景故事] → （世界书 / 记忆 / 滚动窗口等后续层）
+
+        背景故事来自用户自建的角色卡（内置角色默认没有）。单独成块是为了让模型
+        分得清「说话的人是谁、怎么说话」与「这个世界的设定」。
+        """
+        persona = self.presets.get(state["persona_id"])
+        if persona is None:
+            # 预设快照里没有这个角色（如刚被删除、图尚未重建）：明确告警比
+            # KeyError 把整轮对话打掉更好——用户至少能看到回复与原因
+            return {
+                "persona_text": "",
+                "warnings": self._merge_warnings(
+                    state,
+                    [f"人设 {state['persona_id']} 不在已加载的预设中，本轮未注入人设"],
+                ),
+            }
         context_vars = {"user_name": state.get("user_name", "朋友"), **state.get("state_vars", {})}
         rendered = render_persona_prompt(persona, context_vars)
+        background = render_persona_background(persona, context_vars)
         return {
-            "persona_text": rendered.text,
-            "warnings": self._merge_warnings(state, list(rendered.warnings)),
+            "persona_text": _join_blocks(rendered.text, background.text),
+            "warnings": self._merge_warnings(
+                state, [*rendered.warnings, *background.warnings]
+            ),
         }
 
     # ---------- ② 世界书命中 ----------
 
     def worldbook_recall(self, state: ChatState) -> dict:
-        """关键词 / 正则 / 语义向量三通道触发 + 注入编排（priority + 预算）。"""
+        """关键词 / 正则 / 语义向量三通道触发 + 注入编排（priority + 预算）。
+
+        按 `companion_id` 过滤归属：`scope="*"` 的条目对所有角色生效，
+        用户为某个角色写的专属设定只在该角色下注入（见 WorldBookEntry.scope）。
+        """
         hits = match_entries(
             self.entries,
             state.get("user_input", ""),
             vector_index=self.worldbook_index,
+            companion_id=state.get("companion_id", state.get("persona_id", "")),
         )
         text, skipped = assemble_worldbook_section(hits, self.worldbook_budget)
         return {
@@ -237,6 +293,8 @@ class ChatNodes:
             profiles=self.profiles,
             preset_id=state.get("preset_id") or None,
         )
+        # 推理模型的额度下限：文风预设可能刚把 max_tokens 压得很小
+        sampling = self._ensure_thinking_headroom(sampling)
 
         if style is not None:
             style_text = self._compose_style_text(style, sampling.style_hint)
@@ -365,17 +423,19 @@ class ChatNodes:
         if thinking is None:
             thinking = profile.enable_thinking
 
-        return ResolvedSampling(
-            temperature=float(merged.get("temperature", 0.8)),
-            max_tokens=int(merged["max_tokens"]) if merged.get("max_tokens") else None,
-            top_p=merged.get("top_p"),
-            frequency_penalty=merged.get("frequency_penalty"),
-            presence_penalty=merged.get("presence_penalty"),
-            style_hint=profile.style_hint.strip(),
-            profile_id=profile.id,
-            profile_label=profile.display_name,
-            enable_thinking=thinking,
-            sources=sources,
+        return self._ensure_thinking_headroom(
+            ResolvedSampling(
+                temperature=float(merged.get("temperature", 0.8)),
+                max_tokens=int(merged["max_tokens"]) if merged.get("max_tokens") else None,
+                top_p=merged.get("top_p"),
+                frequency_penalty=merged.get("frequency_penalty"),
+                presence_penalty=merged.get("presence_penalty"),
+                style_hint=profile.style_hint.strip(),
+                profile_id=profile.id,
+                profile_label=profile.display_name,
+                enable_thinking=thinking,
+                sources=sources,
+            )
         )
 
     @staticmethod
@@ -458,9 +518,15 @@ class ChatNodes:
         ① Agent 循环（chat_with_tool_loop）：模型可多轮调用工具（查记忆/记录情绪/呼吸引导），
            直到调用终止工具（情绪工具，携带最终回复）或给出纯文本回复；
         ② 降级：模型不支持工具调用 / 解析失败 → 普通 chat() + 正则兜底情绪。
-        两通道都保证给出非空回复与一个情绪结果，绝不空转。
+
+        两通道都保证给出一个情绪结果；若模型确实没产出正文（如推理模型的额度
+        被思考吃光），会通过 warnings 说明原因，而不是静默返回空字符串。
         """
         messages = [ChatMessage(**m) for m in state.get("messages", [])]
+        # 清掉上一轮可能残留的诊断说明（provider 实例是全局共享的）
+        self.llm.take_generation_note()
+        # 本轮要带给用户的生成提示（强制工具调用失败、空回复原因等）
+        extra_warnings: list[str] = []
         sampling: ResolvedSampling | None = state.get("sampling")
         kwargs = sampling.to_provider_kwargs() if sampling is not None else {}
         # 推理开关：仅当 provider 声明支持时才传（避免破坏自定义/第三方实现）
@@ -503,25 +569,34 @@ class ChatNodes:
             # 不会返回 tool_call（3 次中 2 次落回关键词兜底）。
             # 指令里保留用户原话，避免「最后一条用户消息」丢失真实输入
             # （兜底实现与部分模型会据此判情绪）。
-            forced_calls = self.llm.chat_with_tools(
-                [
-                    *messages,
-                    ChatMessage(role="assistant", content=agent.reply),
-                    ChatMessage(
-                        role="user",
-                        content=(
-                            f"{state.get('user_input', '')}\n\n"
-                            "请调用工具，返回「我此刻的情绪判定」与「你刚才的回复」的完整文本。"
+            try:
+                forced_calls = self.llm.chat_with_tools(
+                    [
+                        *messages,
+                        ChatMessage(role="assistant", content=agent.reply),
+                        ChatMessage(
+                            role="user",
+                            content=(
+                                f"{state.get('user_input', '')}\n\n"
+                                "请调用工具，返回「我此刻的情绪判定」与「你刚才的回复」的完整文本。"
+                            ),
                         ),
-                    ),
-                ],
-                [build_emotion_tool()],
-                tool_choice={
-                    "type": "function",
-                    "function": {"name": EMOTION_TOOL_NAME},
-                },
-                **kwargs,
-            )
+                    ],
+                    [build_emotion_tool()],
+                    tool_choice={
+                        "type": "function",
+                        "function": {"name": EMOTION_TOOL_NAME},
+                    },
+                    **kwargs,
+                )
+            except Exception as exc:  # noqa: BLE001 —— 模型侧拒绝不该打断整轮对话
+                # 实测：部分推理模型（DeepSeek 系）不接受强制 tool_choice，服务端直接 400
+                # （"Thinking mode does not support this tool_choice"）。此时回复文本
+                # （agent.reply）已经拿到，不该整轮失败 —— 退回关键词兜底即可。
+                forced_calls = None
+                extra_warnings.append(
+                    f"强制结构化情绪输出失败（{exc}），本轮情绪改用关键词兜底"
+                )
             forced = next(
                 (call for call in (forced_calls or []) if call.name == EMOTION_TOOL_NAME),
                 None,
@@ -539,9 +614,35 @@ class ChatNodes:
 
         # ③ 终极降级：普通回复 + 关键词兜底情绪（用真实回复替换占位文本）
         reply = sanitize_reply(agent.reply or self.llm.chat(messages, **kwargs))
+        note = self.llm.take_generation_note()
+        if not reply and note:
+            # 拿到空回复且已知原因（推理模型的思考吃光了额度）→ 放大额度重试一次。
+            # 不重试的话，在 provider 下次观测到 reasoning_content、自动抬高额度之前，
+            # 用户每句都会收到空白 —— 实测就是「第一句话没反应」。
+            wider = {
+                **kwargs,
+                "max_tokens": ensure_reasoning_headroom(
+                    kwargs.get("max_tokens"),
+                    getattr(self.llm, "model", ""),
+                    assume_reasoning=True,
+                ),
+            }
+            retry = sanitize_reply(self.llm.chat(messages, **wider))
+            if retry:
+                reply = retry
+                note = ""
+                self.llm.take_generation_note()   # 清掉上一轮的说明，避免污染下次
+        if note:
+            # 空回复必须能被解释：provider 知道 finish_reason 与推理 token 占用
+            extra_warnings.append(note)
         fallback = extract_emotion_fallback(state.get("user_input", ""))
         fallback.reply = reply
-        return {"reply": reply, "emotion": fallback, "tools_used": tools_used}
+        return {
+            "reply": reply,
+            "emotion": fallback,
+            "tools_used": tools_used,
+            "warnings": self._merge_warnings(state, extra_warnings),
+        }
 
     # ---------- ⑥ 回复后事件驱动写入 ----------
 

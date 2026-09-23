@@ -32,7 +32,7 @@ from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provider
 from app.memory.warm.factory import create_warm_store
-from app.prompts.persona.loader import load_builtin_presets
+from app.prompts.persona.loader import PersonaPreset
 from app.prompts.renderer import estimate_tokens
 # ST 预设的存储与路由已抽到 app/api/st_presets.py；此处导入转发，保持对外入口不变
 from app.api.st_presets import get_st_preset_store, set_st_preset_store  # noqa: F401
@@ -41,9 +41,10 @@ from app.rag.prompt_manager import PromptManager
 from app.session.base import SessionStore
 from app.session.context import ChatTurn
 from app.session.factory import create_session_store
+from app.studio import StudioStore
 from app.tools.builtin_tools import build_default_registry
 from app.mcp.manager import get_mcp_manager
-from app.worldbook.loader import load_builtin_entries
+from app.worldbook.models import WorldBookEntry
 
 logger = logging.getLogger(__name__)
 
@@ -71,8 +72,10 @@ def set_session_repository(store: SessionStore | None) -> None:
     """替换/重置会话存储（测试注入用）。"""
     global _repository
     _repository = store
-_presets = load_builtin_presets()
-_entries = load_builtin_entries()
+
+
+#: 创作工坊存储（用户自建角色卡 / 世界书条目；懒加载单例）
+_studio_store: StudioStore | None = None
 _styles = load_builtin_styles()
 _memory_store: MemoryStore | None = None
 _embedding_provider: EmbeddingProvider | None = None
@@ -85,6 +88,55 @@ _DEFAULT_PERSONA_ID = "therapist-elder-sister"
 
 
 # ---------- 依赖懒加载（测试可经 set_* 注入）----------
+
+
+def get_studio_store() -> StudioStore:
+    """懒加载创作工坊存储（用户自建角色 / 世界书条目）。
+
+    目录由 `STUDIO_DIR` 配置（默认 backend/data/studio，已被 .gitignore 覆盖）。
+    内置资源（包内 YAML）**只读**，用户内容放用户目录，两者由门面合并。
+    """
+    global _studio_store
+    if _studio_store is None:
+        _studio_store = StudioStore(get_settings().studio_dir)
+    return _studio_store
+
+
+def set_studio_store(store: StudioStore | None) -> None:
+    """替换/重置创作工坊存储（测试注入用；换存储同时失效对话图）。"""
+    global _studio_store, _chat_graph
+    _studio_store = store
+    _chat_graph = None
+
+
+def invalidate_chat_graph() -> None:
+    """让已编译的对话图失效：下次对话按最新的角色 / 世界书重建。
+
+    为什么必须显式失效：`ChatNodes` 在构造时**快照**了角色集合与世界书条目
+    （世界书还要在构造时一次性编码向量索引）。用户改完内容不失效的话，
+    新角色会在路由校验处通过、却在图节点里找不到。
+    """
+    global _chat_graph
+    _chat_graph = None
+
+
+def get_persona_presets() -> dict[str, PersonaPreset]:
+    """当前全部角色卡（内置 + 我的）的 id 索引，每次取最新。
+
+    坏文件由门面跳过并记警告（一个写坏的用户文件不该让所有人都没法对话）。
+    """
+    presets, warnings = get_studio_store().all_personas()
+    for warning in warnings:
+        logger.warning("角色加载：%s", warning)
+    return presets
+
+
+def get_worldbook_entries() -> list[WorldBookEntry]:
+    """当前全部世界书条目（内置 + 我的，已应用内置条目的停用偏好）。"""
+    entries, warnings = get_studio_store().all_entries()
+    for warning in warnings:
+        logger.warning("世界书加载：%s", warning)
+    return entries
 
 
 def get_embedding_provider() -> EmbeddingProvider:
@@ -284,8 +336,8 @@ def get_chat_graph():
         settings = get_settings()
         provider = get_llm_provider()
         nodes = ChatNodes(
-            presets=_presets,
-            entries=_entries,
+            presets=get_persona_presets(),
+            entries=get_worldbook_entries(),
             memory_store=get_memory_store(),
             knowledge=_build_knowledge_retriever(settings),
             embedding_provider=get_embedding_provider(),
@@ -605,19 +657,16 @@ def list_chat_personas() -> dict:
     人设 id 同时是**记忆隔离命名空间**（`companion_id`）：情景记忆 / 语义事实 /
     个人记忆都按它分库，所以这份清单也是前端「陪伴对象」选择器的数据源。
     返回 default_persona_id 而不让前端硬编码，避免改预设后界面角色名与实际不符。
+
+    清单包含**用户自建角色**（内置只读 + 我的可编辑，两者在对话链路上无差别），
+    因此用户新建角色后这里立刻可见，无需重启后端。
     """
+    summaries, warnings = get_studio_store().list_personas()
+    for warning in warnings:
+        logger.warning("角色清单：%s", warning)
     return {
         "default_persona_id": _DEFAULT_PERSONA_ID,
-        "personas": [
-            {
-                "id": preset.id,
-                "name": preset.name,
-                "title": preset.title,
-                "description": preset.description,
-                "tags": preset.tags,
-            }
-            for preset in _presets.values()
-        ],
+        "personas": [item.as_dict() for item in summaries],
     }
 
 
@@ -647,7 +696,7 @@ def list_chat_styles() -> dict:
 @router.post("", response_model=ChatResponse)
 async def chat(req: ChatRequest, background: BackgroundTasks) -> ChatResponse:
     """一轮完整对话（LangGraph 编排）。"""
-    if req.persona_id not in _presets:
+    if req.persona_id not in get_persona_presets():
         raise HTTPException(status_code=404, detail=f"未知人设：{req.persona_id}")
 
     settings = get_settings()

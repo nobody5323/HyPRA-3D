@@ -26,7 +26,7 @@ import { ApiError, deleteSession, getSessionHistory, postChat, postSpeak } from 
 import { DEFAULT_PERSONA_ID } from "@/lib/persona";
 import { readActiveSessionId, writeActiveSessionId } from "@/lib/session-store";
 import type { ChatMessage, EmotionInfo, MemoryCounts, ToolUsage } from "@/lib/types";
-import type { AvatarController, SpeechChunk } from "./useAvatar";
+import type { AvatarController, SpeakContext, SpeechChunk } from "./useAvatar";
 
 /**
  * 取流式分段（逐段纯文本 + SSML）。
@@ -37,6 +37,15 @@ import type { AvatarController, SpeechChunk } from "./useAvatar";
  * 失败时返回空数组 → 调用方回退整段播报：分段只是体验优化，
  * 不该因为它失败而让整段播报也播不出来。
  */
+/**
+ * 分段播报的**单段字数上限**。
+ *
+ * 为什么是 20：实测合成耗时随字数近似线性增长（15 字 ≈ 3.0s、46 字 ≈ 8.8s），
+ * 所以首段越短出声越早；但切得太碎又会在句子中间硬切（语调不自然）。
+ * 20 字刚好让常见的中文句子（15~17 字）自然成段，不触发硬切。
+ */
+const SEGMENT_MAX_CHARS = 20;
+
 async function fetchSpeechChunks(
   reply: string,
   emotion: string | undefined,
@@ -50,6 +59,7 @@ async function fetchSpeechChunks(
         emotion: emotion ?? null,
         intensity: intensity ?? 0.5,
         streaming: true,
+        maxChars: SEGMENT_MAX_CHARS,
       },
       { signal },
     );
@@ -109,7 +119,10 @@ export interface ChatSession {
   setStPresetId: (id: string) => void;
   /** 本轮 ST 组装的元信息（命中/空槽位/未识别宏等；走内置路径时为 {}） */
   stPresetMeta: Record<string, unknown>;
-  /** 分段播报开关：逐段播报（首段更早出声），段间有过渡间隔 */
+  /**
+   * 分段播报开关（默认开）：逐段播报，首段更早出声、字幕随语音同步。
+   * 魔珐 SDK 路径下段间有约 400ms 过渡，想整段连贯可关。
+   */
   streamingSpeech: boolean;
   setStreamingSpeech: (on: boolean) => void;
   busy: boolean;
@@ -139,7 +152,14 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
   const [presetId, setPresetId] = useState(""); // "" = 自动（按模型名匹配）
   const [stPresetId, setStPresetId] = useState(""); // "" = 不使用酒馆预设
   const [stPresetMeta, setStPresetMeta] = useState<Record<string, unknown>>({});
-  const [streamingSpeech, setStreamingSpeech] = useState(false);
+  /**
+   * 分段播报开关：**默认开**。
+   *
+   * 服务端 TTS 下它就是"流水线"（首段 2~3s 出声、字幕随语音同步、段间无缝），
+   * 没有理由默认关；魔珐 SDK 路径下段间会有 400ms 的 interactive_idle 过渡，
+   * 想要整段连贯的可以在这里关掉。
+   */
+  const [streamingSpeech, setStreamingSpeech] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -292,7 +312,9 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
         ]);
         setEmotion(res.emotion ?? null);
         setToolsUsed(res.tools_used ?? []);
-        setSubtitle(res.speak?.display_text || res.reply);
+        // 字幕**交给播报驱动**（见下面的 onChunk / speak 之前那行）：
+        // 若在这里就显示整段，就会出现"文字先到、声音后到"——正是要消除的体感。
+        setSubtitle("");
         setTone(res.speak?.tone ?? "");
         setMemoryCounts(res.memory_counts ?? {});
         setKnowledgeHits(res.knowledge_hits ?? 0);
@@ -303,8 +325,14 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
         setStPresetMeta(res.st_preset ?? {});
 
         currentAvatar.setState("speak"); // ③ 播报（文本给浏览器 TTS，SSML 给魔珐 SDK）
-        // 分段播报：多一次 /media/speak 请求换取「逐段产出 + 字幕随段推进」；
-        // 取不到分段（短回复 / 请求失败）时自然回退整段播报。
+        // 播报上下文：服务端 TTS 需要本轮情绪（它要用情绪换后端的表情时间轴与语气时长）；
+        // 浏览器 TTS 与魔珐 SDK 忽略它（后者的 KA 动作已在 SSML 里）。
+        const speakContext: SpeakContext = {
+          emotion: res.emotion?.label ?? null,
+          intensity: res.emotion?.intensity ?? 0.5,
+        };
+        // 分段播报：多一次 /media/speak 请求换取「逐段产出」——服务端 TTS 下每段独立合成，
+        // 首段先出声且字幕与语音同步；取不到分段（短回复 / 请求失败）时自然回退整段播报。
         let chunks: SpeechChunk[] = [];
         if (streamingRef.current) {
           chunks = await fetchSpeechChunks(
@@ -317,11 +345,18 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
         }
         const speakText = res.speak?.display_text || res.reply;
         if (chunks.length > 1) {
-          await currentAvatar.speakChunks(chunks, (index) => {
-            if (isCurrent()) setSubtitle(chunks[index].text);
-          });
+          // 流水线播报：字幕由 onChunk 在**每段音频就绪那一刻**驱动 → 字声同时出现
+          await currentAvatar.speakChunks(
+            chunks,
+            (index) => {
+              if (isCurrent()) setSubtitle(chunks[index].text);
+            },
+            speakContext,
+          );
         } else {
-          await currentAvatar.speak(speakText, res.speak?.ssml);
+          // 整段播报（短回复）：字幕与音频几乎同时（这行就在 speak 之前）
+          setSubtitle(speakText);
+          await currentAvatar.speak(speakText, res.speak?.ssml, speakContext);
         }
         if (!isCurrent()) return; // 播报期间被打断 → 状态已由 interrupt() 处理
         currentAvatar.setState("idle"); // ④ 回到待机
