@@ -466,3 +466,137 @@ def test_existing_model_list_is_unchanged(isolated_store, fallback_sources) -> N
     body = client.get(BASE).json()
 
     assert [item["id"] for item in body["models"]] == ["mine"]
+
+
+# =============================================================
+# 构图校准（layout）与当前选择（selection）
+# =============================================================
+def test_layout_is_saved_and_returned_in_detail():
+    model = upload_live2d()
+
+    response = client.patch(
+        f"{BASE}/{model['id']}",
+        json={"layout": {"scale": 1.4, "offsetX": -12, "offsetY": 30, "anchor": "bottom center"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["layout"] == {
+        "scale": 1.4,
+        "offsetX": -12,
+        "offsetY": 30,
+        "anchor": "bottom center",
+    }
+    # 清单里也要带上：前端只拉一次清单就能把构图渲染出来
+    assert client.get(BASE).json()["models"][0]["layout"]["scale"] == 1.4
+    # 重新读取（走磁盘的 model.json）也要在，否则重启后端就丢了
+    assert client.get(f"{BASE}/{model['id']}").json()["layout"]["offsetY"] == 30
+
+
+def test_layout_defaults_to_null_and_can_be_cleared():
+    model = upload_live2d()
+    url = f"{BASE}/{model['id']}"
+
+    # 新上传的模型未校准（渲染层用默认构图）
+    assert model["layout"] is None
+
+    client.patch(url, json={"layout": {"scale": 2}})
+    assert client.get(url).json()["layout"] == {"scale": 2}
+
+    cleared = client.patch(url, json={"layout": None})
+    assert cleared.status_code == 200
+    assert cleared.json()["layout"] is None
+
+
+def test_patch_without_layout_keeps_existing_calibration():
+    """改个名字不该顺手把用户调好的构图抹掉。"""
+    model = upload_live2d()
+    url = f"{BASE}/{model['id']}"
+    client.patch(url, json={"layout": {"scale": 1.5}})
+
+    renamed = client.patch(url, json={"name": "新名字"})
+
+    assert renamed.json()["name"] == "新名字"
+    assert renamed.json()["layout"] == {"scale": 1.5}
+
+
+@pytest.mark.parametrize(
+    "layout",
+    [
+        {"scale": 9},
+        {"scale": 0},
+        {"offsetX": 9999},
+        {"offsetY": -9999},
+        {"anchor": "a;b"},
+    ],
+)
+def test_layout_rejects_out_of_range_values(layout):
+    model = upload_live2d()
+
+    response = client.patch(f"{BASE}/{model['id']}", json={"layout": layout})
+
+    assert response.status_code == 400
+    # 越界报错而不是静默夹紧：夹紧会让「拖了却没生效」变得无法排查
+    detail = response.json()["detail"]
+    assert "需在" in detail or "不合法" in detail
+
+
+def test_layout_rejects_non_numeric_scale():
+    """类型错误在 pydantic 层就拦下（422），不进业务校验。"""
+    model = upload_live2d()
+
+    response = client.patch(f"{BASE}/{model['id']}", json={"layout": {"scale": "big"}})
+
+    assert response.status_code == 422
+
+
+def test_layout_ignores_unknown_keys():
+    """前端将来加的字段不该让旧后端直接 400。"""
+    model = upload_live2d()
+
+    response = client.patch(
+        f"{BASE}/{model['id']}", json={"layout": {"scale": 1.2, "flipX": True}}
+    )
+
+    assert response.status_code == 200
+    assert response.json()["layout"] == {"scale": 1.2}
+
+
+def test_selection_round_trip_and_fallback_to_builtin():
+    model = upload_live2d()
+
+    # 初始：没有选择 → 用内置模型
+    assert client.get(f"{BASE}/selection").json() == {"modelId": ""}
+
+    chosen = client.put(f"{BASE}/selection", json={"modelId": model["id"]})
+    assert chosen.status_code == 200
+    assert client.get(f"{BASE}/selection").json() == {"modelId": model["id"]}
+
+    client.put(f"{BASE}/selection", json={"modelId": ""})
+    assert client.get(f"{BASE}/selection").json() == {"modelId": ""}
+
+
+def test_selection_rejects_unknown_model():
+    response = client.put(f"{BASE}/selection", json={"modelId": "nope"})
+
+    assert response.status_code == 400
+    assert "模型不存在" in response.json()["detail"]
+
+
+def test_deleting_selected_model_falls_back_to_builtin():
+    model = upload_live2d()
+    client.put(f"{BASE}/selection", json={"modelId": model["id"]})
+
+    client.delete(f"{BASE}/{model['id']}")
+
+    # 悬空选择会让两个端各自再写一遍回落逻辑，所以在写入侧就清掉
+    assert client.get(f"{BASE}/selection").json() == {"modelId": ""}
+
+
+def test_selection_file_is_not_listed_as_model():
+    """选择文件躺在模型库根目录，不能被当成一个模型列出来。"""
+    model = upload_live2d()
+    client.put(f"{BASE}/selection", json={"modelId": model["id"]})
+
+    ids = [item["id"] for item in client.get(BASE).json()["models"]]
+
+    assert ids == [model["id"]]

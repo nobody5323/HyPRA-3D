@@ -49,6 +49,25 @@ MAX_IMAGE_BYTES = 20 * 1024 * 1024
 #: 元数据里保存的情绪 id（与后端 EmotionLabel 的 8 类一致）
 EMOTION_IDS = ("happy", "calm", "sad", "anxious", "tired", "angry", "surprised", "neutral")
 
+#: 构图校准（layout）的缩放区间。
+#:
+#: 越界一律**报错**而不是静默夹紧：夹紧会让「我明明拖到了却没生效」这种问题
+#: 只能靠读代码才查得出来。
+LAYOUT_SCALE_MIN = 0.1
+LAYOUT_SCALE_MAX = 5.0
+#: 位移上限（px）：足够把任何比例的模型挪进画布，又不至于挪到天外
+LAYOUT_OFFSET_LIMIT = 2000
+#: anchor 只允许 CSS `transform-origin` 的常见写法（`bottom center` / `50% 100%`）
+_ANCHOR_PATTERN = re.compile(r"^[A-Za-z0-9 %.\-]{1,40}$")
+
+#: 「当前选用的模型」落盘文件名。
+#:
+#: 放在模型库根目录下：`list_models` 只遍历**目录**，所以这个文件不会被当成模型。
+#: 之所以放后端而不是前端 localStorage：Web 端与桌面端的 origin 不同
+#: （`localhost:3000` vs `127.0.0.1:34567`），localStorage 天然不共享，
+#: 而「现在用哪个模型」必须是两端一致的事实。
+SELECTION_FILE = "_selection.json"
+
 
 class AvatarModelKind(str, Enum):
     """模型类型。"""
@@ -67,7 +86,10 @@ class AvatarModel:
 
     - ``expressions``：Live2D 专用，模型自带的表情名清单（供前端配置情绪映射）；
     - ``images``：静态立绘专用，上传的图片文件名清单；
-    - ``expression_map``：静态立绘专用，``情绪 id → 图片文件名``（**由前端逐个指定**）。
+    - ``expression_map``：静态立绘专用，``情绪 id → 图片文件名``（**由前端逐个指定**）；
+    - ``layout``：构图校准（缩放 / 位移 / 锚点）。不同模型的画布比例差别很大，
+      同一套默认构图必然有的显示不全，所以校准参数随模型保存；
+      ``None`` = 未校准（渲染层用默认构图）。
     """
 
     id: str
@@ -79,12 +101,14 @@ class AvatarModel:
     expressions: list[str] = None  # type: ignore[assignment]
     images: list[str] = None  # type: ignore[assignment]
     expression_map: dict[str, str] = None  # type: ignore[assignment]
+    layout: dict | None = None
     meta: dict = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         self.expressions = list(self.expressions or [])
         self.images = list(self.images or [])
         self.expression_map = dict(self.expression_map or {})
+        self.layout = dict(self.layout) if isinstance(self.layout, dict) else None
         self.meta = dict(self.meta or {})
 
     def to_dict(self) -> dict:
@@ -98,6 +122,7 @@ class AvatarModel:
             "expressions": list(self.expressions),
             "images": list(self.images),
             "expressionMap": dict(self.expression_map),
+            "layout": dict(self.layout) if self.layout else None,
             "meta": dict(self.meta),
         }
 
@@ -113,12 +138,64 @@ class AvatarModel:
             expressions=raw.get("expressions") or [],
             images=raw.get("images") or [],
             expression_map=raw.get("expressionMap") or {},
+            layout=raw.get("layout"),
             meta=raw.get("meta") or {},
         )
 
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _as_number(value: object, field: str) -> float:
+    """把 JSON 里的数值字段转成 float。
+
+    显式排除 bool：Python 里 `True` 也是 `int`，不拦的话 `scale: true`
+    会被当成 1 悄悄存下来。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ModelStoreError(f"{field} 必须是数字")
+    return float(value)
+
+
+def sanitize_layout(raw: dict | None) -> dict | None:
+    """校验并规整构图校准参数；返回 None 表示「未校准」（渲染层用默认构图）。
+
+    只认四个已知键（``scale`` / ``offsetX`` / ``offsetY`` / ``anchor``），
+    未知键**静默忽略**——这样前端将来加参数时，旧后端不会因为多一个字段就报 400。
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ModelStoreError("layout 必须是对象")
+
+    cleaned: dict[str, object] = {}
+
+    if raw.get("scale") is not None:
+        scale = _as_number(raw.get("scale"), "scale")
+        if not LAYOUT_SCALE_MIN <= scale <= LAYOUT_SCALE_MAX:
+            raise ModelStoreError(
+                f"scale 需在 {LAYOUT_SCALE_MIN} ~ {LAYOUT_SCALE_MAX} 之间（收到 {scale}）"
+            )
+        cleaned["scale"] = round(scale, 3)
+
+    for key in ("offsetX", "offsetY"):
+        if raw.get(key) is None:
+            continue
+        offset = _as_number(raw.get(key), key)
+        if abs(offset) > LAYOUT_OFFSET_LIMIT:
+            raise ModelStoreError(
+                f"{key} 需在 ±{LAYOUT_OFFSET_LIMIT}px 之间（收到 {offset}）"
+            )
+        cleaned[key] = int(round(offset))
+
+    if raw.get("anchor") is not None:
+        anchor = str(raw.get("anchor")).strip()
+        if not _ANCHOR_PATTERN.match(anchor):
+            raise ModelStoreError(f"anchor 不合法：{anchor!r}（形如 bottom center）")
+        cleaned["anchor"] = anchor
+
+    return cleaned or None
 
 
 def decode_zip_name(info: zipfile.ZipInfo) -> str:
@@ -329,14 +406,24 @@ class AvatarModelStore:
         *,
         name: str | None = None,
         expression_map: dict[str, str] | None = None,
+        layout: dict | None = None,
+        update_layout: bool = False,
     ) -> AvatarModel:
-        """更新名称与情绪映射（映射只允许指向该模型里真实存在的图片）。"""
+        """更新名称 / 情绪映射 / 构图校准（映射只允许指向该模型里真实存在的图片）。
+
+        ``layout`` 是否生效由 ``update_layout`` 决定，而不是看 ``layout is None``：
+        「没传 layout」与「传 null 清除校准」是两件不同的事，混在一起的话，
+        一次改名就会顺手把用户调好的构图抹掉。
+        """
         model = self.get_model(model_id)
         if model is None:
             raise ModelStoreError(f"模型不存在：{model_id}")
 
         if name is not None and name.strip():
             model.name = name.strip()
+
+        if update_layout:
+            model.layout = sanitize_layout(layout)
 
         if expression_map is not None:
             if model.kind is not AvatarModelKind.IMAGES:
@@ -362,8 +449,49 @@ class AvatarModelStore:
         _guard_inside(self.root, directory)
         if not directory.is_dir():
             return False
+        # 删除前先读选择：删完之后模型已不存在，再读就会回落成空串而看不出原值
+        current = self.get_selection()
         shutil.rmtree(directory)
+        if current == model_id:
+            # 走 set_selection("") 而不是直接写文件：空值不触发存在性校验
+            self.set_selection("")
         return True
+
+    def get_selection(self) -> str:
+        """当前选用的模型 id（空串 = 内置模型）。
+
+        指向的模型已被删除时**顺手回落**成空串并落盘：这个值会被 Web 端与桌面端
+        共同读取，留一个悬空 id 只会让两边各自写一遍「找不到就回落」的逻辑。
+        """
+        path = self.root / SELECTION_FILE
+        if not path.is_file():
+            return ""
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            # 文件被写坏不该让整个模型库不可用，按「未选择」处理
+            return ""
+
+        model_id = str((raw or {}).get("modelId") or "").strip()
+        if not model_id:
+            return ""
+        if self.get_model(model_id) is None:
+            self.set_selection("")
+            return ""
+        return model_id
+
+    def set_selection(self, model_id: str | None) -> str:
+        """写入当前选用的模型（空 / None = 回到内置模型）。"""
+        target = str(model_id or "").strip()
+        if target and self.get_model(target) is None:
+            raise ModelStoreError(f"模型不存在：{target}")
+
+        self.root.mkdir(parents=True, exist_ok=True)
+        (self.root / SELECTION_FILE).write_text(
+            json.dumps({"modelId": target}, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        return target
 
     # ---------------------------------------------------------------
     # 内部

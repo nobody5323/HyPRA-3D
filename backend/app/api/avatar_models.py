@@ -1,10 +1,13 @@
-"""数字人模型库接口（上传 / 清单 / 指定情绪映射 / 删除 / 取文件）。
+"""数字人模型库接口（上传 / 清单 / 指定情绪映射 / 构图校准 / 当前选择 / 删除 / 取文件）。
 
 设计要点：
 - **上传即可用**——Live2D 模型包解压后会自动补全 `model3.json` 的
   Expressions / Motions 引用并生成约定入口 `pet.model3.json`；
 - **静态立绘不猜情绪**——后端只负责存图片，`情绪 → 图片` 由前端逐个指定
   （存进该模型的 `expressionMap`，这样换浏览器也不会丢）；
+- **构图校准随模型存**——不同模型的画布比例差别很大，同一套默认构图必然
+  有的显示不全；校准参数（缩放 / 位移 / 锚点）存在模型元数据里，
+  Web 端与桌面端读到的是同一份；
 - **文件统一走本路由**——前端渲染器把模型 URL 指向
   `GET /media/avatar/models/{id}/files/{path}`，不需要知道磁盘结构。
 """
@@ -69,11 +72,35 @@ def _bad_request(error: ModelStoreError) -> HTTPException:
     return HTTPException(status_code=400, detail=str(error))
 
 
+class AvatarLayoutPatch(BaseModel):
+    """构图校准参数（与前端 `AvatarPortraitLayout` 一一对应）。
+
+    四个字段都可选：只传要改的那几项即可，其余沿用已保存的值。
+    """
+
+    scale: float | None = None
+    offset_x: float | None = Field(default=None, alias="offsetX")
+    offset_y: float | None = Field(default=None, alias="offsetY")
+    anchor: str | None = None
+
+    model_config = {"populate_by_name": True}
+
+
 class AvatarModelPatch(BaseModel):
     """可更新的字段（情绪映射由前端逐个指定）。"""
 
     name: str | None = None
     expression_map: dict[str, str] | None = Field(default=None, alias="expressionMap")
+    #: 传 null 表示**清除校准**（回到默认构图）；整个字段不出现则保持原值
+    layout: AvatarLayoutPatch | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class AvatarSelectionPut(BaseModel):
+    """切换当前选用的模型（空串 / 省略 = 回到内置模型）。"""
+
+    model_id: str | None = Field(default=None, alias="modelId")
 
     model_config = {"populate_by_name": True}
 
@@ -107,6 +134,27 @@ def list_model_sources() -> dict:
         "installedCount": sum(1 for model in models if model.installed),
         "availableCount": sum(1 for model in models if not model.installed),
     }
+
+
+@router.get("/selection")
+def get_selection() -> dict:
+    """当前选用的模型 id（`modelId` 为空串 = 用内置模型）。
+
+    放在后端而不是前端 localStorage：Web 端与桌面端的 origin 不同
+    （`localhost:3000` vs `127.0.0.1:34567`），localStorage 天然不共享，
+    而「现在用哪个模型」必须是两端一致的事实。
+    """
+    return {"modelId": get_store().get_selection()}
+
+
+@router.put("/selection")
+def put_selection(payload: AvatarSelectionPut) -> dict:
+    """切换当前选用的模型（Web 端与桌面端都按它渲染）。"""
+    try:
+        model_id = get_store().set_selection(payload.model_id)
+    except ModelStoreError as error:
+        raise _bad_request(error) from error
+    return {"modelId": model_id}
 
 
 @router.post("", status_code=201)
@@ -155,10 +203,25 @@ def get_model(model_id: str) -> dict:
 
 @router.patch("/{model_id}")
 def patch_model(model_id: str, payload: AvatarModelPatch) -> dict:
-    """更新名称 / 情绪映射。"""
+    """更新名称 / 情绪映射 / 构图校准。
+
+    `layout` 只在请求里**出现过**时才生效（看 `model_fields_set`）：
+    否则一次改名的请求会顺手把用户调好的构图抹掉。
+    """
+    layout_sent = "layout" in payload.model_fields_set
+    # 必须 by_alias：`model_dump()` 默认用字段名（offset_x），
+    # 而存储层与前端认的是 offsetX——不转别名的话位移会被当成未知键静默丢掉
+    layout = (
+        payload.layout.model_dump(exclude_none=True, by_alias=True) if payload.layout else None
+    )
+
     try:
         model = get_store().update_model(
-            model_id, name=payload.name, expression_map=payload.expression_map
+            model_id,
+            name=payload.name,
+            expression_map=payload.expression_map,
+            layout=layout,
+            update_layout=layout_sent,
         )
     except ModelStoreError as error:
         raise _bad_request(error) from error
