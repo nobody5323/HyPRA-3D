@@ -413,6 +413,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P1b** | 收编既有 7 个扩展点（`builtin.py`，零重构） | ✅ 已完成 |
 | **P1c** | 宿主接入（`create_app` 静态注册/发现 + lifespan 启停 + `/health` 暴露） | ✅ 已完成 |
 | **P1d** | 前端能力中心（消费 `/health` 的插件数据；按层分组 + 状态 + 只读标记） | ✅ 已完成 |
+| **P1d+** | 操作面：Schema 驱动的配置表单 + 启停 + 酒馆记忆导入（`PluginDetail` / `SchemaForm` / `TavernImportPanel`）；启用状态落盘 `data/plugins/<id>/state.json` | ✅ 已完成 |
 | **P3** | `tavern-bridge` 插件（目录插件通路：PNG 角色卡 / 世界书 / 会话只读接入） | ✅ 已完成 |
 | **P3b** | 插件管理 API（`/plugins/*`：列表 / 启停 / 配置读写） | ✅ 已完成 |
 | **P4** | 跨会话记忆构建（`TavernMemoryImporter` 会话→记忆 + 导入 API） | ✅ 已完成 |
