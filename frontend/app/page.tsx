@@ -89,6 +89,12 @@ export default function HomePage() {
   // 插件体系状态（AGENTS.md §9）：随 /health 轮询刷新，驱动「能力中心」面板
   const [plugins, setPlugins] = useState<PluginStatus[]>([]);
   const [pluginsSummary, setPluginsSummary] = useState<PluginsSummary | null>(null);
+  /**
+   * 手动重拉 /health 的触发器：插件启停 / 保存配置后，
+   * summary 的计数（运行中 / 失败）只有后端知道——重新拉一次，
+   * 好过在前端复刻一份 summary 计算逻辑、然后与后端慢慢漂移。
+   */
+  const [healthNonce, setHealthNonce] = useState(0);
   /** 模型预设档清单（选择器数据源；后端不可用时为 null，选择器不渲染） */
   const [presetCatalog, setPresetCatalog] = useState<PresetCatalog | null>(null);
   /** 文风清单（来自 GET /chat/styles，替代原先前端硬编码的 4 项） */
@@ -261,7 +267,7 @@ export default function HomePage() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, []);
+  }, [healthNonce]);
 
   // 界面选项清单：后端就绪后各拉一次（清单由服务端预设文件决定，不会频繁变）
   useEffect(() => {
@@ -507,7 +513,16 @@ export default function HomePage() {
             disabled={session.busy}
             lastRun={session.stPresetMeta}
           />
-          <PluginCenter plugins={plugins} summary={pluginsSummary} />
+          <PluginCenter
+            plugins={plugins}
+            summary={pluginsSummary}
+            companionId={session.personaId}
+            onPluginsChanged={(next) => {
+              // 先用响应里的快照就地更新（不闪烁），再后台重算 summary
+              setPlugins(next);
+              setHealthNonce((nonce) => nonce + 1);
+            }}
+          />
           <KnowledgePanel companionId={session.personaId} disabled={session.busy} />
           {/* min-h 兑底：知识库面板展开时对话区不被压到不可用高度 */}
           <div className="min-h-[320px] flex-1">

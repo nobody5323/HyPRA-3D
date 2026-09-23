@@ -265,7 +265,6 @@ export interface McpServerStatus {
   error: string | null;
 }
 
-/** GET /health 响应（含 MCP 行动层连接状态） */
 /** 插件在宿主中的状态（backend/app/plugins/manager.py 的 status()，见 AGENTS.md §9） */
 export interface PluginStatus {
   id: string;
@@ -276,6 +275,11 @@ export interface PluginStatus {
   /** 能力分类（管理 UI 分组）：provider / tool / memory / datasource … */
   category: string;
   state: "discovered" | "loaded" | "started" | "disabled" | "failed";
+  /**
+   * 用户是否启用。与 `state` 是两个维度：`state` 是生命周期阶段，`enabled` 是用户意图。
+   * core 层恒为 true——后端拒绝禁用它们（§9.2）。
+   */
+  enabled: boolean;
   /** 本插件贡献的能力面 */
   capabilities: string[];
   /** 只读插件（不写文件系统）：权限由后端架构强制，不是口头约定 */
@@ -298,6 +302,88 @@ export interface HealthStatus {
   mcp: McpServerStatus[];
   plugins: PluginStatus[];
   plugins_summary: PluginsSummary;
+}
+
+// =============================================================
+// 插件管理（GET|PUT /plugins/…，backend/app/api/plugins.py）
+// =============================================================
+
+/** 单条配置项的 JSON Schema 声明（`manifest.settings_schema.properties` 的值）。 */
+export interface PluginSettingField {
+  type?: "string" | "number" | "integer" | "boolean" | "array" | "object";
+  title?: string;
+  description?: string;
+  /** 给定候选项时渲染下拉框（优先于 type） */
+  enum?: string[];
+  /** 字符串展示格式；`password` 用密码框 */
+  format?: string;
+  default?: unknown;
+  /** array / object 的元素声明 */
+  items?: PluginSettingField;
+  minimum?: number;
+  maximum?: number;
+}
+
+/**
+ * 插件配置的 JSON Schema（`manifest.settings_schema`）。
+ *
+ * 这里只声明宿主**真正会渲染**的子集。插件若用了更复杂的组合
+ * （oneOf / allOf / $ref），表单会降级成只读 JSON 预览——不静默丢字段，
+ * 用户至少看得到内容，也知道得手工改配置文件。
+ */
+export interface PluginSettingsSchema {
+  type?: string;
+  properties?: Record<string, PluginSettingField>;
+  /** 必填字段名（表单打星号，缺值时阻止保存） */
+  required?: string[];
+}
+
+/** 插件的权限声明（宿主强制校验，不是口头承诺，见 AGENTS.md §9.3） */
+export interface PluginPermissions {
+  filesystem: {
+    /** 允许读取的路径白名单 */
+    read: string[];
+    /** 是否允许写文件系统；false 即「只读插件」 */
+    write: boolean;
+    write_paths: string[];
+  };
+  network: { hosts: string[] };
+}
+
+/** GET /plugins/{id}/settings */
+export interface PluginSettingsResponse {
+  id: string;
+  /** 已保存的值；用户尚未填过时为空对象 */
+  values: Record<string, unknown>;
+  schema: PluginSettingsSchema;
+  permissions: PluginPermissions;
+}
+
+/** GET /plugins/tavern-bridge/status：能读到什么 + 已导入进度 */
+export interface TavernBridgeStatus {
+  /** 生效的酒馆数据目录 */
+  root: string;
+  /** 可读内容的计数（entries / characters / sessions） */
+  available: Record<string, number>;
+  warnings: string[];
+  /** 已导入到该陪伴对象的会话 id */
+  imported_sessions: string[];
+  characters: string[];
+}
+
+/** POST /plugins/tavern-bridge/import（backend/app/memory/tavern_import.py 的 ImportResult） */
+export interface TavernImportResult {
+  companion_id: string;
+  sessions_total: number;
+  sessions_imported: number;
+  sessions_skipped: number;
+  /** 成功写入的对话轮次 */
+  turns: number;
+  /** 抽取出的语义事实条数 */
+  facts: number;
+  /** 写入的情景记忆条数 */
+  memories: number;
+  warnings: string[];
 }
 
 // =============================================================

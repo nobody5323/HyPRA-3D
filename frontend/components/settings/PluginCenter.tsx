@@ -1,14 +1,15 @@
 "use client";
 
 /**
- * 能力中心：插件体系的可见面板（设计见 `AGENTS.md §9`）。
+ * 能力中心：插件体系的可见 + 可操作面板（设计见 `AGENTS.md §9`）。
  *
- * 数据来源：`GET /health` 的 `plugins` / `plugins_summary` 字段
- * （`backend/app/plugins/manager.py` 的 `status()` / `summary()`）。
+ * 列表数据来自 `GET /health` 的 `plugins` / `plugins_summary`
+ * （`backend/app/plugins/manager.py` 的 `status()` / `summary()`）——与页面已有的
+ * 轮询共用一条来源，不再另开 `/plugins` 拉同一份数据。
  *
- * 为什么需要这个面板：插件体系的价值在于「能力可插拔」，但如果界面上看不见
- * 装了什么、各自什么状态、是不是只读，那它与一堆硬编码工厂没有区别。
- * 本面板把注册表摊开给用户与评审看。
+ * 为什么不只做只读展示：插件体系的价值在于「能力可插拔」。如果界面上看不见装了什么、
+ * 不能启停、不能配置，那它与一堆硬编码工厂没有区别——展示层缺位会让整层架构白做。
+ * 详情（配置 / 启停）**按需加载**，收起时不发请求。
  *
  * 分层语义（§9.2）：
  * - `core`        核心，不可禁用（换掉它产品就不成立）；
@@ -18,7 +19,21 @@
  * 降级：后端未就绪（无插件数据）时**不渲染**——不制造无意义的空面板。
  */
 
+import { useState } from "react";
+
+import { PluginDetail } from "@/components/settings/PluginDetail";
+import { TavernImportPanel } from "@/components/settings/TavernImportPanel";
 import type { PluginStatus, PluginsSummary } from "@/lib/api/types";
+
+/**
+ * 酒馆接入插件的 id。
+ *
+ * 这里对具体插件 id 做一次判断，是为了把「记忆导入」这个**跨层动作**（会话 → 记忆）
+ * 挂到能力中心里。插件体系本身不提供 UI 挂载点（§9.7 明确不做 globalUI），
+ * 所以宿主知道这一个 id 是当前最小的耦合——将来接入更多数据源时，
+ * 应改为按 `datasource` 能力驱动，而不是继续加 id 判断。
+ */
+const TAVERN_PLUGIN_ID = "tavern-bridge";
 
 const LAYER_ORDER = ["core", "builtin", "third-party"] as const;
 
@@ -54,11 +69,21 @@ const STATE_TONE: Record<string, string> = {
 export function PluginCenter({
   plugins,
   summary,
+  companionId = "",
+  onPluginsChanged,
 }: {
   plugins: PluginStatus[];
   summary: PluginsSummary | null;
+  /** 当前陪伴对象；酒馆记忆导入按它隔离（§8.2 的 `companion:{id}`） */
+  companionId?: string;
+  /** 启停 / 保存后回传最新快照，页面据此更新列表 */
+  onPluginsChanged?: (plugins: PluginStatus[]) => void;
 }) {
+  const [openId, setOpenId] = useState<string | null>(null);
+
   if (plugins.length === 0) return null;
+
+  const hasTavernBridge = plugins.some((plugin) => plugin.id === TAVERN_PLUGIN_ID);
 
   return (
     <section
@@ -87,36 +112,55 @@ export function PluginCenter({
                 {LAYER_LABEL[layer]}（{items.length}）
               </p>
               <ul className="flex flex-col gap-1">
-                {items.map((plugin) => (
-                  <li
-                    key={plugin.id}
-                    className="flex flex-wrap items-center gap-1.5 text-[11px]"
-                  >
-                    <span className={`rounded px-1.5 py-0.5 ${LAYER_TONE[layer]}`}>
-                      {plugin.display_name}
-                    </span>
-                    <span className={STATE_TONE[plugin.state]}>
-                      {STATE_LABEL[plugin.state] ?? plugin.state}
-                    </span>
-                    {plugin.read_only && (
-                      <span
-                        title="只读插件：宿主未授予写句柄（由权限声明架构强制）"
-                        className="text-ink-faint"
+                {items.map((plugin) => {
+                  const open = openId === plugin.id;
+                  return (
+                    <li key={plugin.id}>
+                      <button
+                        type="button"
+                        aria-expanded={open}
+                        className="focus-ring flex w-full flex-wrap items-center gap-1.5 rounded text-left text-[11px] hover:bg-surface-hover"
+                        onClick={() => setOpenId(open ? null : plugin.id)}
                       >
-                        只读
-                      </span>
-                    )}
-                    {plugin.capabilities.length > 0 && (
-                      <span className="text-ink-faint">{plugin.capabilities.join(" · ")}</span>
-                    )}
-                    {plugin.error && <span className="text-danger-text">{plugin.error}</span>}
-                  </li>
-                ))}
+                        <span className={`rounded px-1.5 py-0.5 ${LAYER_TONE[layer]}`}>
+                          {plugin.display_name}
+                        </span>
+                        <span className={STATE_TONE[plugin.state]}>
+                          {STATE_LABEL[plugin.state] ?? plugin.state}
+                        </span>
+                        {plugin.read_only && (
+                          <span
+                            title="只读插件：宿主未授予写句柄（由权限声明架构强制）"
+                            className="text-ink-faint"
+                          >
+                            只读
+                          </span>
+                        )}
+                        {plugin.capabilities.length > 0 && (
+                          <span className="text-ink-faint">{plugin.capabilities.join(" · ")}</span>
+                        )}
+                        {plugin.error && <span className="text-danger-text">{plugin.error}</span>}
+                        <span aria-hidden className="ml-auto text-ink-faint">
+                          {open ? "收起" : "详情"}
+                        </span>
+                      </button>
+                      {open && (
+                        <PluginDetail plugin={plugin} onPluginsChanged={onPluginsChanged} />
+                      )}
+                    </li>
+                  );
+                })}
               </ul>
             </div>
           );
         })}
       </div>
+
+      {hasTavernBridge && (
+        <div className="mt-3">
+          <TavernImportPanel companionId={companionId} />
+        </div>
+      )}
     </section>
   );
 }

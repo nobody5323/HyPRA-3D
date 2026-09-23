@@ -14,6 +14,8 @@ import type {
   LlmConfigResponse,
   LlmTestResult,
   PersonaCatalog,
+  PluginSettingsResponse,
+  PluginStatus,
   PresetCatalog,
   SessionDeleteResult,
   SessionHistory,
@@ -35,6 +37,8 @@ import type {
   StudioPersonaWriteResult,
   StudioWorldBookEntry,
   StyleCatalog,
+  TavernBridgeStatus,
+  TavernImportResult,
   TtsVoicesStatus,
 } from "@/lib/api/types";
 
@@ -935,4 +939,102 @@ export async function testStudioEntry(
     input,
     "试触发",
   );
+}
+
+// =============================================================
+// 插件管理（/plugins/*，backend/app/api/plugins.py）
+// =============================================================
+//
+// 数据源分工：**列表**走 `/health`（页面已在轮询，不另开第二条来源）；
+// 这里只封装「按需动作」：配置在展开详情时才读，启停在点按钮时才发。
+// 启停与保存都返回最新的完整快照，调用方据此就地更新，不必再轮询一次。
+
+/** POST /plugins/{id}/enabled 响应 */
+export interface PluginToggleResult {
+  id: string;
+  enabled: boolean;
+  plugins: PluginStatus[];
+}
+
+/** PUT /plugins/{id}/settings 响应 */
+export interface PluginSettingsWriteResult {
+  id: string;
+  values: Record<string, unknown>;
+  plugins: PluginStatus[];
+}
+
+/**
+ * 启用 / 禁用插件。
+ *
+ * 后端会**落盘**（`data/plugins/<id>/state.json`）并在本次运行内立即生效，
+ * 因此不必提示用户重启。core 层插件禁用会得到 400。
+ */
+export async function setPluginEnabled(
+  pluginId: string,
+  enabled: boolean,
+): Promise<PluginToggleResult> {
+  const res = await fetch(`${API_BASE}/plugins/${encodeURIComponent(pluginId)}/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await throwApiError(res, enabled ? "启用插件" : "禁用插件");
+  return (await res.json()) as PluginToggleResult;
+}
+
+/** 读插件配置 + 它的 JSON Schema（前端据此渲染表单，插件不自带 UI）。 */
+export async function getPluginSettings(pluginId: string): Promise<PluginSettingsResponse> {
+  const res = await fetch(`${API_BASE}/plugins/${encodeURIComponent(pluginId)}/settings`, {
+    cache: "no-store",
+  });
+  if (!res.ok) await throwApiError(res, "读取插件配置");
+  return (await res.json()) as PluginSettingsResponse;
+}
+
+/** 保存插件配置；后端会重新 setup，让新配置当场生效。 */
+export async function putPluginSettings(
+  pluginId: string,
+  values: Record<string, unknown>,
+): Promise<PluginSettingsWriteResult> {
+  const res = await fetch(`${API_BASE}/plugins/${encodeURIComponent(pluginId)}/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values }),
+  });
+  if (!res.ok) await throwApiError(res, "保存插件配置");
+  return (await res.json()) as PluginSettingsWriteResult;
+}
+
+/**
+ * 酒馆接入状态：能读到什么（条目 / 角色卡 / 会话计数）+ 已导入进度。
+ *
+ * 插件未启用或未填目录时后端返回 **409**，属预期状态而非异常——
+ * 调用方应捕获 `ApiError` 并按 `status === 409` 渲染「请先启用并填目录」，
+ * 而不是弹一个错误框。
+ */
+export async function getTavernBridgeStatus(companionId: string): Promise<TavernBridgeStatus> {
+  const query = new URLSearchParams({ companion_id: companionId });
+  const res = await fetch(`${API_BASE}/plugins/tavern-bridge/status?${query}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) await throwApiError(res, "读取酒馆接入状态");
+  return (await res.json()) as TavernBridgeStatus;
+}
+
+/**
+ * 把酒馆会话导入为长期记忆。
+ *
+ * `force` 为 true 时忽略「已导入」记录重新导入（换 embedding 后重建用）——
+ * 会重复写入记忆条目，界面上须二次确认。
+ */
+export async function importTavernMemory(
+  companionId: string,
+  force = false,
+): Promise<TavernImportResult> {
+  const query = new URLSearchParams({ companion_id: companionId, force: String(force) });
+  const res = await fetch(`${API_BASE}/plugins/tavern-bridge/import?${query}`, {
+    method: "POST",
+  });
+  if (!res.ok) await throwApiError(res, "导入酒馆记忆");
+  return (await res.json()) as TavernImportResult;
 }

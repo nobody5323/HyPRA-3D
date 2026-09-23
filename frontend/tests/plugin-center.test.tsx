@@ -1,16 +1,45 @@
 /**
- * 能力中心面板测试：分层渲染、状态展示、只读标记、失败原因、空数据不渲染。
+ * 能力中心面板测试：分层渲染、状态展示、只读标记、失败原因、空数据不渲染，
+ * 以及展开详情 / 手风琴 / 记忆导入区块的挂载条件。
  *
- * 纯展示组件，不发请求——数据由页面从 `/health` 取回后传入。
+ * 列表数据由页面从 `/health` 取回后传入；**详情是按需拉的**，
+ * 因此只有展开那一行时才会看到 `/plugins/{id}/settings` 请求。
  */
 
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PluginCenter } from "@/components/settings/PluginCenter";
 import type { PluginStatus, PluginsSummary } from "@/lib/api/types";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    json: async () => body,
+  } as unknown as Response;
+}
+
+function stubRoutes(
+  handler: (url: string, method: string) => Response | undefined,
+): string[] {
+  const urls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = (init?.method ?? "GET").toUpperCase();
+      urls.push(`${method} ${url}`);
+      return handler(url, method) ?? jsonResponse({ detail: "not found" }, 404);
+    }),
+  );
+  return urls;
+}
 
 function makePlugin(overrides: Partial<PluginStatus> = {}): PluginStatus {
   return {
@@ -20,6 +49,7 @@ function makePlugin(overrides: Partial<PluginStatus> = {}): PluginStatus {
     layer: "builtin",
     category: "provider",
     state: "started",
+    enabled: true,
     capabilities: ["provider"],
     read_only: true,
     error: "",
@@ -135,5 +165,102 @@ describe("PluginCenter", () => {
     render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
     expect(screen.getByText("对话模型接入")).toBeTruthy();
     expect(screen.queryByText(/运行中\b.*\//)).toBeNull();
+  });
+});
+
+describe("PluginCenter 交互", () => {
+  const SETTINGS_BODY = {
+    id: "tavern-bridge",
+    values: {},
+    schema: {
+      type: "object",
+      properties: { tavern_dir: { type: "string", title: "酒馆数据目录" } },
+    },
+    permissions: {
+      filesystem: { read: [], write: false, write_paths: [] },
+      network: { hosts: [] },
+    },
+  };
+
+  it("点击插件行展开详情，再点收起（收起时不发请求）", async () => {
+    const urls = stubRoutes((url, method) =>
+      url.endsWith("/settings") && method === "GET" ? jsonResponse(SETTINGS_BODY) : undefined,
+    );
+
+    render(
+      <PluginCenter
+        plugins={[makePlugin({ id: "tavern-bridge", display_name: "酒馆数据接入" })]}
+        summary={makeSummary()}
+      />,
+    );
+
+    const row = screen.getByRole("button", { name: /酒馆数据接入/ });
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    // 面板展开前不该拉配置——插件详情是按需加载的
+    expect(urls.filter((url) => url.includes("/settings"))).toHaveLength(0);
+
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-expanded")).toBe("true");
+    expect(await screen.findByLabelText("酒馆数据目录")).toBeTruthy();
+
+    fireEvent.click(row);
+    expect(row.getAttribute("aria-expanded")).toBe("false");
+    await waitFor(() => expect(screen.queryByLabelText("酒馆数据目录")).toBeNull());
+  });
+
+  it("只展开一个插件（手风琴）", async () => {
+    stubRoutes((url, method) =>
+      url.endsWith("/settings") && method === "GET" ? jsonResponse(SETTINGS_BODY) : undefined,
+    );
+
+    render(
+      <PluginCenter
+        plugins={[
+          makePlugin({ id: "a", display_name: "甲插件" }),
+          makePlugin({ id: "b", display_name: "乙插件" }),
+        ]}
+        summary={makeSummary()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /甲插件/ }));
+    fireEvent.click(screen.getByRole("button", { name: /乙插件/ }));
+
+    expect(screen.getByRole("button", { name: /甲插件/ }).getAttribute("aria-expanded")).toBe("false");
+    expect(screen.getByRole("button", { name: /乙插件/ }).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("装了酒馆接入插件才渲染记忆导入面板", async () => {
+    stubRoutes((url) =>
+      url.includes("/status")
+        ? jsonResponse({
+            root: "/data",
+            available: { entries: 1, characters: 1, sessions: 1 },
+            warnings: [],
+            imported_sessions: [],
+            characters: [],
+          })
+        : undefined,
+    );
+
+    const { unmount } = render(
+      <PluginCenter
+        plugins={[makePlugin({ id: "tavern-bridge" })]}
+        summary={makeSummary()}
+        companionId="companion-a"
+      />,
+    );
+    expect(await screen.findByText("酒馆记忆导入")).toBeTruthy();
+    unmount();
+
+    // 没有酒馆插件时不渲染——不制造一个永远读不到数据的空面板
+    render(
+      <PluginCenter
+        plugins={[makePlugin({ id: "other-plugin" })]}
+        summary={makeSummary()}
+        companionId="companion-a"
+      />,
+    );
+    expect(screen.queryByText("酒馆记忆导入")).toBeNull();
   });
 });
