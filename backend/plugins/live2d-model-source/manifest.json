@@ -1,0 +1,37 @@
+{
+  "id": "live2d-model-source",
+  "display_name": "数字人模型来源",
+  "version": "0.1.0",
+  "layer": "builtin",
+  "category": "datasource",
+  "description": "汇总可用的数字人模型：本机模型库（已上传）+ 外部清单文件（只读）。模型不可自由分发，故本插件只给出作者 / 授权 / 获取地址，不代下载。",
+  "homepage": "https://github.com/nobody5323/HyPRA-3D-",
+  "loading_order": 210,
+  "capabilities": ["datasource", "settings"],
+  "permissions": {
+    "filesystem": {
+      "read": ["${data_dir}/avatar_models", "${models_dir}", "${manifest_path}"],
+      "write": false
+    },
+    "network": {
+      "hosts": []
+    }
+  },
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "models_dir": {
+        "type": "string",
+        "title": "本机模型库目录",
+        "description": "留空则用宿主的默认位置（backend/data/avatar_models）。只有改了宿主的 AVATAR_MODELS_DIR 时才需要在这里同步填。"
+      },
+      "manifest_path": {
+        "type": "string",
+        "title": "模型清单文件",
+        "description": "本地 JSON 清单的路径（也接受 file:// URL）。留空则只显示本机模型库。格式见插件目录下的 model-manifest.example.json。"
+      }
+    }
+  },
+  "enabled": true,
+  "entry": "plugin.py"
+}

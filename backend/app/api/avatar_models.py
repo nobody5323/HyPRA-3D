@@ -19,6 +19,10 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.digital_human.model_sources import (
+    ModelSourceRegistry,
+    build_default_sources,
+)
 from app.digital_human.model_store import (
     AvatarModelKind,
     AvatarModelStore,
@@ -27,10 +31,37 @@ from app.digital_human.model_store import (
 
 router = APIRouter(prefix="/media/avatar/models", tags=["avatar-models"])
 
+#: 贡献模型来源的插件 id（AGENTS.md §9.10 第 15 项）
+MODEL_SOURCE_PLUGIN_ID = "live2d-model-source"
+
 
 def get_store() -> AvatarModelStore:
     """按配置构建模型库（目录可配置，便于测试隔离）。"""
     return AvatarModelStore(Path(get_settings().avatar_models_dir))
+
+
+def get_model_sources() -> ModelSourceRegistry:
+    """取模型来源集合。
+
+    优先用插件贡献的那份（可扩展）；插件被禁用或未安装时**退化为内置组合**——
+    与分词、解析插件同理：注册表是能力账本，不是运行时唯一通路，
+    否则禁用插件会把模型列表整个打断。
+    """
+    from app.plugins.manager import get_plugin_manager
+
+    registration = get_plugin_manager().registry.get(MODEL_SOURCE_PLUGIN_ID)
+    if registration is not None:
+        for contributed in registration.datasources:
+            if isinstance(contributed, ModelSourceRegistry):
+                return contributed
+
+    settings = get_settings()
+    return ModelSourceRegistry(
+        build_default_sources(
+            models_dir=settings.avatar_models_dir,
+            manifest_path=settings.live2d_manifest_path,
+        )
+    )
 
 
 def _bad_request(error: ModelStoreError) -> HTTPException:
@@ -52,6 +83,30 @@ def list_models() -> dict:
     """列出全部模型（新的在前）。"""
     store = get_store()
     return {"models": [model.to_dict() for model in store.list_models()]}
+
+
+# ⚠️ 必须注册在 `/{model_id}` **之前**：FastAPI 按注册顺序匹配，
+# 放到后面的话 `/sources` 会被当成模型 id 而 404。
+@router.get("/sources")
+def list_model_sources() -> dict:
+    """列出模型来源与它们提供的模型。
+
+    两类条目混在一张表里，靠 `installed` 区分：
+
+    - **已安装**（本机模型库）→ 可直接选用；
+    - **可获取**（清单里列出）→ 需用户自行下载后上传。
+
+    为什么要分开标注：模型**不可自由分发**（见 `docs/license-compliance.md`），
+    本项目只告诉你「有什么、谁的、去哪拿」，不代下载、也不随发行物分发模型。
+    """
+    registry = get_model_sources()
+    models = registry.descriptors()
+    return {
+        "sources": registry.status(),
+        "models": [model.to_dict() for model in models],
+        "installedCount": sum(1 for model in models if model.installed),
+        "availableCount": sum(1 for model in models if not model.installed),
+    }
 
 
 @router.post("", status_code=201)

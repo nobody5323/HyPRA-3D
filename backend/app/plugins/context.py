@@ -81,13 +81,21 @@ class PluginContext:
         )
 
     def _expand(self, paths: list[str]) -> list[Path]:
-        """把白名单里的 ${setting} 占位符替换为配置值。"""
+        """把白名单里的 ${setting} 占位符替换为配置值。
+
+        除插件自己的配置项外，还支持一个**内置变量** `${data_dir}`（宿主数据目录）：
+        插件常需要读宿主放在 data 下的公共资源（如本机模型库），而这个位置是
+        **宿主决定的**——让 manifest 写死相对路径，或让用户手填一遍绝对路径，都不合理。
+
+        未解析的占位符（用户没配该项）连同该项一起跳过：拿不到就不给读。
+        """
+        variables = {"data_dir": str(self.data_dir), **self.settings}
         out: list[Path] = []
         for raw in paths:
             text = raw
-            for key, value in self.settings.items():
+            for key, value in variables.items():
                 text = text.replace(f"${{{key}}}", str(value))
-            if "${" in text:   # 仍有未解析的占位符 → 说明用户没配该项，跳过
+            if "${" in text:   # 仍有未解析的占位符 → 说明用户没配该项
                 self.logger.warning("权限白名单项未解析（缺配置）：%s", raw)
                 continue
             out.append(Path(text).expanduser().resolve())

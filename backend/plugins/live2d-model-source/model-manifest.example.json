@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "_comment": "模型清单格式样例。复制到本机任意位置、按需修改后，在「数字人模型来源」插件配置里填绝对路径即可。下面的条目全是**占位示例**（example.invalid 是保留域名），不是真实可下载的模型。",
+  "models": [
+    {
+      "id": "example-live2d",
+      "name": "示例 Live2D 模型",
+      "kind": "live2d",
+      "description": "占位示例：真实使用时请填写你持有授权的模型。",
+      "author": "（示例）模型作者",
+      "license": "（示例）授权条款，例如 CC BY 4.0 或模型作者的使用条款",
+      "homepage": "https://example.invalid/model-page",
+      "preview": "https://example.invalid/preview.png"
+    },
+    {
+      "id": "example-portraits",
+      "name": "示例静态立绘组",
+      "kind": "images",
+      "description": "占位示例：静态立绘是一组按情绪命名的图片，上传后在前端逐个指定情绪。",
+      "author": "（示例）画师",
+      "license": "（示例）授权条款",
+      "homepage": "https://example.invalid/portraits"
+    }
+  ]
+}

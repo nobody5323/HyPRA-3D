@@ -140,6 +140,15 @@ class Settings(BaseSettings):
     # GET /media/avatar/models/{id}/files/{path} 取文件。
     avatar_models_dir: str = "data/avatar_models"
 
+    # 数字人模型清单（可选）：本地 JSON 文件路径（也接受 file:// URL）。
+    #
+    # 用途：把「还有哪些模型可以获取」以清单形式展示给用户（作者 / 授权 / 获取地址）。
+    # **只读清单，不代下载**——模型不可自由分发，见 docs/license-compliance.md。
+    # 只支持本地路径：拉远程 JSON 是网络访问，而插件权限模型目前只对文件系统
+    # 有强制校验，声明 network.hosts 为空却真去发请求等于把声明写成空话。
+    # 格式见 backend/plugins/live2d-model-source/model-manifest.example.json。
+    live2d_manifest_path: str = ""
+
     # ---- 文风预设（M5 风格系统）----
     # 与人设正交：人设管「是谁」，文风管「怎么说话」
     style_preset: str = "modern-conversational"

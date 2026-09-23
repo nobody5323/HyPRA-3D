@@ -326,3 +326,143 @@ def test_decode_zip_name_restores_gbk_names():
     info.filename = "开心兴奋.exp3.json".encode("gbk").decode("cp437")
 
     assert decode_zip_name(info) == "开心兴奋.exp3.json"
+
+
+# =============================================================
+# 模型来源（GET /media/avatar/models/sources，§9.10 第 15 项）
+# =============================================================
+
+
+def _write_model(root: Path, model_id: str, name: str) -> None:
+    """直接在模型库里落一个模型（只需无数据层的模型）。"""
+    from app.digital_human.model_store import MODEL_META_FILE
+
+    directory = root / model_id
+    directory.mkdir(parents=True)
+    (directory / MODEL_META_FILE).write_text(
+        json.dumps(
+            {
+                "id": model_id,
+                "name": name,
+                "kind": "live2d",
+                "createdAt": "2026-01-01T00:00:00",
+                "updatedAt": "2026-01-01T00:00:00",
+                "entry": "pet.model3.json",
+                "expressions": ["smile"],
+                "images": [],
+                "expressionMap": {},
+                "meta": {},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+@pytest.fixture
+def fallback_sources(tmp_path, monkeypatch):
+    """让 API 走「插件未贡献来源」的退化路径。
+
+    刻意这么做：退化路径不依赖插件是否已 setup，测试因此稳定。
+    插件本身的行为由 `tests/test_digital_human/test_model_sources.py` 覆盖。
+    """
+    from app.plugins.manager import PluginManager, get_plugin_manager, set_plugin_manager
+    from app.plugins.registry import PluginRegistry
+
+    monkeypatch.setenv("LIVE2D_MANIFEST_PATH", str(tmp_path / "manifest.json"))
+
+    original = get_plugin_manager()
+    set_plugin_manager(
+        PluginManager(PluginRegistry(), data_dir=tmp_path / "data", plugin_dirs=[])
+    )
+    try:
+        yield tmp_path
+    finally:
+        set_plugin_manager(original)
+
+
+def test_sources_route_is_not_shadowed_by_model_id(isolated_store, fallback_sources):
+    """/sources 必须注册在 /{model_id} **之前**。
+
+    否则 FastAPI 会把 `sources` 当成模型 id，返回「模型不存在：sources」。
+    """
+    response = client.get(f"{BASE}/sources")
+
+    assert response.status_code == 200
+    assert "models" in response.json()
+
+
+def test_sources_lists_installed_and_available(isolated_store, fallback_sources) -> None:
+    _write_model(isolated_store, "mine", "我的模型")
+    manifest = fallback_sources / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "models": [
+                    {
+                        "id": "mine",
+                        "name": "我的模型（清单）",
+                        "author": "作者",
+                        "license": "条款",
+                    },
+                    {"id": "other", "name": "别的模型"},
+                ],
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+    body = client.get(f"{BASE}/sources").json()
+    by_id = {item["id"]: item for item in body["models"]}
+
+    assert set(by_id) == {"mine", "other"}
+    assert body["installedCount"] == 1
+    assert body["availableCount"] == 1
+    # 已装的排前面
+    assert body["models"][0]["id"] == "mine"
+    assert by_id["mine"]["installed"] is True
+    # 已装版本胜出，但清单侧的授权信息被补了进来——本机库里没有这些，
+    # 而它们正是用户判断「能不能用」的依据（§6 合规红线）
+    assert by_id["mine"]["author"] == "作者"
+    assert by_id["mine"]["license"] == "条款"
+    assert by_id["other"]["installed"] is False
+
+
+def test_sources_without_manifest_only_local(isolated_store, fallback_sources) -> None:
+    _write_model(isolated_store, "mine", "我的模型")
+
+    body = client.get(f"{BASE}/sources").json()
+
+    assert [item["id"] for item in body["models"]] == ["mine"]
+    assert body["installedCount"] == 1
+    assert body["availableCount"] == 0
+
+
+def test_sources_reports_source_status(isolated_store, fallback_sources) -> None:
+    _write_model(isolated_store, "mine", "我的模型")
+
+    by_id = {item["id"]: item for item in client.get(f"{BASE}/sources").json()["sources"]}
+
+    assert by_id["local-library"]["available"] is True
+    assert by_id["local-library"]["count"] == 1
+    # available 的语义是「**配了路径**」而不是「文件存在」：
+    # 路径配了但文件读不到，两者分不清是用户还没放还是写错了，
+    # 所以状态报「可用」、计数报 0，让界面提示「配了但没读到」而不是「没配」。
+    assert by_id["remote-manifest"]["available"] is True
+    assert by_id["remote-manifest"]["count"] == 0
+
+
+def test_existing_model_list_is_unchanged(isolated_store, fallback_sources) -> None:
+    """`GET /media/avatar/models` 的语义不变（只是已装模型，不含清单）。"""
+    _write_model(isolated_store, "mine", "我的模型")
+    manifest = fallback_sources / "manifest.json"
+    manifest.write_text(
+        json.dumps({"version": 1, "models": [{"id": "other", "name": "别的"}]}),
+        encoding="utf-8",
+    )
+
+    body = client.get(BASE).json()
+
+    assert [item["id"] for item in body["models"]] == ["mine"]

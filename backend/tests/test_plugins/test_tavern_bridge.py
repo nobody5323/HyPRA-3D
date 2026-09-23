@@ -464,7 +464,10 @@ def test_directory_plugin_loads_end_to_end(tmp_path, populated_tavern) -> None:
 
     # 1) 发现：只读 manifest，不执行插件代码
     found = manager.discover()
-    assert [r.manifest.id for r in found] == ["tavern-bridge"]
+    found_ids = [r.manifest.id for r in found]
+    # 不断言「恰好只有它」：plugins/ 是随项目分发的第一方插件目录，
+    # 以后会继续长（已有 live2d-model-source），逐个列举会把每次新增都变成测试失败。
+    assert "tavern-bridge" in found_ids
     registration = registry.get("tavern-bridge")
     assert registration is not None
     assert registration.manifest.read_only is True
