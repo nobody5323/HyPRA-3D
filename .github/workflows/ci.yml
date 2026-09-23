@@ -105,7 +105,7 @@ jobs:
             fi
           done
           # 目录型路径：不应有被跟踪的产物文件
-          for dir in "backend/data" "backend/media" "summaries"; do
+          for dir in "backend/data" "backend/media" "_local"; do
             files=$(git ls-files -- "$dir")
             if [ -n "$files" ]; then
               echo "::error::目录应当被忽略但存在被跟踪文件：$dir → $files"

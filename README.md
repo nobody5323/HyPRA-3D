@@ -55,6 +55,11 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
   内容写完后**下次对话即生效**（无需重启服务）。内置角色与条目一律只读（要改就「复制为我的」），
   唯一例外是内置条目的**启用开关**——它写用户侧偏好，内置文件一字未改。
   数据契约、接口与不变量见 [`docs/user-content-studio.md`](docs/user-content-studio.md)。
+- **两种形态：Web 端 + 桌面桌宠端**：同一套后端与渲染层，两种「在场」方式——
+  浏览器里是完整工作台（对话 / 记忆可见性 / 世界书 / 创作工坊 / 魔珐 3D 数字人），
+  桌面上是一只**透明无边框桌宠**（Live2D / 立绘 + 气泡字幕 + 一键对话，托盘常驻，
+  支持点击穿透、置顶、70%–150% 缩放、全局快捷键）。桌宠端不接触任何 API Key，
+  对话与记忆仍走后端；设计说明与决策理由见 [`docs/desktop-pet.md`](docs/desktop-pet.md)。
 
 ## 🧠 设计参照与文档
 
@@ -68,6 +73,7 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 | [`docs/sillytavern-memory-design-reference.md`](docs/sillytavern-memory-design-reference.md) | 记忆与提示词机制的设计参照调研 |
 | [`docs/st-preset-compat.md`](docs/st-preset-compat.md) | **酒馆预设兼容契约**（字段映射 / 组装语义 / 宏 / 不支持清单 / 合规边界） |
 | [`docs/user-content-studio.md`](docs/user-content-studio.md) | **创作工坊**（用户自定义角色 / 背景故事 / 世界书的数据契约、接口与不变量） |
+| [`docs/desktop-pet.md`](docs/desktop-pet.md) | **桌面桌宠端**（形态分工、进程结构、关键决策与合规边界） |
 | [`AGENTS.md`](AGENTS.md) | 项目开发约定（架构分层、红线、验证要求） |
 
 ## 🚀 快速开始
@@ -96,6 +102,16 @@ npm run dev             # 访问 http://localhost:3000
 
 评审模式（docker compose 一键部署，见 [`docs/deployment.md`](docs/deployment.md)）。
 
+```bash
+# 桌面桌宠端（第三种入口，可选；需后端已运行）
+cd desktop
+npm install
+npm run dev             # 桌面右下角出现透明桌宠，托盘常驻
+# 打包安装包：npm run dist:win → release/ 下的 portable exe 与 NSIS 安装包
+# 形象：未装 Cubism SDK 时用自研立绘；装好后 npm run install:model 启用 Live2D
+# 详见 desktop/README.md 与 docs/desktop-pet.md
+```
+
 > **关于 Embedding（影响语义检索效果）**
 > 不填 key 时用本地确定性实现（零依赖，可跑通全链路），但它是字符 n-gram 哈希：
 > 记忆向量召回与**世界书向量通道**会降级为字面级匹配（关键词 / 正则通道不受影响）。
@@ -109,13 +125,17 @@ npm run dev             # 访问 http://localhost:3000
 
     backend/     Python 后端（FastAPI + LangChain/LangGraph + Qdrant + 魔珐星云驱动）
     frontend/    Next.js 前端（对话 UI + 情绪/记忆可见性 + 个人记忆上传 + 魔珐具身数字人）
+    desktop/     Electron 桌宠端（透明桌宠窗 + 托盘；复用 frontend 的渲染器与 hooks）
     docs/        设计文档、部署说明、参赛说明、演示脚本
+    _local/      本机私有资料（自备 SDK/模型包、开发留档、旧备份）——不入库
     AGENTS.md    项目开发约定
     LICENSE
 
 ## 📄 合规声明
 
-> **本项目借鉴 SillyTavern 架构思想，但底层代码 100% 原创，不受 AGPL-3.0 协议传染。**
+> **本项目以 GNU AGPL-3.0 发布。** 借鉴 SillyTavern 的提示词工程与记忆体系**思想**，
+> 以及其数据格式规范（角色卡 CCv2/CCv3、世界书、预设 JSON）；
+> 除文件中明确标注来源的第三方组件外，本项目代码为原创实现。
 > 项目内测试语料 / 世界书 / RAG 语料仅使用自创或公有领域内容。
 >
 > **关于语音与音色克隆（GPT-SoVITS）**：本项目只提供接入能力，不自带任何音色模型与参考音频。
@@ -161,5 +181,12 @@ npm run dev             # 访问 http://localhost:3000
 
 ## 📄 许可
 
-本项目基于 [Apache License 2.0](LICENSE) 开源（Copyright 2026 nobody5323）。
-**声明：本项目借鉴 SillyTavern 架构思想，底层代码 100% 原创，不受 AGPL-3.0 协议传染。**
+本项目基于 [GNU Affero General Public License v3.0](LICENSE) 开源（Copyright 2026 nobody5323）。
+
+**声明**：本项目借鉴 SillyTavern 的提示词工程与记忆体系**思想**及其数据格式规范
+（角色卡 CCv2/CCv3、世界书、预设 JSON）；除文件中明确标注来源的第三方组件外，
+代码为原创实现。项目采用与本生态一致的 AGPL-3.0，**不适用于闭源二次分发**。
+
+**AGPL §13 义务**：本项目以网络服务形式提供时，必须让用户能获取对应版本的源码
+（自带 Web 界面须暴露可点击的源码入口）。实现方式与检查清单见
+[`docs/license-compliance.md`](docs/license-compliance.md)。

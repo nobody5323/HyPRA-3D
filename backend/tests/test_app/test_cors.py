@@ -4,6 +4,8 @@
 浏览器会拦截请求，表现为前端一直显示「后端未连接」（curl 不受影响，故容易漏测）。
 """
 
+import re
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings, cors_origin_list
@@ -40,6 +42,37 @@ def test_cors_unknown_origin_not_allowed() -> None:
     assert resp.headers.get("access-control-allow-origin") != "http://evil.example.com"
 
 
+def test_cors_allows_loopback_any_port() -> None:
+    """回环地址的任意端口都应被允许。
+
+    桌面端（Electron）内置静态服务的端口从 34567 起找可用端口，Web 端也可能改端口；
+    端口写死会让它们被 CORS 拦掉，表现为「后端未连接」而 curl 正常。
+    """
+    for origin in ("http://127.0.0.1:34567", "http://localhost:34567", "http://127.0.0.1"):
+        resp = client.get("/health", headers={"Origin": origin})
+        assert resp.headers.get("access-control-allow-origin") == origin
+
+
+def test_cors_preflight_from_desktop_origin() -> None:
+    """桌面端的对话请求是 application/json，会先发 OPTIONS 预检，必须通过。"""
+    resp = client.options(
+        "/chat",
+        headers={
+            "Origin": "http://127.0.0.1:34567",
+            "Access-Control-Request-Method": "POST",
+            "Access-Control-Request-Headers": "content-type",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers.get("access-control-allow-origin") == "http://127.0.0.1:34567"
+
+
+def test_cors_regex_does_not_allow_remote_hosts() -> None:
+    """正则只放行回环地址，局域网地址不因此获得允许头。"""
+    resp = client.get("/health", headers={"Origin": "http://192.168.1.20:34567"})
+    assert resp.headers.get("access-control-allow-origin") != "http://192.168.1.20:34567"
+
+
 # ---------- 配置解析 ----------
 
 
@@ -63,3 +96,17 @@ def test_default_origins_cover_local_frontend() -> None:
     origins = cors_origin_list(Settings(_env_file=None))
     assert "http://localhost:3000" in origins
     assert "http://127.0.0.1:3000" in origins
+
+
+def test_default_regex_covers_loopback_any_port() -> None:
+    """默认正则应匹配回环地址的任意端口，且不匹配外部主机。"""
+    pattern = Settings(_env_file=None).cors_origin_regex
+    assert re.match(pattern, "http://127.0.0.1:34567")
+    assert re.match(pattern, "http://localhost:5173")
+    assert not re.match(pattern, "http://evil.example.com")
+    assert not re.match(pattern, "http://127.0.0.1.evil.com")
+
+
+def test_regex_can_be_disabled() -> None:
+    """置空即关闭正则白名单（只用固定列表）。"""
+    assert Settings(_env_file=None, cors_origin_regex="").cors_origin_regex == ""
