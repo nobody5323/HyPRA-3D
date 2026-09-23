@@ -28,6 +28,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
+import { StPresetAdaptPanel } from "@/components/StPresetAdaptPanel";
 import { StPresetEditor } from "@/components/StPresetEditor";
 import {
   ApiError,
@@ -427,6 +428,18 @@ export function StPresetPanel({
                 );
               })}
             </ul>
+          )}
+
+          {/* ---- AI 适配（先试运行，用户确认后才落盘） ---- */}
+          {detail && (
+            <StPresetAdaptPanel
+              // key 强制重挂载：切换预设时清掉上一个预设的建议（否则会把 A 的
+              // 对照当成 B 的结果，又把改动写到 B 上）。与下方编辑器同一口径。
+              key={detail.id}
+              presetId={detail.id}
+              onApplied={onDetailSaved}
+              disabled={disabled}
+            />
           )}
 
           {/* ---- 编辑器 ---- */}

@@ -1,10 +1,13 @@
 # SillyTavern 预设兼容契约（P0 · 冻结稿）
 
-> 状态：**P0 契约已确认；P1–P6 均已实现**（解析 / 组装 / 宏 / 后端接入 / 前端面板与条目编辑器）。
+> 状态：**P0 契约已确认；P1–P7 均已实现**（解析 / 组装 / 宏 / 后端接入 / 前端面板与条目编辑器）。
 > 实现进度见 §14。
 > 目的：让酒馆（SillyTavern，下称 ST）用户把已有的 **Chat Completion 预设 JSON** 导入 HyPRA 后，
 > 提示词组装按 ST 语义生效，而不只是提取采样参数。
 > 原则：**借鉴机制思想、自写实现**（对齐 AGENTS.md §6）；本文档不含任何 ST 或社区预设的提示词原文。
+>
+> **配套功能**：预设导入后的「一键 AI 适配」（改成陪伴对话形态）见
+> [`docs/preset-ai-adaptation.md`](./preset-ai-adaptation.md)。
 
 ## 0. 一句话范围
 
@@ -95,6 +98,7 @@ ST 预设 JSON（顶层对象）可拆成两半：
 | 字段 | 本项目 |
 |---|---|
 | `use_sysprompt` | **已实现**（P2）：为 true 时"System Prompt"覆盖生效（§6.4） |
+| `show_thoughts` | **已实现**（P7）：映射为本项目 `enable_thinking`（同向："是否让模型思考"）；未提供时不覆盖内置档。因为是 `STPreset` 的 extra 字段（不在 `model_fields` 里），**不走 `sampling` 覆盖通道**，而是经覆盖层的 `assembly.show_thoughts` 改写，导出时写回原字段 |
 | `squash_system_messages` | **已实现**（P2）：相邻无 name 的 system 消息合并 |
 | `new_chat_prompt` / `new_example_chat_prompt` | **已实现**（P2）：新会话分隔、示例块分隔消息 |
 | `wi_format` / `scenario_format` / `personality_format` | **已实现**（P2）：包装模板（`{0}` / `{{scenario}}` / `{{personality}}`）；模板缺占位符时**保留内容并告警**（ST 会静默丢内容） |

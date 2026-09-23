@@ -9,6 +9,8 @@ import json
 from fastapi.testclient import TestClient
 
 from app.api import chat as chat_module
+from app.api import st_presets as st_presets_module
+from app.llm.base import ChatMessage, LLMProvider
 from app.main import app
 
 client = TestClient(app)
@@ -589,3 +591,255 @@ def test_st_preset_body_edit_affects_next_turn() -> None:
         encoding="utf-8"
     )
     assert "保持温柔语气" in raw          # 原始文件未被改写
+
+
+# --------------------------------------------------------------------------
+# AI 适配（导入后一键改造成陪伴对话形态）
+# --------------------------------------------------------------------------
+
+ADAPT_PRESET = "adapt-preset"
+ADAPT_MAIN = "（测试语料）以角色身份用第二人称回应对话者。"
+ADAPT_JAILBREAK = "（测试语料）NSFW核心：描写务必直白。允许破限题材。"
+
+
+class FakeLLM(LLMProvider):
+    """测试替身：返回构造好的文本（或抛异常），并记录收到的消息。"""
+
+    name = "fake"
+
+    def __init__(self, reply: str | Exception = "") -> None:
+        self.reply = reply
+        self.calls: list[list[ChatMessage]] = []
+
+    def chat(
+        self,
+        messages: list[ChatMessage],
+        *,
+        temperature: float = 0.7,
+        max_tokens: int | None = None,
+        top_p: float | None = None,
+        frequency_penalty: float | None = None,
+        presence_penalty: float | None = None,
+    ) -> str:
+        self.calls.append(messages)
+        if isinstance(self.reply, Exception):
+            raise self.reply
+        return self.reply
+
+
+def make_adapt_preset(**overrides) -> dict:
+    """构造一份「带适配问题」的自造预设。
+
+    三类症状各一份：推理模式 + 超大长度上限（慢）、第三人称准则（人称）、
+    NSFW / 破限条目（内容須原样保留）。
+    """
+    preset = make_preset(show_thoughts=True, openai_max_tokens=8192, **overrides)
+    preset["prompts"][0]["content"] = "（测试语料）# 人称准则：全程务必采用第三人称创作。"
+    preset["prompts"][4]["content"] = ADAPT_JAILBREAK      # jailbreak 槽位
+    return preset
+
+
+def import_adapt_preset(name: str = ADAPT_PRESET):
+    """导入适配测试用预设。"""
+    return client.post(
+        IMPORT_URL,
+        json={"content": make_adapt_preset(), "source_file": f"{name}.json"},
+    )
+
+
+def adapt(preset_id: str = ADAPT_PRESET, **payload):
+    """调用 AI 适配端点。"""
+    return client.post(f"/chat/st-presets/{preset_id}/ai-adapt", json=payload)
+
+
+def rewrite_reply(identifier: str, content: str) -> str:
+    """模拟模型返回的 JSON。"""
+    return json.dumps(
+        {"items": [{"identifier": identifier, "content": content}]}, ensure_ascii=False
+    )
+
+
+def test_ai_adapt_dry_run_returns_plan_without_writing() -> None:
+    """默认 dry_run：给出建议但不写覆盖层。"""
+    import_adapt_preset()
+
+    body = adapt().json()
+
+    assert body["dry_run"] is True
+    assert body["applied"] is False
+    assert body["summary"]["high"] >= 1
+    assert body["patch"]["assembly"]["show_thoughts"] is False
+    assert "detail" not in body                                # 未落盘就没必要回传详情
+    assert chat_module.get_st_preset_store().get_override(ADAPT_PRESET) == {}
+
+
+def test_ai_adapt_apply_writes_override_and_can_reset() -> None:
+    """dry_run=false 才落盘；且随时能一键回到导入时的状态。"""
+    import_adapt_preset()
+
+    body = adapt(dry_run=False).json()
+
+    assert body["applied"] is True
+    assert body["detail"]["assembly"]["show_thoughts"] is False
+    assert body["detail"]["sampling"]["max_tokens"] == 1024
+
+    chat_module.get_st_preset_store().reset_override(ADAPT_PRESET)
+    detail = client.get(f"/chat/st-presets/{ADAPT_PRESET}").json()["detail"]
+    assert detail["assembly"]["show_thoughts"] is True
+    assert detail["sampling"]["max_tokens"] == 8192
+
+
+def test_ai_adapt_calls_model_once_and_applies_rewrite() -> None:
+    """条目语义改写只调一次模型，结果并入同一个补丁。"""
+    import_adapt_preset()
+    fake = FakeLLM(rewrite_reply("main", ADAPT_MAIN))
+    chat_module.set_llm_provider(fake)
+
+    body = adapt(dry_run=False).json()
+
+    assert len(fake.calls) == 1
+    assert body["model_used"] is True
+    assert body["patch"]["prompts"]["main"]["content"] == ADAPT_MAIN
+    assert body["patch"]["assembly"]["show_thoughts"] is False      # 确定性修复没被覆盖
+    outcome = next(item for item in body["rewrites"] if item["identifier"] == "main")
+    assert outcome["status"] == "applied"
+
+
+def test_ai_adapt_can_skip_model() -> None:
+    """use_model=false：只做确定性修复，完全不碰模型。"""
+    import_adapt_preset()
+    fake = FakeLLM(rewrite_reply("main", ADAPT_MAIN))
+    chat_module.set_llm_provider(fake)
+
+    body = adapt(use_model=False).json()
+
+    assert fake.calls == []
+    assert body["model_used"] is False
+    assert body["patch"]["assembly"]["show_thoughts"] is False
+    assert all(item["status"] == "skipped" for item in body["rewrites"])
+
+
+def test_ai_adapt_preserves_nsfw_and_jailbreak_content() -> None:
+    """NSFW / 破限条目内容不动，也不进模型改写清单。"""
+    import_adapt_preset()
+
+    body = adapt().json()
+
+    patched = (body["patch"].get("prompts") or {}).get("jailbreak") or {}
+    assert "content" not in patched
+    assert all(item["identifier"] != "jailbreak" for item in body["rewrites"])
+    assert any(item["identifier"] == "jailbreak" for item in body["preserved"])
+
+
+def test_ai_adapt_degrades_when_model_unavailable(monkeypatch) -> None:
+    """模型不可用时仍交付确定性修复，不报错。"""
+    import_adapt_preset()
+    monkeypatch.setattr(st_presets_module, "_llm_provider_resolver", lambda: None)
+
+    body = adapt().json()
+
+    assert body["model_used"] is False
+    assert body["patch"]["sampling"]["openai_max_tokens"] == 1024
+    assert any("未配置可用模型" in warning for warning in body["warnings"])
+
+
+def test_ai_adapt_survives_model_failure() -> None:
+    """模型抛异常时降级，不得 500。"""
+    import_adapt_preset()
+    chat_module.set_llm_provider(FakeLLM(RuntimeError("（测试语料）连接超时")))
+
+    resp = adapt()
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["model_used"] is False
+    assert any("模型调用失败" in warning for warning in body["warnings"])
+
+
+def test_ai_adapt_diff_carries_before_and_after() -> None:
+    """对照项要带字段名与前后值，供界面直接渲染。"""
+    import_adapt_preset()
+
+    body = adapt().json()
+
+    thinking = next(item for item in body["diff"] if item["field"] == "show_thoughts")
+    assert thinking["scope"] == "preset"
+    assert thinking["before"] is True
+    assert thinking["after"] is False
+    assert thinking["field_label"] == "推理模式"
+
+    tokens = next(item for item in body["diff"] if item["field"] == "openai_max_tokens")
+    assert tokens["before"] == 8192
+    assert tokens["after"] == 1024
+
+
+def test_ai_adapt_unknown_preset_is_404() -> None:
+    """不存在的预设返回 404。"""
+    assert adapt(preset_id="nope").status_code == 404
+
+
+def test_ai_adapt_apply_really_changes_preset() -> None:
+    """端到端回灌：应用后重新载入，条目开关与顺序**真的**变了。
+
+    只断言「接口返回了 patch」是不够的——补丁键名与覆盖层语义对不上时接口
+    照样成功，但预设一点没变。这类缺陷只能靠回灌断言抓到。
+    """
+    preset = {
+        "show_thoughts": True,
+        "openai_max_tokens": 8192,
+        "prompts": [
+            {
+                "identifier": "main",
+                "name": "主提示",
+                "role": "system",
+                "content": "（测试语料）以角色身份回应。",
+            },
+            # 整条即模板 → 应被停用
+            {
+                "identifier": "template-rule",
+                "name": "输出模板",
+                "role": "system",
+                "content": "（测试语料）<输出模板>按以下模板输出：<正文>…</正文>",
+            },
+            # 破限条目：内容保留，但要归拢到 jailbreak 槽位之后
+            {
+                "identifier": "jailbreak-extra",
+                "name": "附加破限",
+                "role": "system",
+                "content": "（测试语料）本作允许破限题材。",
+            },
+            {
+                "identifier": "jailbreak",
+                "name": "破限槽位",
+                "role": "system",
+                "content": "（测试语料）保持角色口吻。",
+            },
+        ],
+        "prompt_order": [
+            {
+                "character_id": 100000,
+                "order": [
+                    {"identifier": "main", "enabled": True},
+                    {"identifier": "template-rule", "enabled": True},
+                    {"identifier": "jailbreak-extra", "enabled": True},
+                    {"identifier": "jailbreak", "enabled": True},
+                ],
+            }
+        ],
+    }
+    client.post(
+        IMPORT_URL, json={"content": preset, "source_file": "refill.json"}
+    )
+
+    assert adapt(preset_id="refill", dry_run=False).json()["applied"] is True
+
+    detail = client.get("/chat/st-presets/refill").json()["detail"]
+    assert detail["assembly"]["show_thoughts"] is False
+    assert detail["sampling"]["max_tokens"] == 1024
+
+    enabled = {entry["identifier"]: entry["enabled"] for entry in detail["order"]}
+    assert enabled["template-rule"] is False        # 模板条目真的关上了
+    assert enabled["jailbreak-extra"] is True       # 被保护的条目没被关
+
+    positions = [entry["identifier"] for entry in detail["order"]]
+    assert positions.index("jailbreak") + 1 == positions.index("jailbreak-extra")

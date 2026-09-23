@@ -286,3 +286,86 @@ def test_missing_preset_raises(store) -> None:
     """载入不存在的预设应抛 FileNotFoundError。"""
     with pytest.raises(FileNotFoundError):
         store.load("nope")
+
+
+# --------------------------------------------------------------------------
+# 思考开关（assembly.show_thoughts）
+#
+# 背景：`show_thoughts` 不是 `STPreset` 的声明字段（保存在 model_extra 里），
+# 故 `apply_override` 的 sampling 分支（按 model_fields 过滤）触及不到它。
+# AI 适配要靠这个开关关掉推理模式来提速，因此单独铺一条路径。
+# --------------------------------------------------------------------------
+
+
+def test_override_show_thoughts_switches_thinking(store, make_preset) -> None:
+    """assembly.show_thoughts 覆盖应落到 enable_thinking 上。"""
+    store.import_preset(make_preset(show_thoughts=True), preset_id="think")
+    assert store.load("think").preset.enable_thinking is True
+
+    store.patch_override("think", {"assembly": {"show_thoughts": False}})
+
+    parsed = store.load("think")
+    assert parsed.preset.enable_thinking is False
+    assert store.get_override("think")["assembly"]["show_thoughts"] is False
+
+
+def test_override_show_thoughts_is_written_back_on_export(store, make_preset) -> None:
+    """导出时要把覆盖后的思考开关写回 show_thoughts（否则导出结果仍是预设原值）。"""
+    store.import_preset(make_preset(show_thoughts=True), preset_id="think-export")
+    store.patch_override("think-export", {"assembly": {"show_thoughts": False}})
+
+    assert store.export_preset("think-export")["show_thoughts"] is False
+
+
+def test_override_show_thoughts_absent_leaves_preset_value(store, make_preset) -> None:
+    """未提供 show_thoughts 的预设不受影响（不凭空注入字段）。"""
+    store.import_preset(make_preset(), preset_id="think-none")
+    store.patch_override("think-none", {"assembly": {"use_sysprompt": True}})
+
+    parsed = store.load("think-none")
+
+    assert parsed.preset.enable_thinking is None
+    assert "show_thoughts" not in store.export_preset("think-none")
+
+
+def test_reset_override_restores_show_thoughts(store, make_preset) -> None:
+    """清空覆盖层后思考开关回到预设原值。"""
+    store.import_preset(make_preset(show_thoughts=True), preset_id="think-reset")
+    store.patch_override("think-reset", {"assembly": {"show_thoughts": False}})
+
+    store.reset_override("think-reset")
+
+    assert store.load("think-reset").preset.enable_thinking is True
+
+
+# --------------------------------------------------------------------------
+# 采样参数键名归一（界面 / 详情用 max_tokens，模型字段是 openai_max_tokens）
+# --------------------------------------------------------------------------
+
+
+def test_override_max_tokens_alias_reaches_preset_field(store, make_preset) -> None:
+    """界面用 `max_tokens` 提交长度上限，必须落到 `openai_max_tokens` 上。
+
+    回归用例：两者不是同一个字段名。旧实现按 `model_fields` 过滤时把
+    `max_tokens` 直接丢掉——补丁写进了覆盖层，但界面改了等于没改，
+    重新载入时值会弹回原值。
+    """
+    store.import_preset(make_preset(openai_max_tokens=8192), preset_id="alias")
+
+    store.patch_override("alias", {"sampling": {"max_tokens": 333}})
+
+    parsed = store.load("alias")
+    assert parsed.preset.sampling["max_tokens"] == 333
+    # 导出写回 ST 字段名，保证往返一致
+    assert store.export_preset("alias")["openai_max_tokens"] == 333
+
+
+def test_override_unknown_sampling_key_is_ignored(store, make_preset) -> None:
+    """不认识采样键名仍然忽略（归一不能变成「什么键都往里写」）。"""
+    store.import_preset(make_preset(openai_max_tokens=8192), preset_id="alias-bad")
+
+    store.patch_override("alias-bad", {"sampling": {"not_a_field": 1}})
+
+    parsed = store.load("alias-bad")
+    assert parsed.preset.sampling["max_tokens"] == 8192
+    assert not hasattr(parsed.preset, "not_a_field")

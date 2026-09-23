@@ -65,7 +65,12 @@ function makeDetail(overrides: Partial<StPresetDetail> = {}): StPresetDetail {
     id: "demo",
     sampling: { temperature: 0.66 },
     extended_sampling: { top_k: 40 },
-    assembly: { use_sysprompt: false, squash_system_messages: true, names_behavior: 0 },
+    assembly: {
+      use_sysprompt: false,
+      squash_system_messages: true,
+      names_behavior: 0,
+      show_thoughts: false,
+    },
     order: [
       { identifier: "main", enabled: true },
       { identifier: "chatHistory", enabled: true },
@@ -376,7 +381,12 @@ describe("预设编辑：写回覆盖层", () => {
         return jsonResponse({
           preset: makeSummary(),
           detail: makeDetail({
-            assembly: { use_sysprompt: true, squash_system_messages: false, names_behavior: 0 },
+            assembly: {
+              use_sysprompt: true,
+              squash_system_messages: false,
+              names_behavior: 0,
+              show_thoughts: null,
+            },
           }),
         });
       }

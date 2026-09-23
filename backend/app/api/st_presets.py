@@ -15,10 +15,15 @@
 不进仓库、不随发行物分发。本项目不内置任何 SillyTavern 或社区预设的提示词原文。
 """
 
+from dataclasses import asdict
+from typing import Callable
+
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.config import get_settings
+from app.llm.base import LLMProvider
+from app.prompts.adaptation import build_diff, detect, plan
 from app.prompts.st_compat import (
     RUNTIME_FILLED_MARKERS,
     VALID_ROLES,
@@ -51,6 +56,32 @@ def set_st_preset_store(store: StPresetStore | None) -> None:
     _st_preset_store = store
 
 
+#: LLM provider 解析器（默认延迟导入 chat 路由的实例；测试可注入替换）
+_llm_provider_resolver: Callable[[], LLMProvider | None] | None = None
+
+
+def set_llm_provider_resolver(
+    resolver: Callable[[], LLMProvider | None] | None,
+) -> None:
+    """替换/重置 LLM provider 解析器（测试注入用）。"""
+    global _llm_provider_resolver
+    _llm_provider_resolver = resolver
+
+
+def _resolve_llm_provider() -> LLMProvider | None:
+    """取当前对话模型；不可用时返回 None（适配仍会交付确定性修复）。
+
+    **延迟导入** `app.api.chat`：那个模块反过来从本模块导入预设存储，
+    模块级导入会形成循环（与 chat.py 延迟导入 knowledge 的情形相同）。
+    """
+    if _llm_provider_resolver is not None:
+        return _llm_provider_resolver()
+
+    from app.api.chat import _safe_llm_provider  # noqa: PLC0415
+
+    return _safe_llm_provider()
+
+
 
 
 # ---------- SillyTavern 预设（导入 / 编辑 / 导出）----------
@@ -72,6 +103,7 @@ _ST_EXTENDED_SAMPLING = ("top_k", "top_a", "min_p", "repetition_penalty", "seed"
 _ASSEMBLY_VALIDATORS = {
     "use_sysprompt": lambda value: isinstance(value, bool),
     "squash_system_messages": lambda value: isinstance(value, bool),
+    "show_thoughts": lambda value: isinstance(value, bool),
     "names_behavior": lambda value: (
         isinstance(value, int) and not isinstance(value, bool) and value in (0, 1, 2)
     ),
@@ -159,6 +191,8 @@ def _st_preset_detail(store: StPresetStore, preset_id: str, parsed: ParsedPreset
             "use_sysprompt": preset.use_sysprompt,
             "squash_system_messages": preset.squash_system_messages,
             "names_behavior": preset.names_behavior,
+            # 思考开关（对应 ST 的 show_thoughts）：None = 预设未提供，跟随内置档
+            "show_thoughts": preset.enable_thinking,
         },
         "order": [
             {"identifier": entry.identifier, "enabled": entry.enabled}
@@ -286,5 +320,68 @@ def delete_st_preset(preset_id: str) -> dict:
     store, _ = _load_st_preset(preset_id)
     store.delete_preset(preset_id)
     return {"deleted": preset_id}
+
+
+# ---------- AI 适配（导入后一键改造成陪伴对话形态）----------
+
+
+class StPresetAdaptRequest(BaseModel):
+    """AI 适配请求。"""
+
+    dry_run: bool = Field(
+        default=True, description="true 时只返回建议（不写入覆盖层），供用户确认"
+    )
+    use_model: bool = Field(
+        default=True,
+        description="是否调用模型做条目语义改写；关闭则只做规则层的确定性修复",
+    )
+
+
+@router.post("/{preset_id}/ai-adapt")
+def adapt_st_preset(preset_id: str, req: StPresetAdaptRequest) -> dict:
+    """用**一次**模型调用把导入的预设改造成 HyPRA 的陪伴对话形态。
+
+    两层处理（详见 `app/prompts/adaptation/` 的模块说明）：
+
+    1. 规则层：确定性体检 + 确定性修复（关闭推理模式、钳制长度上限、
+       清掉宏里的思考标签、停用小说模板条目、归拢 NSFW/破限条目位置）；
+    2. 规划层：把需要语义改写的条目（人称、身份定位、特殊 token）
+       攒成一个提示词，只调用模型一次。
+
+    默认 `dry_run=true`：只返回问题清单、补丁与前后对照（`diff`），
+    用户在前端确认后再传 `dry_run=false` 落盘。原始导入文件始终保持只读，
+    因此任何时候都能一键重置回导入时的状态（`POST /{id}/reset`）。
+    """
+    store, parsed = _load_st_preset(preset_id)
+
+    detection = detect(parsed)
+    provider = _resolve_llm_provider() if req.use_model else None
+    result = plan(parsed, detection, provider)
+
+    # 对照必须在**写入之前**算：写入后 before 侧就变成新值了
+    diff = build_diff(parsed, result.patch)
+
+    applied = not req.dry_run and bool(result.patch)
+    if applied:
+        store.patch_override(preset_id, result.patch)
+        parsed = store.load(preset_id)
+
+    payload = {
+        "preset_id": preset_id,
+        "dry_run": req.dry_run,
+        "applied": applied,
+        "model_used": result.model_used,
+        "summary": detection.summary,
+        "findings": [asdict(finding) for finding in result.findings],
+        "preserved": [asdict(finding) for finding in result.preserved],
+        "rewrites": [asdict(outcome) for outcome in result.rewrites],
+        "diff": diff,
+        "patch": result.patch,
+        "warnings": [*parsed.warnings, *result.warnings],
+    }
+    # 落盘后回传最新详情，界面据此刷新编辑器（建议阶段不需要，省一次传输）
+    if applied:
+        payload["detail"] = _st_preset_detail(store, preset_id, parsed)
+    return payload
 
 

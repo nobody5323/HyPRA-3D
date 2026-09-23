@@ -50,7 +50,12 @@ function makeDetail(overrides: Partial<StPresetDetail> = {}): StPresetDetail {
     id: "demo",
     sampling: { temperature: 0.8 },
     extended_sampling: { top_k: 40 },
-    assembly: { use_sysprompt: false, squash_system_messages: false, names_behavior: 0 },
+    assembly: {
+      use_sysprompt: false,
+      squash_system_messages: false,
+      names_behavior: 0,
+      show_thoughts: false,
+    },
     order: [
       { identifier: "main", enabled: true },
       { identifier: "chatHistory", enabled: true },

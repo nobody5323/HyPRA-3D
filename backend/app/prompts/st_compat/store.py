@@ -390,6 +390,10 @@ class StPresetStore:
         sampling = parsed.preset.sampling
         for key, value in sampling.items():
             data[_SAMPLING_EXPORT_MAP.get(key, key)] = value
+        # 思考开关不是采样参数（ST 里叫 show_thoughts，属请求行为），单独写回
+        thinking = parsed.preset.enable_thinking
+        if thinking is not None:
+            data["show_thoughts"] = thinking
 
         prompts_by_id = {item.get("identifier"): item for item in data.get("prompts", []) if isinstance(item, dict)}
         for item in parsed.preset.prompts:
@@ -494,8 +498,12 @@ def apply_override(parsed: ParsedPreset, override: dict) -> ParsedPreset:
     if isinstance(sampling_patch, dict):
         preset_fields = set(STPreset.model_fields)
         for key, value in sampling_patch.items():
-            if key in preset_fields and value is not None:
-                setattr(parsed.preset, key, value)
+            # 界面与详情接口统一用 `max_tokens`（`STPreset.sampling` 的键名），
+            # 但模型上的字段叫 `openai_max_tokens`。不归一的话，「回复长度上限」
+            # 在界面上改了等于没改——补丁写进了覆盖层，却过不了下面的字段过滤。
+            field = _SAMPLING_EXPORT_MAP.get(key, key)
+            if field in preset_fields and value is not None:
+                setattr(parsed.preset, field, value)
 
     # ---- 组装开关 ----
     assembly_patch = override.get("assembly")
@@ -507,6 +515,13 @@ def apply_override(parsed: ParsedPreset, override: dict) -> ParsedPreset:
         names = assembly_patch.get("names_behavior")
         if isinstance(names, int) and not isinstance(names, bool) and names in (0, 1, 2):
             parsed.preset.names_behavior = names
+        # 思考开关：ST 的 show_thoughts 并非 STPreset 的声明字段（保存在 model_extra 里），
+        # 故不能走上面的 sampling 循环（那里按 model_fields 过滤）；用 setattr 写入 extra，
+        # `STPreset.enable_thinking` 会读到它。放在 assembly 是因为它属于「请求行为」
+        # 而非采样参数，与 use_sysprompt 同组对界面更直观。
+        show_thoughts = assembly_patch.get("show_thoughts")
+        if isinstance(show_thoughts, bool):
+            setattr(parsed.preset, "show_thoughts", show_thoughts)
 
     # ---- 条目字段 ----
     items_patch = override.get("prompts")

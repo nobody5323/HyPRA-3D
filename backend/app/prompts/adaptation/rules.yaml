@@ -1,0 +1,174 @@
+# HyPRA 预设适配规则（AI 适配的「体检表」）
+#
+# 合规（AGENTS.md §6）：本文件只描述**判定规则**，不含任何 SillyTavern 或社区预设的
+# 提示词正文。正则与关键词均为通用表述，用于识别「预设形态与陪伴对话不符」这一类
+# 结构问题，不绑定任何具体预设。
+#
+# action 取值：
+#   auto_patch   规则层可直接生成覆盖层补丁（确定性判断，不消耗模型调用）
+#   llm_rewrite  需要模型语义改写条目正文
+#   preserve     内容与开关都不动，只建议调整注入位置（NSFW / 破限类）
+#   review       只提示，交用户决定
+#
+# fix 取值（仅 action=auto_patch 时填写，detector 按标识分发到具体修法）：
+#   disable_thinking        关闭推理模式
+#   clamp_int               把预设字段的数值钳到 target 里的上限
+#   disable_entry           关闭命中条目
+#   clear_thinking_macro    把宏变量里的思考标签清空
+#   clamp_reply_length      把已有的**上限**（不超过 N 字）里的 N 换成 target.reply_length
+#   flip_reply_length_bound 把「不少于 N 字」这类**下限**要求翻转为「不超过 M 字」
+
+version: 1
+
+# ---- 适配目标：HyPRA 的陪伴对话形态 ----
+target:
+  person: second_person      # AI 用第二人称称呼用户（「你」），自称「我」
+  # 只输出说的话：不写动作、神情、环境、心理描写。小说预设默认要写这些，
+  # 所以它同时影响 meta-prompt 的措辞与「以行动结尾」这类条目的改写方向。
+  dialogue_only: true
+  reply_length: 100          # 单次回复字数上限（≦100 才有「打电话」的节奏，而非小说段落）
+  thinking: false            # 关闭推理模式（首字延迟的主要来源）
+  max_tokens: 1024           # 回复长度上限（采样参数）
+  max_context: 32768         # 提示词总量预算
+
+# ---- 预设级规则：作用于预设顶层字段 ----
+preset_rules:
+  - id: thinking_enabled
+    field: show_thoughts
+    equals: true
+    severity: high
+    action: auto_patch
+    fix: disable_thinking
+    message: 预设开启了推理模式，首字延迟与总耗时都会明显变长
+
+  - id: oversized_max_tokens
+    field: openai_max_tokens
+    greater_than: 2048
+    severity: medium
+    action: auto_patch
+    fix: clamp_int
+    message: 回复长度上限过大，模型会倾向写长文，拖慢整轮响应
+
+  - id: oversized_context
+    field: openai_max_context
+    greater_than: 65536
+    severity: low
+    action: review
+    message: 提示词总量预算远超本项目所需，建议下调以免长历史拖慢响应
+
+# ---- 条目级规则：作用于条目正文（只扫已启用条目）----
+content_rules:
+  # —— 安全保护优先：命中即不做内容改写（用户要求：NSFW / 破限内容不动）——
+  - id: jailbreak_content
+    regex: (破限|越狱|jailbreak|非评判性|创作理念|不受道德|无视道德)
+    severity: high
+    action: preserve
+    anchor: jailbreak
+    message: 破限类条目，内容保持原样，仅建议归拢到 jailbreak 槽位附近
+
+  - id: nsfw_content
+    regex: (NSFW|色情|性爱|R18|18禁)
+    severity: high
+    action: preserve
+    anchor: nsfw
+    message: NSFW 类条目，内容保持原样，仅建议归拢到 nsfw 槽位附近
+
+  # —— 格式类：规则层可确定清理 ——
+  - id: thinking_tag_macro
+    regex: 'setvar::cotTitle::\s*<thinking>'
+    severity: high
+    action: auto_patch
+    fix: clear_thinking_macro
+    message: 思考标签被写进宏变量，会让回复里出现 <thinking> 块并流入播报管线
+
+  - id: novel_body_tag
+    regex: </?正文>
+    severity: high
+    action: llm_rewrite
+    message: 行文里要求输出小说正文标签，会污染 TTS 与 3D 表情管线（保留条目其余内容，仅去掉标签要求）
+
+  - id: output_template_block
+    regex: <输出模板>|按以下模板输出|严格按照以下模板
+    severity: medium
+    action: auto_patch
+    fix: disable_entry
+    message: 要求按固定模板输出（含变量系统更新），与陪伴对话形态不符
+
+  # —— 字数要求：方向常常是反的 ——
+  # 小说预设写「不少于 2500 字」，在陪伴对话里是**反的**：单纯把数字改小、
+  # 保留「不少于」这个下限，模型依旧会把话说长（实测 300 字下限 → 回复 240 字）。
+  # 所以下限要翻转为上限，而不是只改数字。
+  - id: reply_length_is_lower_bound
+    regex: 'setvar::wordsCloud::(不少于|不得少于|至少)\s*(\d+)'
+    severity: high
+    action: auto_patch
+    fix: flip_reply_length_bound
+    message: 要求「不少于 N 字」是**下限**，会让回复变长；已翻转为字数上限
+
+  - id: reply_length_is_upper_bound
+    regex: 'setvar::wordsCloud::(不超过|不得大于|不大于|至多)\s*(\d+)'
+    severity: medium
+    action: auto_patch
+    fix: clamp_reply_length
+    message: 已设字数上限，按本项目目标值收紧
+
+  # —— 特殊 token：需模型改写（无法纯字面替换，得看上下文）——
+  - id: deepseek_special_token
+    regex: '<｜[^｜<>\n]{0,40}｜>'
+    severity: high
+    action: llm_rewrite
+    message: 含 DeepSeek 系特殊 token，国产托管模型会当普通文本照抄进回复
+
+  # —— 人称与身份：需模型改写 ——
+  - id: third_person_directive
+    regex: 第三人称
+    severity: high
+    action: llm_rewrite
+    message: 要求全程第三人称叙事，与陪伴对话的人称不符
+
+  - id: creator_role_directive
+    regex: (不是|并非)(故事|剧情|小说)中的?任何角色|(创作者|作者)而非角色|你是(创作|写作)者
+    severity: high
+    action: llm_rewrite
+    message: 把 AI 定位成「创作者」而非角色本人，会削弱角色感并影响情绪工具调用
+
+  - id: novel_dialogue_rule
+    regex: (对白|对话).{0,8}(单独成段|独立成段|另起一段|省略发言人)
+    severity: medium
+    action: auto_patch
+    fix: disable_entry
+    message: 小说体的对白排版规则，对「只输出说的话」毫无用处
+
+  # —— 小说技法：整块技法/文体要求，陪伴对话直接用不上 ——
+  - id: novel_craft_block
+    regex: (写作指导|人物驱动情节|张弛有度|情色和肉体美学)
+    severity: high
+    action: auto_patch
+    fix: disable_entry
+    message: 整块是小说创作技法（情节 / 对白 / 节奏设计），陪伴对话用不到
+
+  - id: light_novel_style
+    regex: (日式轻小说|轻小说风格|严格.{0,6}按照.{0,6}轻小说)
+    severity: high
+    action: auto_patch
+    fix: disable_entry
+    message: 要求小说文体（日式轻小说），与纯对话冲突
+
+  # —— 小说技法：混在通用准则里的要求，只改这几句、其余保留 ——
+  - id: action_ending_rule
+    regex: 以.{0,16}(行动|动作).{0,16}结尾
+    severity: high
+    action: llm_rewrite
+    message: 要求「以可见的行动作为正文结尾」，会写成动作描写；应改为自然收尾
+
+  - id: allows_narration_inline
+    # 只认「动作/神态」与「描写穿插/交错」两种写法：
+    # 不用「对白和描写」这类宽表达式 —— 实测会误伤「要求对白生动」的条目。
+    #
+    # 处置用停用而非改写：这类条目是**纯排版规则**，交模型改实测会被敷衍
+    # （回一句「动作、神态可以穿插」，复查判为残留后反而保留了旧内容）。
+    regex: 动作、?神态|描写.{0,6}(穿插|交错)
+    severity: high
+    action: auto_patch
+    fix: disable_entry
+    message: 允许把动作 / 神态描写穿插进对白，会写成小说旁白
