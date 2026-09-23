@@ -26,6 +26,7 @@ import { MoodIndicator } from "@/components/chat/MoodIndicator";
 import { PersonaSwitcher } from "@/components/settings/PersonaSwitcher";
 import { PluginCenter } from "@/components/settings/PluginCenter";
 import { PresetSwitcher } from "@/components/settings/PresetSwitcher";
+import { SkillPanel } from "@/components/settings/SkillPanel";
 import { SessionList } from "@/components/chat/SessionList";
 import { StPresetPanel } from "@/components/studio/StPresetPanel";
 import { StudioPanel } from "@/components/studio/StudioPanel";
@@ -47,6 +48,7 @@ import type {
   PersonaCatalog,
   PluginStatus,
   PluginsSummary,
+  SkillInfo,
   PresetCatalog,
   StyleCatalog,
 } from "@/lib/api/types";
@@ -93,8 +95,11 @@ export default function HomePage() {
    * 手动重拉 /health 的触发器：插件启停 / 保存配置后，
    * summary 的计数（运行中 / 失败）只有后端知道——重新拉一次，
    * 好过在前端复刻一份 summary 计算逻辑、然后与后端慢慢漂移。
+   * 技能面板的启停 / 重扫也复用同一个触发器。
    */
   const [healthNonce, setHealthNonce] = useState(0);
+  // 技能清单（AGENTS.md §9.6）：同样随 /health 刷新，与插件体系相互独立
+  const [skills, setSkills] = useState<SkillInfo[]>([]);
   /** 模型预设档清单（选择器数据源；后端不可用时为 null，选择器不渲染） */
   const [presetCatalog, setPresetCatalog] = useState<PresetCatalog | null>(null);
   /** 文风清单（来自 GET /chat/styles，替代原先前端硬编码的 4 项） */
@@ -259,6 +264,7 @@ export default function HomePage() {
       setMcpServers(health?.mcp ?? []);
       setPlugins(health?.plugins ?? []);
       setPluginsSummary(health?.plugins_summary ?? null);
+      setSkills(health?.skills ?? []);
       if (!online) timer = setTimeout(check, 5000);
     };
     check();
@@ -522,6 +528,10 @@ export default function HomePage() {
               setPlugins(next);
               setHealthNonce((nonce) => nonce + 1);
             }}
+          />
+          <SkillPanel
+            skills={skills}
+            onSkillsChanged={() => setHealthNonce((nonce) => nonce + 1)}
           />
           <KnowledgePanel companionId={session.personaId} disabled={session.busy} />
           {/* min-h 兑底：知识库面板展开时对话区不被压到不可用高度 */}

@@ -302,6 +302,8 @@ export interface HealthStatus {
   mcp: McpServerStatus[];
   plugins: PluginStatus[];
   plugins_summary: PluginsSummary;
+  /** 技能清单（见 AGENTS.md §9.6）；旧后端不返回时为空数组 */
+  skills: SkillInfo[];
 }
 
 // =============================================================
@@ -384,6 +386,44 @@ export interface TavernImportResult {
   /** 写入的情景记忆条数 */
   memories: number;
   warnings: string[];
+}
+
+// =============================================================
+// 技能（/skills/*，backend/app/api/skills.py，见 AGENTS.md §9.6）
+// =============================================================
+//
+// 技能与插件是**两套东西**：插件是「代码能力可插拔」（进程级），
+// 技能是「方法论可插拔」（提示词级）——所以它们不共用一个界面区块。
+
+/** 技能条目的元信息（不含正文——正文可能上万 token，按需单独拉）。 */
+export interface SkillInfo {
+  id: string;
+  name: string;
+  description: string;
+  /** 什么情况下该用它（模型据此判断是否 study） */
+  when_to_use: string;
+  /** builtin（随项目分发）| user（自己放进 USER_SKILLS_DIR 的） */
+  source: string;
+  enabled: boolean;
+  /** 正文长度（字符数），用来在列表里提示「这篇有多大」 */
+  body_chars: number;
+}
+
+/** GET /skills/{id}：含 Markdown 正文 */
+export interface SkillDetail {
+  id: string;
+  name: string;
+  description: string;
+  when_to_use: string;
+  source: string;
+  enabled: boolean;
+  body: string;
+}
+
+/** GET /skills 与 POST /skills/reload 的统一响应 */
+export interface SkillCatalog {
+  skills: SkillInfo[];
+  summary: { total: number; enabled: number };
 }
 
 // =============================================================

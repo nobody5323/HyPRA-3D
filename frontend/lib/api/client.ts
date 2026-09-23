@@ -20,6 +20,9 @@ import type {
   SessionDeleteResult,
   SessionHistory,
   SessionSummary,
+  SkillCatalog,
+  SkillDetail,
+  SkillInfo,
   SpeakCommand,
   StAdaptResult,
   StPresetCatalog,
@@ -188,6 +191,8 @@ export async function getHealth(): Promise<HealthStatus | null> {
         failed: 0,
         by_layer: {},
       },
+      // 技能体系（AGENTS.md §9.6）：旧后端不返回该字段时兜底为空，前端自会隐藏面板
+      skills: Array.isArray(data.skills) ? data.skills : [],
     };
   } catch {
     return null;
@@ -1037,4 +1042,61 @@ export async function importTavernMemory(
   });
   if (!res.ok) await throwApiError(res, "导入酒馆记忆");
   return (await res.json()) as TavernImportResult;
+}
+
+// =============================================================
+// 技能（/skills/*，backend/app/api/skills.py，见 AGENTS.md §9.6）
+// =============================================================
+//
+// 清单走 `/health`（页面已在轮询，不另开第二条来源）；这里只封装按需动作：
+// 正文在展开某项时才拉，启停与重扫是显式用户操作。
+
+/** POST /skills/{id}/enabled 响应 */
+export interface SkillToggleResult {
+  id: string;
+  enabled: boolean;
+  skills: SkillInfo[];
+}
+
+/** 技能清单（含启用状态，**不含正文**）。 */
+export async function listSkills(): Promise<SkillCatalog> {
+  const res = await fetch(`${API_BASE}/skills`, { cache: "no-store" });
+  if (!res.ok) await throwApiError(res, "读取技能清单");
+  return (await res.json()) as SkillCatalog;
+}
+
+/** 技能详情（含 Markdown 正文）——只在展开某项时拉。 */
+export async function getSkill(skillId: string): Promise<SkillDetail> {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillId)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) await throwApiError(res, "读取技能详情");
+  return (await res.json()) as SkillDetail;
+}
+
+/** 启用 / 禁用技能（后端落盘，重启后保持）。 */
+export async function setSkillEnabled(
+  skillId: string,
+  enabled: boolean,
+): Promise<SkillToggleResult> {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillId)}/enabled`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) await throwApiError(res, enabled ? "启用技能" : "禁用技能");
+  return (await res.json()) as SkillToggleResult;
+}
+
+/**
+ * 重新扫描技能目录。
+ *
+ * 技能是**文件形态**的（用户可以随时往 `USER_SKILLS_DIR` 丢一个 SKILL.md），
+ * 所以给一个免重启的入口——这与 §9.7「插件不做热重载」不矛盾：
+ * 那边重载要重跑插件代码，这边只是重读几个 Markdown 文件。
+ */
+export async function reloadSkills(): Promise<SkillCatalog> {
+  const res = await fetch(`${API_BASE}/skills/reload`, { method: "POST" });
+  if (!res.ok) await throwApiError(res, "重新扫描技能");
+  return (await res.json()) as SkillCatalog;
 }
