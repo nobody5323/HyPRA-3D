@@ -421,13 +421,13 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | 5 | `session-store` | `session_store`（memory / sqlite） | ✅ 已收编 |
 | 6 | `tools-builtin` | `tool`（4 个情感陪伴工具） | ✅ 已收编 |
 | 7 | `mcp-bridge` | `mcp_manager`（MCP Client） | ✅ 已收编 |
-| 8 | `embedding` | `embedding`（deterministic / cloud） | 待拆（现藏在 warm factory 内） |
+| 8 | `embedding` | `embedding`（deterministic / dashscope / siliconflow / openai-compatible） | ✅ 已收编 |
 | 9 | `tokenizer` | `tokenizer`（jieba / bigram） | ✅ 已收编 |
 | 10 | `knowledge-parser` | `parser`（text / md / pdf / docx） | ✅ 已收编 |
-| 11 | `knowledge-chunker` | `chunker` | 待抽接口 |
-| 12 | `tts` | `tts`（从 digital_human 分出） | 待拆 |
-| 13 | `st-format-adapter` | `datasource` / `prompt`（包装 st_compat） | 待包装 |
-| 14 | `preset-ai-adaptation` | `prompt`（包装 adaptation） | 待包装 |
+| 11 | `knowledge-chunker` | `chunker`（semantic / plain） | ✅ 已收编 |
+| 12 | `tts` | `tts`（gpt_sovits / none，从 digital_human 分出） | ✅ 已收编 |
+| 13 | ~~`st-format-adapter`~~ | — | ⛔ **不单独成插件**：`st_compat` 属 core 的 `prompt-assembly`（渲染就是提示词组装的一部分），再包一层 builtin 会让同一份东西既在 core 又在 builtin；解析部分保留在原处 |
+| 14 | `preset-ai-adaptation` | `preset_adaptation`（按**动作名**寻址：detect / plan / build_diff / load_rules） | ✅ 已收编 |
 | 15 | `live2d-model-source` | `datasource`（模型来源） | ✅ 已实现 |
 | 16 | **`tavern-bridge`** | `datasource` / `tool` / `settings`（酒馆只读接入） | ✅ 目录插件形态 |
 
@@ -447,7 +447,7 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 | **P3** | `tavern-bridge` 插件（目录插件通路：PNG 角色卡 / 世界书 / 会话只读接入） | ✅ 已完成 |
 | **P3b** | 插件管理 API（`/plugins/*`：列表 / 启停 / 配置读写） | ✅ 已完成 |
 | **P4** | 跨会话记忆构建（`TavernMemoryImporter` 会话→记忆 + 导入 API） | ✅ 已完成 |
-| **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | ✅ 已完成（parser → `knowledge/parser/`，tokenizer → `retrieval/tokenize/`，emotion 兜底策略留 core 内；均用 `__init__` 兼容层重导出，既有调用方零改动） |
+| **P2** | 抽接口拆分 builtin（`parser` / `tokenizer` / `emotion` 优先） | ✅ 已完成（两批：① `parser` → `knowledge/parser/`、`tokenizer` → `retrieval/tokenize/`、`emotion` 兜底留 core；② `chunker` → `knowledge/chunker/`、`embedding` / `tts` / `preset-ai-adaptation` 收编。均用 `__init__` 兼容层重导出，既有调用方零改动） |
 | **P5** | Skill 体系（独立于插件，可随时插入） | ✅ 已完成（`backend/skills/` + `app/skills/` + `study_skill` + `/skills/*` + 前端面板） |
 | **P6** | Live2D 模型来源插件 | ✅ 已完成（`app/digital_human/model_sources/` + `plugins/live2d-model-source/` + `GET /media/avatar/models/sources` + 前端「可获取的模型」） |
 | **P7** | 插件市场（远期） | 待做 |
@@ -455,3 +455,16 @@ Alife 用 C# 特性（`[DisplayName]`/`[Description]`）反射生成表单；HyP
 
 > **不做「为插件化而插件化」**：拆分必须同时产出「多一个实现」或「可禁用」的实际价值，
 > 否则保留现状（工厂模式已足够）。每个 builtin 拆分都要有对应的测试。
+>
+> **§9.11 P2 收尾补充说明**（表中 13 项已收编，第 13 项按 C 档不做）：
+>
+> - **注册表是能力账本，不是运行时唯一通路**。`tokenizer` / `parser` / `chunker`
+>   被禁用时，模块级入口（`split_text()` / `parse()` / `tokenize()`）照常工作——
+>   这是**刻意**的（见 `test_disabling_split_plugins_does_not_break_retrieval`），
+>   否则禁一个插件会把检索链路整个打断。
+> - 同理，这些能力的工厂**不读新配置开关**：`KNOWLEDGE_SEMANTIC_CHUNKING` 已经表达了
+>   「要不要语义切分」，再加 `KNOWLEDGE_CHUNKER` 就是两个开关说同一件事，迟早漂移。
+> - `tts` 是唯一**被真实消费**的一项：`GptSovitsDigitalHumanProvider` 经 `TtsProvider`
+>   接口取音频，换 TTS 不必改驱动；`DIGITAL_HUMAN_PROVIDER=gpt_sovits` 保留为兼容入口。
+> - `preset-ai-adaptation` 按**动作名**而不是实现名寻址：适配天然是一组动作，
+>   硬造一个只有一个实现的策略接口，只是把「包装」写成「架构」。

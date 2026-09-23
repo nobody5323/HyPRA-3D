@@ -10,14 +10,18 @@ from app.plugins.registry import PluginRegistry
 EXPECTED_IDS = [
     "llm-providers",
     "avatar-providers",
+    "tts",
+    "embedding",
     "memory-warm",
     "memory-knowledge",
     "session-store",
     "tools-builtin",
     "mcp-bridge",
-    # P2（§9.11）拆分后新收编的两项
+    # P2（§9.11）拆分后新收编的五项
     "tokenizer",
     "knowledge-parser",
+    "knowledge-chunker",
+    "preset-ai-adaptation",
 ]
 
 
@@ -161,6 +165,70 @@ def test_parser_via_registry() -> None:
         raise AssertionError("未知格式应抛出 ValueError")
 
 
+def test_chunker_via_registry() -> None:
+    """经注册表取分块器——既有 `split_text()` 与它结果一致。"""
+    from app.memory.knowledge.chunker import create_chunker, split_text
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    assert registry.provider("chunker", "plain").name == "plain"
+    # 空实现名 → auto：没给 embed 就是 plain
+    assert registry.provider("chunker").name == "plain"
+
+    text = "第一段。\n\n第二段。"
+    assert split_text(text) == create_chunker("auto").split(text)
+
+    try:
+        registry.provider("chunker", "by-topic")
+    except ValueError as exc:
+        assert "未知分块器" in str(exc)
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未知分块器应抛出 ValueError")
+
+
+def test_tts_via_registry() -> None:
+    """经注册表取语音合成实现（§9.10 第 12 项，从 digital_human 分出）。"""
+    from app.tts.base import TtsNotAvailable
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    assert registry.provider("tts", "gpt_sovits").name == "gpt_sovits"
+    # 空实现名 → none（不做合成，前端回落浏览器 TTS）
+    assert registry.provider("tts").name == "none"
+    assert registry.provider("tts").available() is False
+
+    with pytest.raises(TtsNotAvailable):
+        registry.provider("tts").synthesize("你好")
+    with pytest.raises(ValueError, match="未知 TTS 实现"):
+        registry.provider("tts", "edge")
+
+
+def test_preset_adaptation_via_registry() -> None:
+    """经注册表取预设适配能力。
+
+    这个能力按**动作名**寻址而不是实现名——适配天然是一组动作，
+    不是若干可换的实现（见 `_preset_adaptation` 的说明）。
+    """
+    from app.prompts.adaptation import detect as raw_detect
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    assert registry.provider("preset_adaptation", "detect") is raw_detect
+
+    group = registry.provider("preset_adaptation")
+    assert set(group) == {"detect", "plan", "build_diff", "load_rules", "load_rules_file"}
+
+    try:
+        registry.provider("preset_adaptation", "rewrite")
+    except ValueError as exc:
+        assert "未知适配动作" in str(exc)
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未知适配动作应抛出 ValueError")
+
+
 def test_disabling_split_plugins_does_not_break_retrieval() -> None:
     """可禁用性验证：禁用分词/解析插件不影响模块级入口（它们不经过注册表）。
 
@@ -184,6 +252,33 @@ def test_disabling_split_plugins_does_not_break_retrieval() -> None:
     # 但既有调用方不经注册表，照常工作
     assert tokenize("压力大")
     assert parse("a.txt", b"hi").source_type == "text"
+
+
+# ---------- embedding（§9.10 第 8 项）----------
+
+
+def test_embedding_via_registry() -> None:
+    """经注册表取向量化实现。
+
+    这一项原本就不缺接口与工厂，缺的只是**注册**——`/health` 的能力索引里
+    看不到 `embedding`，尽管评审可以在 .env 里配 `EMBEDDING_PROVIDER=dashscope`。
+    """
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+
+    provider = registry.provider("embedding", "deterministic")
+    assert provider.dimension > 0
+    assert len(provider.embed("测试文本")) == provider.dimension
+
+    # 空实现名 → deterministic（零依赖默认）
+    assert registry.provider("embedding").dimension > 0
+
+    try:
+        registry.provider("embedding", "weird")
+    except ValueError as exc:
+        assert "未知 embedding provider" in str(exc)
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未知 embedding provider 应抛出 ValueError")
 
 
 def test_disabling_builtin_removes_its_tools(no_skills) -> None:

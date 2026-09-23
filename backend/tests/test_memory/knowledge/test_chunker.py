@@ -6,7 +6,7 @@
 
 import pytest
 
-from app.memory.knowledge.chunker import split_text
+from app.memory.knowledge.chunker import create_chunker, split_text
 
 
 def _fake_embed(mapping: dict[str, list[float]]):
@@ -135,3 +135,83 @@ def test_fragments_are_merged() -> None:
     chunks = split_text(text, target=200, max_chars=300, overlap=0, min_chunk=60)
 
     assert all(len(chunk) >= 60 for chunk in chunks)
+
+
+# ---------- 策略装配（拆分新增：分块器可替换）----------
+
+
+def _topic_embed(units: list[str]) -> list[list[float]]:
+    """假编码器：把「话题 A / 其他」映射到正交单位向量。
+
+    于是相邻单元同话题时相似度为 1、跨话题时为 0——语义低谷位置完全可控。
+    """
+    return [[1.0, 0.0] if "话题A" in unit else [0.0, 1.0] for unit in units]
+
+
+TOPIC_TEXT = "\n\n".join(["话题A的内容"] * 3 + ["话题B的内容"] * 3)
+
+
+def test_plain_chunker_ignores_semantics() -> None:
+    """纯长度策略没有语义低谷：没到 target 就不切。"""
+    chunks = create_chunker("plain").split(
+        TOPIC_TEXT, target=1000, max_chars=1000, overlap=0, min_chunk=1
+    )
+
+    assert len(chunks) == 1
+
+
+def test_semantic_chunker_cuts_at_topic_shift() -> None:
+    """语义策略在话题转折处提前切，哪怕长度远未到 target。"""
+    chunks = create_chunker("semantic", embed=_topic_embed).split(
+        TOPIC_TEXT, target=1000, max_chars=1000, overlap=0, min_chunk=1
+    )
+
+    assert len(chunks) == 2
+    assert "话题A" in chunks[0] and "话题B" not in chunks[0]
+    assert "话题B" in chunks[1]
+
+
+def test_semantic_chunker_requires_embedding() -> None:
+    """显式要求语义切分却没给编码函数 → 报错，而不是静默退成纯递归。
+
+    悄悄降级会让分块质量莫名变差，比启动时明确报错难查得多（与 tokenizer 的
+    强制模式同理）。
+    """
+    with pytest.raises(ValueError, match="需要 embed 函数"):
+        create_chunker("semantic")
+
+
+def test_auto_follows_embedding_availability() -> None:
+    """auto 跟随「有没有 embed」——这就是既有 split_text 的降级语义。"""
+    assert create_chunker("auto").name == "plain"
+    assert create_chunker("").name == "plain"
+    assert create_chunker("auto", embed=_topic_embed).name == "semantic"
+
+
+def test_plain_chunker_is_reproducible() -> None:
+    """纯递归的切点可复现——换 embedding 模型不会改变分块。
+
+    这正是它除了「零依赖降级」之外的另一项价值：语义切点随模型变化，
+    缓存与增量索引会整体失配。
+    """
+    chunker = create_chunker("plain")
+    first = chunker.split(TOPIC_TEXT, target=20, max_chars=40, overlap=0, min_chunk=1)
+    second = chunker.split(TOPIC_TEXT, target=20, max_chars=40, overlap=0, min_chunk=1)
+
+    assert first == second
+    assert len(first) > 1
+
+
+def test_unknown_chunker_raises() -> None:
+    with pytest.raises(ValueError, match="未知分块器"):
+        create_chunker("by-topic")
+
+
+def test_semantic_boundaries_tolerates_length_mismatch() -> None:
+    """编码结果与输入不等长时宁可退化为纯长度切分，也不按错位的向量切。"""
+    from app.memory.knowledge.chunker import semantic_boundaries
+
+    units = ["甲", "乙", "丙"]
+
+    assert semantic_boundaries(units, lambda _: [[1.0, 0.0]], 0.75) == set()
+    assert semantic_boundaries(["只有一个"], _topic_embed, 0.75) == set()

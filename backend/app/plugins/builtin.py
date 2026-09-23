@@ -3,10 +3,12 @@
 本模块是**唯一的**「业务代码 → 插件体系」粘合层（`AGENTS.md §9.1`）：其余模块不需要
 知道插件体系的存在，因此这一步是**零重构**的——只做包装，不改任何既有实现。
 
-被收编的 9 项（对应 §9.1 盘点表 + §9.11 P2）：
+被收编的 13 项（对应 §9.1 盘点表 + §9.11 P2）：
 
     llm-providers       → LLM provider 工厂（mock / dashscope / siliconflow / openai-compatible）
     avatar-providers    → 数字人驱动工厂（local / xmov / gpt_sovits）
+    tts                 → 语音合成（gpt_sovits / none）—— §9.10 第 12 项：从 digital_human 分出
+    embedding           → 文本向量化（deterministic / dashscope / siliconflow / openai-compatible）
     memory-warm         → 情景记忆存储（inmemory / qdrant）
     memory-knowledge    → 个人记忆存储（inmemory / qdrant）
     session-store       → 会话持久化（memory / sqlite）
@@ -14,6 +16,8 @@
     mcp-bridge          → MCP Client（外部工具接入）
     tokenizer           → 中文分词（jieba / char-bigram）—— P2 从模块级函数拆为可替换策略
     knowledge-parser    → 文档解析（text / md / pdf / docx）—— P2 同上
+    knowledge-chunker   → 文档分块（semantic / plain）—— P2 同上
+    preset-ai-adaptation → 预设适配动作（detect / plan / build_diff；按**动作名**寻址）
 
 统一约定：provider 工厂签名为 `(name: str, **kwargs) -> 实现`，`name` 是**实现名**
 （如 `"qdrant"`），由调用方透传；插件负责适配既有工厂的各自签名。
@@ -76,10 +80,28 @@ def _digital_human_provider(name: str, **kwargs: Any) -> Any:
     return create_digital_human_provider(name or "local", **kwargs)
 
 
+def _tts_provider(name: str, **kwargs: Any) -> Any:
+    """按实现名取语音合成；空则 none（不做合成，前端回落浏览器 TTS）。"""
+    from app.tts.factory import create_tts_provider
+
+    return create_tts_provider(name, **kwargs)
+
+
 def _warm_store(name: str, **kwargs: Any) -> Any:
     from app.memory.warm.factory import create_warm_store
 
     return create_warm_store(name or "memory", **kwargs)
+
+
+def _embedding_provider(name: str, **kwargs: Any) -> Any:
+    """按实现名取文本向量化 provider；空则用零依赖的确定性实现。
+
+    注意既有工厂的首个参数叫 `provider` 而不是 `name`——适配器的职责之一就是
+    抹平这类命名差异（与 `_session_store` 抹平 `db_path` 位置参数同理）。
+    """
+    from app.memory.warm.embedding import create_embedding_provider
+
+    return create_embedding_provider(name, **kwargs)
 
 
 def _knowledge_store(name: str, **kwargs: Any) -> Any:
@@ -134,6 +156,38 @@ def _parser(name: str, **kwargs: Any) -> Any:  # noqa: ARG001 - 保留统一签�
     raise ValueError(f"未知文档格式：{name!r}（可选 {known}）")
 
 
+def _chunker(name: str, **kwargs: Any) -> Any:
+    """按实现名取分块器；空则 auto（给了 embed 用语义边界，否则纯递归）。"""
+    from app.memory.knowledge.chunker.factory import create_chunker
+
+    return create_chunker(name, **kwargs)
+
+
+def _preset_adaptation(name: str, **kwargs: Any) -> Any:  # noqa: ARG001 - 保留统一签名
+    """按**动作名**取预设适配能力。
+
+    与其他 provider 不同，这里的 `name` 不是「实现名」而是「动作名」——
+    预设适配天然是**一组动作**（体检 / 规划 / 差异 / 载规则），而不是若干可换的实现；
+    硬造一个只有一个实现的策略接口，只是把“包装”写成“架构”。
+    空名返回整组，便于调用方一次取走。
+    """
+    from app.prompts import adaptation
+
+    actions: dict[str, Any] = {
+        "detect": adaptation.detect,
+        "plan": adaptation.plan,
+        "build_diff": adaptation.build_diff,
+        "load_rules": adaptation.load_rules,
+        "load_rules_file": adaptation.load_rules_file,
+    }
+    key = (name or "").strip()
+    if not key:
+        return actions
+    if key not in actions:
+        raise ValueError(f"未知适配动作：{name!r}（可选 {' | '.join(actions)}）")
+    return actions[key]
+
+
 # =============================================================
 # 注册入口
 # =============================================================
@@ -169,6 +223,36 @@ def build_builtin_registrations() -> list[PluginRegistration]:
                 loading_order=110,
             ),
             providers={"digital_human": _digital_human_provider},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "tts",
+                "语音合成",
+                category="media",
+                description=(
+                    "文本转语音：gpt_sovits（自部署服务）/ none（不做合成，前端回落浏览器 TTS）；"
+                    "音频交给数字人驱动组装口型时间轴"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                # 紧跟 avatar-providers：数字人驱动会经它取音频
+                loading_order=112,
+            ),
+            providers={"tts": _tts_provider},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "embedding",
+                "文本向量化",
+                category="memory",
+                description=(
+                    "把文本编码为向量：deterministic（零依赖本地，默认）/ dashscope "
+                    "/ siliconflow / openai-compatible；温层召回与知识库共用同一实现"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                # 排在 memory-warm（120）之前：温层与知识库的向量都靠它
+                loading_order=115,
+            ),
+            providers={"embedding": _embedding_provider},
         ),
         PluginRegistration(
             manifest=_builtin_manifest(
@@ -255,6 +339,34 @@ def build_builtin_registrations() -> list[PluginRegistration]:
                 loading_order=180,
             ),
             providers={"parser": _parser},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "knowledge-chunker",
+                "文档分块",
+                category="retrieval",
+                description=(
+                    "把长文本切成入库与召回的分块：semantic（语义边界）/ plain（纯递归，可复现）；"
+                    "长度硬约束与 overlap 由共用骨架保证"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                loading_order=190,
+            ),
+            providers={"chunker": _chunker},
+        ),
+        PluginRegistration(
+            manifest=_builtin_manifest(
+                "preset-ai-adaptation",
+                "预设 AI 适配",
+                category="prompt",
+                description=(
+                    "导入酒馆预设后的一键适配：规则层确定性体检与修复（detect / build_diff）"
+                    "+ 规划层攒成一次模型改写（plan）"
+                ),
+                capabilities=[CapabilityType.PROVIDER],
+                loading_order=195,
+            ),
+            providers={"preset_adaptation": _preset_adaptation},
         ),
     ]
 

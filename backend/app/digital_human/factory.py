@@ -4,10 +4,13 @@ from app.digital_human.base import DigitalHumanProvider
 from app.digital_human.gpt_sovits_provider import GptSovitsDigitalHumanProvider
 from app.digital_human.local_provider import LocalDigitalHumanProvider
 from app.digital_human.xmov_provider import XmovDigitalHumanProvider
+from app.tts.factory import GPT_SOVITS_NAMES
 from app.tts.gpt_sovits import GptSovitsConfig
 
-#: gpt_sovits 的名称别名（集中一处，避免 factory 与 main.py 各写一份而漂移）
-GPT_SOVITS_NAMES = frozenset({"gpt_sovits", "gpt-sovits", "gptsovits"})
+#: gpt_sovits 的名称别名——**从 tts 工厂取，不在这里另写一份**：
+#: `create_tts_provider()` 也要用它，两处各写一份迟早漂移成
+#: 「配置能起 TTS，但数字人这条路径不认这个值」。
+__all__ = ["GPT_SOVITS_NAMES", "create_digital_human_provider"]
 
 
 def create_digital_human_provider(

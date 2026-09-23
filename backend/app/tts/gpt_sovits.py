@@ -32,6 +32,7 @@ from typing import Any
 import httpx
 
 from app.tts.audio import probe_audio_duration_s
+from app.tts.base import DEFAULT_MEDIA_TYPE, TtsAudio, TtsError
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_BASE_URL = "http://127.0.0.1:9880"
 DEFAULT_TEXT_LANG = "zh"
 DEFAULT_PROMPT_LANG = "zh"
-DEFAULT_MEDIA_TYPE = "wav"
 DEFAULT_SPEED = 1.0
 TTS_PATH = "/tts"
 
@@ -61,25 +61,12 @@ PROTECTED_BODY_KEYS = frozenset(
 _ERROR_BODY_MAX_CHARS = 200
 
 
-class GptSovitsError(RuntimeError):
+class GptSovitsError(TtsError):
     """GPT-SoVITS 调用失败（服务未启动 / 超时 / 参数被拒 / 空音频等）。
 
-    上层据此降级（不阻断对话与渲染），见 `gpt_sovits_provider.py`。
+    继承 `TtsError`：调用方只需 `except TtsError` 就能覆盖所有 TTS 实现，
+    不必逐个记住各家的异常类名。降级逻辑见 `gpt_sovits_provider.py`。
     """
-
-
-@dataclass
-class TtsAudio:
-    """一次语音合成的产物（与魔珐的 `TtsResult` 区分：本类**没有**字级时间戳）。"""
-
-    audio_bytes: bytes
-    audio_format: str = DEFAULT_MEDIA_TYPE
-    #: 时长（秒）；容器头拿不到时为 None（非 WAV / 裸 PCM），由调用方按估算兜底
-    duration_s: float | None = None
-
-    @property
-    def has_duration(self) -> bool:
-        return bool(self.duration_s and self.duration_s > 0)
 
 
 @dataclass(frozen=True)

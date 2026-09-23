@@ -34,6 +34,7 @@ from app.digital_human.viseme import (
     track_duration_ms,
 )
 from app.tools.emotion import EMOTION_FACIAL_EXPRESSIONS
+from app.tts.base import TtsProvider
 from app.tts.gpt_sovits import (
     DEFAULT_MEDIA_TYPE,
     GptSovitsClient,
@@ -41,6 +42,7 @@ from app.tts.gpt_sovits import (
     TtsAudio,
     VoiceRef,
 )
+from app.tts.gpt_sovits_provider import GptSovitsTtsProvider
 
 # 缩放系数的合理区间。
 #
@@ -58,7 +60,11 @@ SOURCE_ESTIMATED = "estimated"  # 拿不到时长（非 WAV / 空音频），保
 
 
 class GptSovitsDigitalHumanProvider(DigitalHumanProvider):
-    """GPT-SoVITS 实现（带本地降级）。"""
+    """本地形象 + GPT-SoVITS 声音（带本地降级）。
+
+    音频经 `TtsProvider` 接口取（§9.10 第 12 项）——本类不再直接依赖
+    `GptSovitsClient`，将来换 TTS 只需换注入的 provider。
+    """
 
     name = "gpt_sovits"
 
@@ -69,6 +75,7 @@ class GptSovitsDigitalHumanProvider(DigitalHumanProvider):
         media_dir: str | Path = "media",
         fallback: DigitalHumanProvider | None = None,
         client: GptSovitsClient | None = None,
+        tts: TtsProvider | None = None,
     ) -> None:
         """
         参数:
@@ -76,22 +83,13 @@ class GptSovitsDigitalHumanProvider(DigitalHumanProvider):
                 此时调用会因"缺参考音频"而降级到 local —— 服务没部署时正是这个行为；
             media_dir: 音频落盘目录；
             fallback: 降级实现（默认本地）；
-            client: 注入客户端（测试用；缺省按 config 构造）。
+            client: 注入的 GPT-SoVITS 客户端（测试用；缺省按 config 构造）；
+            tts: 注入的 TTS provider（优先于 client；换其他 TTS 时用）。
         """
         self.config = config or GptSovitsConfig()
         self.media_dir = Path(media_dir)
         self._fallback = fallback or LocalDigitalHumanProvider()
-        self._client = client or GptSovitsClient(
-            base_url=self.config.base_url,
-            ref_audio_path=self.config.ref_audio_path,
-            prompt_text=self.config.prompt_text,
-            prompt_lang=self.config.prompt_lang,
-            text_lang=self.config.text_lang,
-            speed=self.config.speed,
-            media_type=self.config.media_type,
-            timeout=self.config.timeout,
-            extra_params=self.config.extra_params,
-        )
+        self._tts = tts or GptSovitsTtsProvider(self.config, client=client)
 
     def synthesize(
         self,
@@ -109,7 +107,7 @@ class GptSovitsDigitalHumanProvider(DigitalHumanProvider):
         estimated_ms = track_duration_ms(visemes)
 
         try:
-            audio = self._client.synthesize_sync(
+            audio = self._tts.synthesize(
                 text,
                 ref_audio_path=voice_ref.ref_audio_path,
                 prompt_text=voice_ref.prompt_text,
@@ -189,7 +187,7 @@ class GptSovitsDigitalHumanProvider(DigitalHumanProvider):
         """
         voice_ref, _, _, _ = self._resolve_voice(None, None)
         try:
-            self._client.synthesize_sync(
+            self._tts.synthesize(
                 text,
                 ref_audio_path=voice_ref.ref_audio_path,
                 prompt_text=voice_ref.prompt_text,
