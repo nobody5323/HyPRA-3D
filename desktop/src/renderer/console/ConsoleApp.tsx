@@ -471,7 +471,10 @@ export function ConsoleApp() {
 
         {section === "persona" ? (
           <div className="max-w-3xl">
-            <Card title="人设与文风" description="查看与对比各套提示词（实际生效的选择在对话界面）。">
+            <Card
+              title="人设与文风"
+              description="这里改的是共享偏好（存后端）：Web 端与桌宠窗下次打开时按它生效。"
+            >
               <PersonaPanel />
             </Card>
           </div>

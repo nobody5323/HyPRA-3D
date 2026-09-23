@@ -124,7 +124,9 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
   桌宠窗与 Web 端都由它在「模式启动」里选定后再启动（桌宠不再自动弹出）；
   控制台复用 `frontend/components/**`（已核实零 `next/*` 依赖），因此 desktop 接了 Tailwind
   （theme 从 `frontend/tailwind.config` import，单一来源）。
-  模型构图校准（scale / offset / anchor）与「当前用哪个模型」均存**后端模型元数据**，两端口径一致。
+  模型构图校准（scale / offset / anchor）与「当前用哪个模型」均存**后端模型元数据**，两端口径一致；
+  对话偏好（人设 / 文风 / 预设 / 酒馆预设）同样存后端（`data/chat-preferences.json`），
+  优先级是「用户偏好 > 部署默认」。
   发布包不含模型/音频（白名单拷贝 + `scripts/verify-release-assets.mjs` 硬校验），
   用户自备模型放 `%APPDATA%/HyPRA/live2d/`。设计见 `docs/desktop-pet.md`。
 

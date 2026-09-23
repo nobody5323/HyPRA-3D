@@ -12,7 +12,9 @@ POST /chat 的完整链路由 LangGraph 节点图驱动：
 """
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -86,6 +88,11 @@ _model_profiles = None
 
 _DEFAULT_PERSONA_ID = "therapist-elder-sister"
 
+#: 对话偏好的字段（用户级，控制台 / Web 端 / 桌宠窗共享同一份）
+_PREFERENCE_FIELDS = ("persona_id", "style_id", "preset_id", "st_preset_id")
+
+#: 单个偏好值的长度上限（防手改文件或异常入参写入超长字符串）
+_MAX_PREFERENCE_LENGTH = 120
 
 # ---------- 依赖懒加载（测试可经 set_* 注入）----------
 
@@ -691,6 +698,109 @@ def list_chat_styles() -> dict:
             for preset in _styles.values()
         ],
     }
+
+
+# =============================================================
+# 对话偏好（人设 / 文风 / 提示词预设 / 酒馆预设）
+# =============================================================
+#
+# 为什么存后端：三个界面的 localStorage 互不相通（控制台与桌宠窗是
+# 127.0.0.1:34567，Web 端是 localhost:3000），而「用哪套提示词」必须是
+# 三者一致的事实。
+#
+# 语义：存的是**用户最后一次的选择**，空串 = 没选过（界面回落到部署默认）。
+# 所以它不会覆盖部署配置，只是比部署配置优先。
+
+
+def _preferences_path() -> Path:
+    return Path(get_settings().chat_preferences_path)
+
+
+def _read_preferences() -> dict[str, str]:
+    """读偏好；文件缺失 / 损坏一律按「全部未设置」处理。
+
+    不能因为一个被改坏的 JSON 就让对话起不来——偏好只是「上次选了哪套提示词」，
+    丢了顶多是回到部署默认。
+    """
+    empty = {field: "" for field in _PREFERENCE_FIELDS}
+    path = _preferences_path()
+    if not path.is_file():
+        return empty
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("对话偏好文件读不动，按未设置处理：%s", path)
+        return empty
+
+    if not isinstance(raw, dict):
+        return empty
+
+    return {field: str(raw.get(field) or "").strip() for field in _PREFERENCE_FIELDS}
+
+
+def _write_preferences(values: dict[str, str]) -> None:
+    """原子写：先写临时文件再 rename，避免留下半截 JSON。"""
+    path = _preferences_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def _known_persona_ids() -> set[str]:
+    """内置人设 + 用户自建角色的 id。
+
+    人设 id 同时是**记忆隔离命名空间**（`companion:{id}`），写一个不存在的 id
+    不只是「这轮回复不对」——它会让记忆写进另一个库。所以只有它做存在性校验，
+    文风 / 预设写错顶多是那一轮回落默认。
+    """
+    ids = set(get_persona_presets())
+    summaries, _warnings = get_studio_store().list_personas()
+    ids.update(item.id for item in summaries)
+    return ids
+
+
+class ChatPreferencesPatch(BaseModel):
+    """偏好补丁：只改传进来的字段（不传 = 保持原值，空串 = 清除）。"""
+
+    persona_id: str | None = None
+    style_id: str | None = None
+    preset_id: str | None = None
+    st_preset_id: str | None = None
+
+
+@router.get("/preferences")
+def get_chat_preferences() -> dict:
+    """当前对话偏好（空串 = 未设置，由界面回落到部署默认）。"""
+    return _read_preferences()
+
+
+@router.put("/preferences")
+def put_chat_preferences(payload: ChatPreferencesPatch) -> dict:
+    """更新对话偏好（控制台 / Web 端 / 桌宠窗共用同一份）。"""
+    current = _read_preferences()
+    sent = payload.model_fields_set
+
+    for field in _PREFERENCE_FIELDS:
+        if field not in sent:
+            continue
+
+        value = str(getattr(payload, field) or "").strip()
+        if len(value) > _MAX_PREFERENCE_LENGTH:
+            raise HTTPException(
+                status_code=400, detail=f"{field} 过长（上限 {_MAX_PREFERENCE_LENGTH} 字符）"
+            )
+
+        if field == "persona_id" and value and value not in _known_persona_ids():
+            raise HTTPException(status_code=400, detail=f"未知人设：{value}")
+
+        current[field] = value
+
+    _write_preferences(current)
+    return current
 
 
 @router.post("", response_model=ChatResponse)

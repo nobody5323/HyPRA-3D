@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # GET /media/avatar/models/{id}/files/{path} 取文件。
     avatar_models_dir: str = "data/avatar_models"
 
+    # 对话偏好（人设 / 文风 / 提示词预设 / 酒馆预设）的落盘路径。
+    #
+    # 为什么放后端而不是 localStorage：桌面端与 Web 端的 origin 不同
+    # （控制台/桌宠窗是 127.0.0.1:34567，Web 端是 localhost:3000），
+    # localStorage 天然不共享；而「用哪套提示词」必须是三处一致的事实。
+    # 语义：里面存的是**用户最后一次的选择**（空串 = 没选过，回落到部署默认）。
+    chat_preferences_path: str = "data/chat-preferences.json"
+
     # 数字人模型清单（可选）：本地 JSON 文件路径（也接受 file:// URL）。
     #
     # 用途：把「还有哪些模型可以获取」以清单形式展示给用户（作者 / 授权 / 获取地址）。

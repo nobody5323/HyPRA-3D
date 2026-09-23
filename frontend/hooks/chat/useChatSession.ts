@@ -22,7 +22,16 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiError, deleteSession, getSessionHistory, postChat, postSpeak } from "@/lib/api/client";
+import {
+  ApiError,
+  deleteSession,
+  getChatPreferences,
+  getSessionHistory,
+  postChat,
+  postSpeak,
+  setChatPreferences,
+  type ChatPreferences,
+} from "@/lib/api/client";
 import { DEFAULT_PERSONA_ID } from "@/lib/chat/persona";
 import { readActiveSessionId, writeActiveSessionId } from "@/lib/chat/session-store";
 import type { ChatMessage, EmotionInfo, MemoryCounts, ToolUsage } from "@/lib/api/types";
@@ -117,6 +126,8 @@ export interface ChatSession {
   /** 已导入的酒馆预设 id；"" = 不使用（走内置分层组装） */
   stPresetId: string;
   setStPresetId: (id: string) => void;
+  /** 后端是否已存过偏好（页面据此决定要不要按部署默认校准） */
+  hasStoredPreference: boolean;
   /** 本轮 ST 组装的元信息（命中/空槽位/未识别宏等；走内置路径时为 {}） */
   stPresetMeta: Record<string, unknown>;
   /**
@@ -151,6 +162,13 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
   const [styleId, setStyleId] = useState("modern-conversational");
   const [presetId, setPresetId] = useState(""); // "" = 自动（按模型名匹配）
   const [stPresetId, setStPresetId] = useState(""); // "" = 不使用酒馆预设
+  /**
+   * 后端是否已存过对话偏好。
+   *
+   * 页面据此决定「还要不要按部署默认校准」：用户上次的选择优先于部署声明，
+   * 否则控制台里改好的偏好会被页面自己的校准逻辑覆盖回去。
+   */
+  const [hasStoredPreference, setHasStoredPreference] = useState(false);
   const [stPresetMeta, setStPresetMeta] = useState<Record<string, unknown>>({});
   /**
    * 分段播报开关：**默认开**。
@@ -182,6 +200,37 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
   streamingRef.current = streamingSpeech;
   const personaIdRef = useRef(personaId);
   personaIdRef.current = personaId;
+
+  /*
+   * 挂载后拉一次后端偏好（人设 / 文风 / 预设 / 酒馆预设）。
+   *
+   * 它是**三个界面共享**的一份选择（控制台、Web 端、桌宠窗的 origin 不同，
+   * localStorage 不共享）。空串 = 没选过，此时保持 hook 的初始值，
+   * 让页面按后端的部署默认去校准。
+   */
+  useEffect(() => {
+    let active = true;
+
+    void getChatPreferences().then((prefs) => {
+      // null = 后端读不到：保持界面现有值，没必须把它当成「未设置」
+      if (!active || !prefs) return;
+
+      if (prefs.persona_id) setPersonaId(prefs.persona_id);
+      if (prefs.style_id) setStyleId(prefs.style_id);
+      if (prefs.preset_id) setPresetId(prefs.preset_id);
+      if (prefs.st_preset_id) setStPresetId(prefs.st_preset_id);
+
+      setHasStoredPreference(
+        Boolean(
+          prefs.persona_id || prefs.style_id || prefs.preset_id || prefs.st_preset_id,
+        ),
+      );
+    });
+
+    return () => {
+      active = false;
+    };
+  }, []);
   /** 当前会话 id 的同步引用（供异步回调判断「删的是不是当前会话」） */
   const sessionIdRef = useRef(sessionId);
   sessionIdRef.current = sessionId;
@@ -396,13 +445,49 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
    * 人设即记忆命名空间（companion_id）：不复用上一个角色的 session_id，
    * 改由恢复 effect 按新角色去取「它自己的会话」（可能是新对话）。
    */
+  /**
+   * 记住用户这次的选择（后端那一份是三界面共享的）。
+   *
+   * 失败**不影响本次使用**：存不上顶多是下次打开回到旧的选择，
+   * 为它弹错误反而更吵。
+   */
+  const rememberPreference = useCallback((patch: Partial<ChatPreferences>) => {
+    setHasStoredPreference(true);
+    void setChatPreferences(patch).catch(() => undefined);
+  }, []);
+
   const changePersona = useCallback(
     (id: string) => {
       abortCurrentTurn();
       resetTurnState();
       setPersonaId(id); // 恢复 effect 会按新角色装载会话
+      rememberPreference({ persona_id: id });
     },
-    [abortCurrentTurn, resetTurnState],
+    [abortCurrentTurn, resetTurnState, rememberPreference],
+  );
+
+  const changeStyle = useCallback(
+    (id: string) => {
+      setStyleId(id);
+      rememberPreference({ style_id: id });
+    },
+    [rememberPreference],
+  );
+
+  const changePreset = useCallback(
+    (id: string) => {
+      setPresetId(id);
+      rememberPreference({ preset_id: id });
+    },
+    [rememberPreference],
+  );
+
+  const changeStPreset = useCallback(
+    (id: string) => {
+      setStPresetId(id);
+      rememberPreference({ st_preset_id: id });
+    },
+    [rememberPreference],
   );
 
   /**
@@ -507,11 +592,12 @@ export function useChatSession(avatar: AvatarController, userName = "小林"): C
     removeSession,
     retryHistory,
     styleId,
-    setStyleId,
+    setStyleId: changeStyle,
     presetId,
-    setPresetId,
+    setPresetId: changePreset,
     stPresetId,
-    setStPresetId,
+    setStPresetId: changeStPreset,
+    hasStoredPreference,
     stPresetMeta,
     streamingSpeech,
     setStreamingSpeech,

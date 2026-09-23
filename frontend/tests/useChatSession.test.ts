@@ -15,6 +15,7 @@ import { useChatSession } from "@/hooks/chat/useChatSession";
 import type { AvatarController } from "@/hooks/avatar/useAvatar";
 import { deleteSession, getSessionHistory, postChat, postSpeak } from "@/lib/api/client";
 import { writeActiveSessionId } from "@/lib/chat/session-store";
+import { getChatPreferences, setChatPreferences } from "@/lib/api/client";
 import type { ChatResponse, SessionHistory, SpeakCommand } from "@/lib/api/types";
 
 vi.mock("@/lib/api/client", () => ({
@@ -32,6 +33,16 @@ vi.mock("@/lib/api/client", () => ({
   postChat: vi.fn(),
   postSpeak: vi.fn(),
   deleteSession: vi.fn(),
+  // 对话偏好：默认「后端读不到」（null）——与本测试关心的历史/播报无关，
+  // 这样 hook 会保持初始值，不会干扰下面的断言
+  getChatPreferences: vi.fn(async () => null),
+  setChatPreferences: vi.fn(async (patch: Record<string, string>) => ({
+    persona_id: "",
+    style_id: "",
+    preset_id: "",
+    st_preset_id: "",
+    ...patch,
+  })),
 }));
 
 const PERSONA = "therapist-elder-sister";
@@ -246,6 +257,56 @@ describe("useChatSession 历史恢复", () => {
  * 而情绪是本轮对话的产物、hook 调用时还不知道，所以必须**跟着 speak 传进去**。
  * 这里锁「传了」与「没情绪时传 null/默认强度」（漏传会静默变成中性表情）。
  */
+describe("useChatSession 对话偏好", () => {
+  it("后端已有偏好时初值采用它（用户偏好优先于部署默认）", async () => {
+    vi.mocked(getChatPreferences).mockResolvedValueOnce({
+      persona_id: PERSONA,
+      style_id: "stored-style",
+      preset_id: "stored-preset",
+      st_preset_id: "",
+    });
+
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+
+    await waitFor(() => expect(result.current.styleId).toBe("stored-style"));
+    expect(result.current.presetId).toBe("stored-preset");
+    // 页面靠它决定要不要再用部署默认校准
+    expect(result.current.hasStoredPreference).toBe(true);
+  });
+
+  it("后端读不到偏好时保持初始值，且不标记为已存", async () => {
+    vi.mocked(getChatPreferences).mockResolvedValueOnce(null);
+
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+
+    await waitFor(() => expect(result.current.hasStoredPreference).toBe(false));
+    expect(result.current.styleId).toBe("modern-conversational");
+  });
+
+  it("切换文风会把选择写回后端（三端共享的那一份）", async () => {
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+    await waitFor(() => expect(result.current.hasStoredPreference).toBe(false));
+
+    act(() => result.current.setStyleId("another-style"));
+
+    await waitFor(() =>
+      expect(setChatPreferences).toHaveBeenCalledWith({ style_id: "another-style" }),
+    );
+    expect(result.current.styleId).toBe("another-style");
+  });
+
+  it("切换人设同样写回（人设 id 也是记忆命名空间）", async () => {
+    const { result } = renderHook(() => useChatSession(fakeAvatar));
+    await waitFor(() => expect(result.current.hasStoredPreference).toBe(false));
+
+    act(() => result.current.setPersonaId("another-persona"));
+
+    await waitFor(() =>
+      expect(setChatPreferences).toHaveBeenCalledWith({ persona_id: "another-persona" }),
+    );
+  });
+});
+
 describe("useChatSession 播报上下文", () => {
   it("整段播报带上本轮情绪与强度", async () => {
     vi.mocked(postChat).mockResolvedValue(

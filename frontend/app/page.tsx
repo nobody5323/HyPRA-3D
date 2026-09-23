@@ -282,7 +282,8 @@ export default function HomePage() {
     void getLlmConfig().then((data) => setLlmModel(data?.config.model ?? ""));
     void getStyles().then((catalog) => {
       setStyleCatalog(catalog);
-      if (!catalog || styleTouchedRef.current) return;
+      // 已有用户偏好（可能是在程序控制台里改的）→ 不用部署默认覆盖它
+      if (!catalog || styleTouchedRef.current || session.hasStoredPreference) return;
       // 缺省文风以后端配置为准（前端不再硬编码）；
       // 配置与清单不一致时退回清单首项——否则会把后端不认识的 style_id 发出去
       const declared = catalog.default_style_id;
@@ -293,14 +294,15 @@ export default function HomePage() {
         changeStyle(candidate);
       }
     });
-  }, [backendOnline, changeStyle]);
+  }, [backendOnline, changeStyle, session.hasStoredPreference]);
 
   // 人设清单：同时把后端声明的缺省人设同步进来（替代前端硬编码常量）
   useEffect(() => {
     if (backendOnline !== true) return;
     void getPersonas().then((catalog) => {
       setPersonaCatalog(catalog);
-      if (!catalog || personaTouchedRef.current) return;
+      // 同理：控制台里选好的人设优先于部署声明的缺省
+      if (!catalog || personaTouchedRef.current || session.hasStoredPreference) return;
       // 同文风：后端声明的缺省人设若不在清单里（配置写错），退回清单首项——
       // 否则会把一个后端不认识的人设 id 发出去，对话直接 404
       const declared = catalog.default_persona_id;
@@ -311,7 +313,7 @@ export default function HomePage() {
         changePersona(candidate);
       }
     });
-  }, [backendOnline, changePersona]);
+  }, [backendOnline, changePersona, session.hasStoredPreference]);
 
   return (
     <main className="mx-auto flex min-h-[100dvh] max-w-6xl flex-col gap-4 p-4 lg:h-[100dvh] lg:min-h-0 lg:overflow-hidden lg:p-6">

@@ -284,6 +284,48 @@ export async function deleteKnowledge(
  * 人设 id 同时是记忆隔离命名空间（companion_id），页面用它渲染选择器、
  * 显示当前角色名，并作为个人记忆面板的命名空间。
  */
+/**
+ * 对话偏好（人设 / 文风 / 提示词预设 / 酒馆预设）。
+ *
+ * 空串 = 未设置（界面回落到部署声明的默认）。存在**后端**而不是 localStorage：
+ * 三个界面（控制台、Web 端、桌宠窗）的 origin 不同，localStorage 天然不共享。
+ */
+export interface ChatPreferences {
+  persona_id: string;
+  style_id: string;
+  preset_id: string;
+  st_preset_id: string;
+}
+
+/**
+ * 读对话偏好。
+ *
+ * 返回 `null` 专指「后端读不到」（离线 / 5xx）——与「全都没设置」（空串）是两件事：
+ * 前者要保持界面现有选择，后者才回落到部署默认。
+ */
+export async function getChatPreferences(): Promise<ChatPreferences | null> {
+  try {
+    const res = await fetch(`${API_BASE}/chat/preferences`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as ChatPreferences;
+  } catch {
+    return null;
+  }
+}
+
+/** 改对话偏好（只传要改的字段；空串 = 清除该项） */
+export async function setChatPreferences(
+  patch: Partial<ChatPreferences>,
+): Promise<ChatPreferences> {
+  const res = await fetch(`${API_BASE}/chat/preferences`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!res.ok) await throwApiError(res, "保存对话偏好");
+  return (await res.json()) as ChatPreferences;
+}
+
 export async function getPersonas(): Promise<PersonaCatalog | null> {
   try {
     const res = await fetch(`${API_BASE}/chat/personas`, { cache: "no-store" });
