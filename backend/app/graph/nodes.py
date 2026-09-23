@@ -35,6 +35,7 @@ from app.prompts.st_compat import (
 from app.prompts.style.loader import check_persona_compatibility
 from app.prompts.style.models import StylePreset
 from app.rag.prompt_manager import PromptManager
+from app.skills.registry import get_skill_registry
 from app.graph.state import ChatState
 from app.tools.emotion import (
     EMOTION_TOOL_NAME,
@@ -47,6 +48,19 @@ from app.tools.registry import ToolRegistry
 from app.worldbook.matcher import match_entries
 from app.worldbook.models import WorldBookEntry
 from app.worldbook.vector_index import WorldBookVectorIndex
+
+
+def _skills_catalog() -> str:
+    """可用技能清单（`AGENTS.md §9.6`）。
+
+    常驻上下文的是**清单**（几行 id + 适用场景），正文由 `study_skill` 工具按需取回。
+    技能库在启动时一次性装好、之后只读，所以这里直接取全局单例——
+    为一个静态字符串再给 graph state 加字段不划算。
+
+    注意：tavern 模式（ST 预设组装）**不注入**这一层——那个模式只用酒馆预设 +
+    角色卡还原原生体验（§8.1）。
+    """
+    return get_skill_registry().catalog_text()
 
 #: 能真正透传给 provider 的采样参数。
 #: ST 的 top_k / top_a / min_p / repetition_penalty / seed / n 只保存与展示，
@@ -304,6 +318,7 @@ class ChatNodes:
             persona_text=state.get("persona_text", ""),
             user_input=state.get("user_input", ""),
             worldbook_text=state.get("worldbook_text", ""),
+            skills_text=_skills_catalog(),
             knowledge_lines=state.get("knowledge_lines", []),
             warm_lines=state.get("warm_lines", []),
             fact_lines=state.get("fact_lines", []),

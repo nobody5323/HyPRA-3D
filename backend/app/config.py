@@ -117,6 +117,21 @@ class Settings(BaseSettings):
     # 酒馆会话导入记录（幂等去重：只记“哪些会话已导入哪个陪伴对象”）
     tavern_import_state_file: str = "data/tavern_import.json"
 
+    # ---- Skill 体系（设计见 AGENTS.md §9.6，独立于插件）----
+    # 渐进式加载的能力说明：常驻上下文只有清单（id/名称/适用场景），
+    # 正文由 study_skill 工具按需取回。与插件的区别是「提示词级 vs 进程级」。
+    skills_enabled: bool = True
+    # 内置技能目录（入库，随项目分发）：每技能一个 <id>/SKILL.md
+    skills_dir: str = "skills"
+    # 用户技能目录（自己写的技能放这里；data/ 已 gitignore）
+    user_skills_dir: str = "data/skills"
+    # 禁用列表落盘位置（运行期启停覆盖下面的初始值）
+    skills_state_file: str = "data/skills.json"
+    # **初始**禁用列表（逗号分隔）；用户在界面上的启停会落盘并覆盖它
+    skills_disabled: str = ""
+    # 常驻清单的 token 预算（清单本身必须便宜）
+    skills_catalog_budget: int = 400
+
     # 上传的数字人模型库（Live2D 模型包 / 静态立绘）。
     #
     # 同样落 backend/data/（已被 .gitignore 覆盖）。刻意**不**写到
@@ -249,3 +264,9 @@ def cors_origin_list(settings: Settings) -> list[str]:
     if raw == "*":
         return ["*"]
     return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def skills_disabled_list(settings: Settings) -> list[str]:
+    """把逗号分隔的 SKILLS_DISABLED 解析为列表（技能库的初始禁用值）。"""
+    raw = (settings.skills_disabled or "").strip()
+    return [item.strip() for item in raw.split(",") if item.strip()]

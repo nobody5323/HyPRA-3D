@@ -5,6 +5,7 @@ from app.rag.prompt_manager import (
     LAYER_HISTORY,
     LAYER_KNOWLEDGE,
     LAYER_PERSONA,
+    LAYER_SKILLS,
     LAYER_USER,
     LAYER_WARM,
     LAYER_WORLDBOOK,
@@ -177,3 +178,68 @@ def test_history_layer_tracks_after_trim() -> None:
     result = pm.build(persona_text="人设", user_input="问", history=_history(10))
     expected = sum(len(t.text) * 0.7 for t in result.history)
     assert result.layers[LAYER_HISTORY].tokens <= expected + 5
+
+
+# ---------- 可用技能层（§9.6）----------
+
+SKILLS = "- crisis：情绪危机安抚 —— 用户表达绝望时"
+
+
+def test_skills_layer_sits_between_worldbook_and_knowledge() -> None:
+    """技能是「能力说明」而非「记忆」，所以紧跟世界书、在记忆层之前。"""
+    pm = PromptManager()
+    result = pm.build(
+        persona_text="你是苏澄。",
+        user_input="我今天很累",
+        worldbook_text="[深夜倾听模式]",
+        skills_text=SKILLS,
+        knowledge_lines=["用户上传的资料"],
+        warm_lines=["回忆一条"],
+    )
+    prompt = result.system_prompt
+
+    assert prompt.index("[场景补充]") < prompt.index("[可用技能]")
+    assert prompt.index("[可用技能]") < prompt.index("[参考资料]")
+    # 不混进记忆块——否则「该怎么做」与「知道什么」会互相冲淡
+    assert "[可用技能]" not in result.memory_block
+
+
+def test_skills_layer_omitted_when_empty() -> None:
+    pm = PromptManager()
+    result = pm.build(persona_text="人设", user_input="问", skills_text="")
+
+    assert "[可用技能]" not in result.system_prompt
+    assert result.layers[LAYER_SKILLS].empty
+
+
+def test_skills_budget_truncates() -> None:
+    pm = PromptManager(skills_budget=20)
+    result = pm.build(
+        persona_text="人设",
+        user_input="问",
+        skills_text="\n".join(f"- skill-{i}：名称 —— 适用场景描述" for i in range(20)),
+    )
+
+    assert result.layers[LAYER_SKILLS].truncated is True
+    assert "skill-19" not in result.system_prompt
+
+
+def test_skills_dropped_after_knowledge() -> None:
+    """总量不足时的裁剪次序：记忆层（priority 70）先于技能层（75）被舍。
+
+    技能是「该怎么做」，比「关于这个人知道什么」更靠近人设；预算不够时宁可
+    少注入几条记忆，也要让模型知道遇到某些情况该采取什么流程。
+    """
+    pm = PromptManager(total_budget=60)
+    result = pm.build(
+        persona_text="人设",
+        user_input="问",
+        skills_text=SKILLS,
+        knowledge_lines=["资料" * 20],
+        worldbook_text="场景补充" * 20,
+    )
+
+    assert LAYER_SKILLS in result.dropped_layers, result.dropped_layers
+    assert result.dropped_layers.index(LAYER_KNOWLEDGE) < result.dropped_layers.index(
+        LAYER_SKILLS
+    )

@@ -2,7 +2,11 @@
 
 设计参照①的固定组装顺序与优先级（高 → 低）：
 
-    人设 > 世界书命中 > 向量召回 > 结构化事实 > 滚动窗口 > 本次输入
+    人设 > 世界书命中 > 可用技能 > 个人记忆 > 向量召回 > 结构化事实 > 滚动窗口 > 本次输入
+
+可用技能（§9.6）放在世界书之后、记忆之前：它是**能力说明**而不是记忆——
+告诉模型「遇到这类情况该怎么做」，与「关于这个人/这段关系知道什么」是两类信息，
+混进记忆块会让两者都变浑。
 
 预算策略（两级）：
 1. 层内预算：世界书块、记忆块、历史窗口各自独立预算，超出即截断；
@@ -22,6 +26,7 @@ from app.session.context import ChatTurn
 # ---- 层标识 ----
 LAYER_PERSONA = "persona"        # 角色人设（必留）
 LAYER_WORLDBOOK = "worldbook"    # 世界书命中
+LAYER_SKILLS = "skills"          # 可用技能清单（§9.6，仅列出 id/名称/适用场景）
 LAYER_KNOWLEDGE = "knowledge"    # 个人记忆（用户上传的语料）
 LAYER_WARM = "warm_recall"       # 温层向量召回
 LAYER_FACTS = "cold_facts"       # 冷层结构化事实
@@ -32,11 +37,13 @@ LAYER_STYLE = "style"            # 表达风格（M5，放 system 末尾：越�
 # ---- 段落标题 ----
 ROLE_DEF_SECTION = "角色人设"
 WORLDBOOK_SECTION = "场景补充"
+SKILLS_SECTION = "可用技能"       # 只有清单；正文由 study_skill 工具按需取回
 KNOWLEDGE_SECTION = "参考资料"   # 个人记忆独立成块，不并入「记忆回忆」
 MEMORY_SECTION = "记忆回忆"
 
 # ---- 默认预算 ----
 DEFAULT_WORLDBOOK_BUDGET = 400
+DEFAULT_SKILLS_BUDGET = 400      # 技能清单本身必须便宜（几行 id + 适用场景）
 DEFAULT_KNOWLEDGE_BUDGET = 900   # 个人记忆是用户主动提供的，给足预算
 DEFAULT_MEMORY_BUDGET = 400
 DEFAULT_HISTORY_BUDGET = 700
@@ -49,6 +56,7 @@ _LAYER_PRIORITY = {
     LAYER_USER: 100,
     LAYER_STYLE: 90,      # 表达风格很重要，但在总量不足时仍可裁（排在必留层之后）
     LAYER_WORLDBOOK: 80,
+    LAYER_SKILLS: 75,     # 能力说明；比记忆层重要，但不如世界书的场景设定
     LAYER_KNOWLEDGE: 70,  # 用户主动上传 > AI 自动记录的对话回忆
     LAYER_WARM: 60,
     LAYER_FACTS: 55,
@@ -114,6 +122,7 @@ class PromptManager:
         self,
         *,
         worldbook_budget: int = DEFAULT_WORLDBOOK_BUDGET,
+        skills_budget: int = DEFAULT_SKILLS_BUDGET,
         knowledge_budget: int = DEFAULT_KNOWLEDGE_BUDGET,
         memory_budget: int = DEFAULT_MEMORY_BUDGET,
         history_budget: int = DEFAULT_HISTORY_BUDGET,
@@ -121,6 +130,7 @@ class PromptManager:
         style_budget: int = DEFAULT_STYLE_BUDGET,
     ) -> None:
         self.worldbook_budget = worldbook_budget
+        self.skills_budget = skills_budget
         self.knowledge_budget = knowledge_budget
         self.memory_budget = memory_budget
         self.history_budget = history_budget
@@ -175,6 +185,7 @@ class PromptManager:
         persona_text: str,
         user_input: str,
         worldbook_text: str = "",
+        skills_text: str = "",
         knowledge_lines: list[str] | None = None,
         warm_lines: list[str] | None = None,
         fact_lines: list[str] | None = None,
@@ -188,6 +199,8 @@ class PromptManager:
         本方法只负责分层编排、预算与裁剪。
 
         参数:
+            skills_text: 可用技能清单（只有 id / 名称 / 适用场景，由 `SkillRegistry.catalog_text()`
+                         产出）；正文不在这里——那是 `study_skill` 的事；
             style_text: 表达风格指令块，放在 **system 末尾**（越靠近输入影响越强）；
             examples: 示例对话（few-shot），以真实消息对插在历史之前。
         """
@@ -208,6 +221,7 @@ class PromptManager:
 
         # ---- ① 层内预算 ----
         wb_body, wb_cut = self._fit_text(worldbook_text, self.worldbook_budget)
+        skills_body, skills_cut = self._fit_text(skills_text, self.skills_budget)
         knowledge_lines, knowledge_cut = self._fit_lines(
             list(knowledge_lines or []), self.knowledge_budget
         )
@@ -224,6 +238,10 @@ class PromptManager:
             LAYER_WORLDBOOK: PromptLayer(
                 key=LAYER_WORLDBOOK, title=WORLDBOOK_SECTION, body=wb_body,
                 priority=_LAYER_PRIORITY[LAYER_WORLDBOOK], truncated=wb_cut,
+            ),
+            LAYER_SKILLS: PromptLayer(
+                key=LAYER_SKILLS, title=SKILLS_SECTION, body=skills_body,
+                priority=_LAYER_PRIORITY[LAYER_SKILLS], truncated=skills_cut,
             ),
             LAYER_KNOWLEDGE: PromptLayer(
                 key=LAYER_KNOWLEDGE, title="参考资料：",
@@ -271,7 +289,7 @@ class PromptManager:
             layers[LAYER_HISTORY].tokens = sum(estimate_tokens(t.text) for t in history)
             layers[LAYER_HISTORY].truncated = True
         # 2b) 再按优先级从低到高裁剪（摘要 → 事实 → 召回 → 世界书 → 风格）
-        for key in (LAYER_FACTS, LAYER_WARM, LAYER_KNOWLEDGE, LAYER_WORLDBOOK, LAYER_STYLE):
+        for key in (LAYER_FACTS, LAYER_WARM, LAYER_KNOWLEDGE, LAYER_SKILLS, LAYER_WORLDBOOK, LAYER_STYLE):
             if _total() <= self.total_budget:
                 break
             layer = layers[key]
@@ -292,6 +310,8 @@ class PromptManager:
         sections: list[str] = [f"[{ROLE_DEF_SECTION}]\n{layers[LAYER_PERSONA].body}"]
         if not layers[LAYER_WORLDBOOK].empty:
             sections.append(f"[{WORLDBOOK_SECTION}]\n{layers[LAYER_WORLDBOOK].body}")
+        if not layers[LAYER_SKILLS].empty:
+            sections.append(f"[{SKILLS_SECTION}]\n{layers[LAYER_SKILLS].body}")
         if not layers[LAYER_KNOWLEDGE].empty:
             sections.append(f"[{KNOWLEDGE_SECTION}]\n{layers[LAYER_KNOWLEDGE].body}")
         memory_block = _render_memory_block(layers)

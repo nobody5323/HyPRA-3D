@@ -74,7 +74,25 @@ def test_session_store_adapter_aligns_signature(tmp_path) -> None:
     assert sqlite_store is not None
 
 
-def test_tools_builtin_contributes_four_tools() -> None:
+@pytest.fixture
+def no_skills(tmp_path):
+    """把全局技能库置空。
+
+    `_builtin_tools()` 会调 `build_default_registry()`，而后者读全局技能库：
+    技能非空时工具集会多一个 `study_skill`，直接断言「恰好 4 个」
+    就会随仓库里放了几个技能文件而变。
+    """
+    from app.skills.registry import SkillRegistry, get_skill_registry, set_skill_registry
+
+    original = get_skill_registry()
+    set_skill_registry(SkillRegistry(state_path=tmp_path / "skills.json"))
+    try:
+        yield
+    finally:
+        set_skill_registry(original)
+
+
+def test_tools_builtin_contributes_four_tools(no_skills) -> None:
     registry = PluginRegistry()
     register_all_builtin(registry)
 
@@ -168,7 +186,7 @@ def test_disabling_split_plugins_does_not_break_retrieval() -> None:
     assert parse("a.txt", b"hi").source_type == "text"
 
 
-def test_disabling_builtin_removes_its_tools() -> None:
+def test_disabling_builtin_removes_its_tools(no_skills) -> None:
     """可禁用性验证：禁用工具插件后，聚合工具列表为空。"""
     registry = PluginRegistry()
     register_all_builtin(registry)

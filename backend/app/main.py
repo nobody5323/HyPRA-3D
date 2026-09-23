@@ -26,15 +26,17 @@ from app.api import (
     llm_router,
     media_router,
     plugins_router,
+    skills_router,
     st_presets_router,
     studio_router,
 )
-from app.config import cors_origin_list, get_settings
+from app.config import cors_origin_list, get_settings, skills_disabled_list
 from app.digital_human.factory import GPT_SOVITS_NAMES
 from app.mcp.manager import configure_manager, get_mcp_manager
 from app.plugins.builtin import register_all_builtin
 from app.plugins.manager import PluginManager, get_plugin_manager, set_plugin_manager
 from app.plugins.registry import get_registry, set_registry
+from app.skills.registry import configure_skills, get_skill_registry
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +90,23 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # 技能库（§9.6）：与插件体系**独立**——它只是提示词级的方法论，不需要能力面、
+    # 不受 core/builtin 分层约束。装载是纯静态读文件，因此同样放在 create_app() 里，
+    # 让不走 lifespan 的测试也能看到完整技能列表。
+    #
+    # ⚠️ 必须排在 register_all_builtin() **之前**：内置工具集里的 `study_skill`
+    # 只在存在启用技能时才注册（空库时它是 schema 噪音），而 `_builtin_tools()`
+    # 在构造注册对象时就立即读技能库——顺序反了会静默丢失该工具。
+    if settings.skills_enabled:
+        configure_skills(
+            builtin_dir=settings.skills_dir,
+            user_dir=settings.user_skills_dir,
+            state_path=settings.skills_state_file,
+            default_disabled=skills_disabled_list(settings),
+        )
+    else:
+        logger.info("SKILLS_ENABLED=false：跳过技能装载（study_skill 也不会注册）")
+
     # 插件的**静态阶段**在应用工厂里完成：注册内置插件 + 发现目录插件。
     # 两者都只读 manifest、不执行插件代码，因此即使测试只取 /health、不走 lifespan，
     # 插件列表也是完整的（管理 UI 能看到“已安装但未启用”的插件）。
@@ -124,6 +143,7 @@ def create_app() -> FastAPI:
             "mcp": get_mcp_manager().status(),
             "plugins": manager.status(),
             "plugins_summary": manager.summary(),
+            "skills": get_skill_registry().status(),
         }
 
     app.include_router(chat_router)
@@ -134,6 +154,7 @@ def create_app() -> FastAPI:
     app.include_router(st_presets_router)
     app.include_router(studio_router)
     app.include_router(plugins_router)
+    app.include_router(skills_router)
     return app
 
 

@@ -28,8 +28,16 @@ def memory_store(tmp_path) -> MemoryStore:
 
 
 @pytest.fixture()
-def registry() -> ToolRegistry:
-    return build_default_registry()
+def registry(tmp_path) -> ToolRegistry:
+    """内置工具集，且**技能库置空**。
+
+    不置空的话结果会随 `backend/skills/` 的内容而变（有技能时会多一个
+    `study_skill`）——测试不该依赖仓库里恰好放了几个技能文件。
+    技能相关的行为由下面专门的用例覆盖。
+    """
+    from app.skills.registry import SkillRegistry
+
+    return build_default_registry(skill_registry=SkillRegistry(state_path=tmp_path / "skills.json"))
 
 
 def _ctx(mood_store=None, memory_store=None):
@@ -70,6 +78,27 @@ def test_default_registry_has_four_tools(registry: ToolRegistry) -> None:
         "start_breathing_exercise",
         "recall_memory",
     }
+
+
+def test_study_skill_registered_only_when_skills_exist(tmp_path) -> None:
+    """`study_skill` 只在存在启用技能时注册。
+
+    空技能库还挂着它，模型就多了一个永远失败的选项，白占 tools schema 的 token。
+    """
+    from app.skills.registry import SkillRegistry
+
+    empty = SkillRegistry(state_path=tmp_path / "skills.json")
+    assert "study_skill" not in build_default_registry(skill_registry=empty).names()
+
+    skill_dir = tmp_path / "skills" / "demo"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: 演示技能\ndescription: 一句话说明\n---\n\n正文步骤。\n",
+        encoding="utf-8",
+    )
+    loaded = SkillRegistry(state_path=tmp_path / "skills.json")
+    loaded.load(builtin_dir=tmp_path / "skills")
+    assert "study_skill" in build_default_registry(skill_registry=loaded).names()
 
 
 def test_all_tools_export_valid_schema(registry: ToolRegistry) -> None:

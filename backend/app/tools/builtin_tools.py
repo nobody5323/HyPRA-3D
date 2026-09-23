@@ -17,8 +17,10 @@ from pydantic import BaseModel, Field
 
 from app.digital_human.ssml import build_speak_command
 from app.memory.cold.mood_log import MoodLogEntry
+from app.skills.registry import get_skill_registry
 from app.tools.emotion import EMOTION_LABELS_ZH, EmotionLabel
 from app.tools.registry import ToolContext, ToolRegistry, ToolSpec
+from app.tools.skills import CTX_SKILL_REGISTRY, build_study_skill_tool
 
 # extras 中的依赖键名（约定）
 CTX_MOOD_STORE = "mood_store"
@@ -218,8 +220,12 @@ def _recall_memory(args: RecallMemoryArgs, ctx: ToolContext) -> dict:
 # =============================================================
 
 
-def build_default_registry() -> ToolRegistry:
-    """构建默认工具注册表（四个情感陪伴工具）。"""
+def build_default_registry(*, skill_registry=None) -> ToolRegistry:
+    """构建默认工具注册表（四个情感陪伴工具 + 有技能时的 `study_skill`）。
+
+    `study_skill` **只在存在启用技能时**注册：技能库为空还注册它，只会让模型多一个
+    永远失败的选项，白占 tools schema 的 token。
+    """
     registry = ToolRegistry()
     registry.register(
         ToolSpec(
@@ -273,6 +279,12 @@ def build_default_registry() -> ToolRegistry:
             tags=["memory"],
         )
     )
+
+    # 技能库非空才挂 study_skill（空库时它是纯粹的 schema 噪音）
+    active_skills = skill_registry if skill_registry is not None else get_skill_registry()
+    if len(active_skills.enabled()) > 0:
+        registry.register(build_study_skill_tool())
+
     return registry
 
 
@@ -283,13 +295,21 @@ def build_tool_context(
     user_name: str = "用户",
     mood_store=None,
     memory_store=None,
+    skill_registry=None,
 ) -> ToolContext:
-    """构造工具上下文（注入依赖）。"""
+    """构造工具上下文（注入依赖）。
+
+    `skill_registry` 缺省取全局技能库：它在启动时一次性装好、之后只读，
+    没必要逐层往下传（需要隔离的测试仍可显式传入）。
+    """
     extras: dict = {}
     if mood_store is not None:
         extras[CTX_MOOD_STORE] = mood_store
     if memory_store is not None:
         extras[CTX_MEMORY_STORE] = memory_store
+    extras[CTX_SKILL_REGISTRY] = (
+        skill_registry if skill_registry is not None else get_skill_registry()
+    )
     return ToolContext(
         companion_id=companion_id,
         session_id=session_id,
