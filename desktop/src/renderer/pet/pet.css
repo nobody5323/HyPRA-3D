@@ -89,6 +89,29 @@ body {
     0 26px 46px rgba(93, 74, 52, 0.22);
 }
 
+/*
+ * Live2D 生效时：只显示模型本身。
+ *
+ * 圆底座（米色渐变 + 内外阴影）与情绪光晕都是给「没有模型时的占位形象」准备的外观，
+ * 套在真实模型上就成了一块挡住模型下半身的淡黄背景。
+ *
+ * 这里只去掉**外观**，元素本身保留——`.petBody` 同时是拖动热区
+ * 与穿透模式下「解锁」按钮的宿主，删掉它等于把拖动与解锁一起删了。
+ */
+.petShell[data-avatar="live2d"] .petBody,
+.petShell[data-avatar="live2d"] .petStageDragging .petBody {
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  /* 不能留 overflow: hidden：它会把超出 200×200 区域的模型裁成一个圆 */
+  overflow: visible;
+}
+
+/* 光晕同理：它只在占位形象背后有意义，真模型自己就自带阴影与体积感 */
+.petShell[data-avatar="live2d"] .petGlow {
+  display: none;
+}
+
 /* ---------- 形象渲染（Live2D / 立绘，两种模式共用一块区域） ---------- */
 
 .petAvatar {

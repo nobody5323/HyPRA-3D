@@ -14,7 +14,12 @@
  *   仍走既有 `useAvatar.ts` 的 xmov 链路。
  */
 
-import { AVATAR_STATE_LABELS, type AvatarState, type VisemeFrame } from "@/lib/api/types";
+import {
+  AVATAR_STATE_LABELS,
+  type AvatarLayout,
+  type AvatarState,
+  type VisemeFrame,
+} from "@/lib/api/types";
 
 /** 渲染器种类 */
 export type AvatarRendererMode = "static_portrait" | "live2d";
@@ -171,17 +176,13 @@ export interface AvatarRendererStatus {
   capabilities: AvatarRendererCapabilities;
 }
 
-/** 立绘构图校准（随角色包提供，避免为每个角色改 CSS） */
-export interface AvatarPortraitLayout {
-  /** 缩放（1 = 原始） */
-  scale?: number;
-  /** 水平位移（px） */
-  offsetX?: number;
-  /** 垂直位移（px） */
-  offsetY?: number;
-  /** CSS `transform-origin`，如 "bottom center" */
-  anchor?: string;
-}
+/**
+ * 形象构图校准（缩放 / 位移 / 锚点）。
+ *
+ * 类型定义在 `@/lib/api/types`——它是**服务端契约**（校准值随模型存在后端元数据里，
+ * Web 端与桌面端读同一份），这里只做别名，避免同一份结构在两处各写一遍。
+ */
+export type AvatarPortraitLayout = AvatarLayout;
 
 /**
  * 渲染器统一接口。

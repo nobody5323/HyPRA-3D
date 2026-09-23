@@ -125,6 +125,7 @@ export function LocalAvatarStage({
             motion={motion}
             characterLabel={characterLabel}
             modelUrl={source.kind === "live2d" ? source.modelUrl : null}
+            modelLayout={source.kind === "live2d" ? source.layout : null}
             lipSync={lipSync}
             onStageChange={(stage, detail) => {
               setLoadStage(stage);

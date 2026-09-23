@@ -13,12 +13,21 @@
 
 import { avatarModelFileUrl } from "@/lib/api/client";
 import type { PortraitId } from "./avatar-renderer";
-import type { AvatarModelInfo } from "@/lib/api/types";
+import type { AvatarLayout, AvatarModelInfo } from "@/lib/api/types";
 
 export type AvatarModelSource =
   | { kind: "builtin" }
-  | { kind: "live2d"; modelUrl: string }
-  | { kind: "images"; portraitUrl: (portraitId: PortraitId) => string | null };
+  | {
+      kind: "live2d";
+      modelUrl: string;
+      /** 构图校准（后端存的）; `null` = 未校准，用渲染层默认构图 */
+      layout: AvatarLayout | null;
+    }
+  | {
+      kind: "images";
+      portraitUrl: (portraitId: PortraitId) => string | null;
+      layout: AvatarLayout | null;
+    };
 
 /** 内置模型（没有选用任何上传模型时的落点） */
 export const BUILT_IN_MODEL_SOURCE: AvatarModelSource = { kind: "builtin" };
@@ -29,12 +38,17 @@ export function resolveAvatarModelSource(model: AvatarModelInfo | null): AvatarM
   if (model.kind === "live2d") {
     // entry 是相对 files/ 的路径（zip 里可能套了一层文件夹），为空说明模型不完整
     if (!model.entry) return BUILT_IN_MODEL_SOURCE;
-    return { kind: "live2d", modelUrl: avatarModelFileUrl(model.id, model.entry) };
+    return {
+      kind: "live2d",
+      modelUrl: avatarModelFileUrl(model.id, model.entry),
+      layout: model.layout ?? null,
+    };
   }
 
   const { id, expressionMap } = model;
   return {
     kind: "images",
+    layout: model.layout ?? null,
     portraitUrl: (portraitId: PortraitId) => {
       const filename = expressionMap[portraitId];
       return filename ? avatarModelFileUrl(id, filename) : null;

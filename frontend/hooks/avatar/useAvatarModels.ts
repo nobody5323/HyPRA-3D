@@ -14,7 +14,9 @@ import { useCallback, useEffect, useState } from "react";
 import {
   ApiError,
   deleteAvatarModel,
+  getAvatarSelection,
   listAvatarModels,
+  setAvatarSelection,
   updateAvatarModel,
   uploadAvatarModel,
 } from "@/lib/api/client";
@@ -24,7 +26,7 @@ import {
   saveSelectedModelId,
   subscribeSelectedModel,
 } from "@/lib/avatar/avatar-config";
-import type { AvatarModelInfo, AvatarModelKind } from "@/lib/api/types";
+import type { AvatarLayout, AvatarModelInfo, AvatarModelKind } from "@/lib/api/types";
 
 export interface UploadModelInput {
   kind: AvatarModelKind;
@@ -49,6 +51,8 @@ export interface AvatarModelsState {
   remove: (modelId: string) => Promise<void>;
   /** 指定静态立绘的情绪映射（空字符串 = 该情绪不指定） */
   updateMapping: (modelId: string, expressionMap: Record<string, string>) => Promise<void>;
+  /** 保存构图校准（`null` = 清除校准，回到默认构图） */
+  updateLayout: (modelId: string, layout: AvatarLayout | null) => Promise<AvatarModelInfo>;
   clearError: () => void;
 }
 
@@ -69,8 +73,25 @@ export function useAvatarModels(): AvatarModelsState {
   const [selectedId, setSelectedId] = useState<string>(() => getInitialSelectedModelId());
 
   useEffect(() => {
+    // 本地缓存先顶上：后端要一个往返，等它回来才渲染会白屏一下
     setSelectedId(readSelectedModelId());
-    return subscribeSelectedModel(() => setSelectedId(readSelectedModelId()));
+    const unsubscribe = subscribeSelectedModel(() => setSelectedId(readSelectedModelId()));
+
+    let cancelled = false;
+
+    void (async () => {
+      const remote = await getAvatarSelection();
+      // null = 后端读不到 → 保留本地缓存（离线时仍能按上次的选择渲染）
+      if (cancelled || remote === null) return;
+      // 后端是唯一事实来源，本地缓存只是离线兜底：对齐一次
+      saveSelectedModelId(remote);
+      setSelectedId(remote);
+    })();
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
   }, []);
 
   const refresh = useCallback(async () => {
@@ -85,8 +106,19 @@ export function useAvatarModels(): AvatarModelsState {
   }, [refresh]);
 
   const select = useCallback((modelId: string) => {
-    // 通过写入触发订阅回调，这样多个组件看到的是同一份状态
+    // 本地立即生效：通过写入触发订阅回调，多个组件看到的是同一份状态
     saveSelectedModelId(modelId);
+
+    // 再写后端——这是「Web 端与桌面端共用一份选择」的关键。
+    // 失败**不回滚**本地值：用户明确点了这个模型，静默撤销比留下未同步更让人困惑。
+    void (async () => {
+      try {
+        const applied = await setAvatarSelection(modelId);
+        saveSelectedModelId(applied);
+      } catch (caught) {
+        setError(`选择未同步到后端：${describeError(caught)}`);
+      }
+    })();
   }, []);
 
   const upload = useCallback(
@@ -135,6 +167,22 @@ export function useAvatarModels(): AvatarModelsState {
     [],
   );
 
+  const updateLayout = useCallback(
+    async (modelId: string, layout: AvatarLayout | null) => {
+      setError(null);
+      try {
+        const updated = await updateAvatarModel(modelId, { layout });
+        // 就地替换：避免整表刷新导致列表闪烁
+        setModels((prev) => prev.map((item) => (item.id === modelId ? updated : item)));
+        return updated;
+      } catch (caught) {
+        setError(describeError(caught));
+        throw caught;
+      }
+    },
+    [],
+  );
+
   const selected = models.find((model) => model.id === selectedId) ?? null;
 
   return {
@@ -148,6 +196,7 @@ export function useAvatarModels(): AvatarModelsState {
     upload,
     remove,
     updateMapping,
+    updateLayout,
     clearError: useCallback(() => setError(null), []),
   };
 }

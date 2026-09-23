@@ -215,6 +215,26 @@ export interface TtsVoicesStatus {
 /** 模型类型：Live2D 模型包 | 静态立绘 */
 export type AvatarModelKind = "live2d" | "images";
 
+/**
+ * 构图校准参数。
+ *
+ * 存在的理由：不同模型的画布比例与人物在画布中的位置差别很大（半身 / 全身 / 偏移），
+ * 用同一套默认构图必然有的模型显示不全。校准值随模型存**后端元数据**，
+ * 这样 Web 端与桌面端读到的是同一份（见 `AvatarModelInfo.layout`）。
+ *
+ * 它是服务端契约，所以定义在本文件；渲染层的 `AvatarPortraitLayout` 只是别名。
+ */
+export interface AvatarLayout {
+  /** 缩放（1 = 原始） */
+  scale?: number;
+  /** 水平位移（px，正值向右） */
+  offsetX?: number;
+  /** 垂直位移（px，正值向下） */
+  offsetY?: number;
+  /** CSS `transform-origin`，如 "bottom center" */
+  anchor?: string;
+}
+
 /** 模型库里的一个模型（后端返回的元数据） */
 export interface AvatarModelInfo {
   id: string;
@@ -236,6 +256,8 @@ export interface AvatarModelInfo {
   images: string[];
   /** images 专用：情绪 id → 图片文件名（由用户在前端逐个指定） */
   expressionMap: Record<string, string>;
+  /** 构图校准；`null` = 未校准（渲染层用默认构图） */
+  layout: AvatarLayout | null;
   meta: Record<string, unknown>;
 }
 

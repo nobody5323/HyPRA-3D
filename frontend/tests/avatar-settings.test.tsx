@@ -25,6 +25,7 @@ const models: AvatarModelsState = {
   upload: vi.fn(),
   remove: vi.fn(async () => {}),
   updateMapping: vi.fn(async () => {}),
+  updateLayout: vi.fn(),
   clearError: vi.fn(),
 };
 

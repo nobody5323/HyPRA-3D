@@ -7,7 +7,7 @@ import { useTtsPreferences } from "@/hooks/avatar/useTtsPreferences";
 import { resolveVoiceSource } from "@/lib/avatar/avatar-config";
 
 import { MAX_PET_SCALE, MIN_PET_SCALE, PET_SCALE_STEP } from "../../shared/ipc";
-import { AvatarSurface } from "./AvatarSurface";
+import { AvatarSurface, type AvatarRenderKind } from "./AvatarSurface";
 import { ChatBubble } from "./ChatBubble";
 import { ContextMenu, type ContextMenuItem } from "./ContextMenu";
 import { SettingsPanel } from "./SettingsPanel";
@@ -41,6 +41,8 @@ export function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [renderStatus, setRenderStatus] = useState("");
+  /** 实际生效的渲染种类：Live2D 真模型 vs 静态立绘（决定要不要画圆底座与光晕） */
+  const [avatarKind, setAvatarKind] = useState<AvatarRenderKind>("portrait");
 
   // ---------------------------------------------------------------
   // 语音与对话（与 Web 端同一套选择规则：服务端 TTS 不可用则回落浏览器语音）
@@ -129,6 +131,7 @@ export function App() {
       className="petShell"
       style={{ "--pet-scale": state.scale } as CSSProperties}
       data-click-through={state.clickThrough}
+      data-avatar={avatarKind}
     >
       {/* 拖动热区：整窗口可用（气泡与菜单在它之上，且各自处理自己的指针事件） */}
       <div
@@ -167,6 +170,7 @@ export function App() {
             lipSync={avatar.timeline ?? null}
             characterLabel={CHARACTER_LABEL}
             onStatusChange={setRenderStatus}
+            onAvailabilityChange={setAvatarKind}
           />
 
           {state.clickThrough && state.controlInteractive ? (

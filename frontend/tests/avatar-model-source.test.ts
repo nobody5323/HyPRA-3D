@@ -23,6 +23,7 @@ function makeModel(overrides: Partial<AvatarModelInfo>): AvatarModelInfo {
     expressions: [],
     images: [],
     expressionMap: {},
+    layout: null,
     meta: {},
     ...overrides,
   };
@@ -69,6 +70,21 @@ describe("resolveAvatarModelSource", () => {
     // 没指定 → 回落内置占位立绘（渲染层负责），这里必须是 null 而不是空串
     expect(source.portraitUrl("sad")).toBeNull();
     expect(source.portraitUrl("neutral")).toBeNull();
+  });
+
+  it("构图校准随模型一起传给渲染层（两端渲染同一份校准）", () => {
+    const layout = { scale: 1.4, offsetX: -12, offsetY: 30, anchor: "bottom center" };
+    const source = resolveAvatarModelSource(makeModel({ id: "m_a", layout }));
+
+    if (source.kind !== "live2d") throw new Error("应为 live2d");
+    expect(source.layout).toEqual(layout);
+  });
+
+  it("未校准的模型 layout 为 null（渲染层回默认构图，而不是传 undefined）", () => {
+    const source = resolveAvatarModelSource(makeModel({ id: "m_a" }));
+
+    if (source.kind !== "live2d") throw new Error("应为 live2d");
+    expect(source.layout).toBeNull();
   });
 
   it("图片名会被正确转义（中文/空格不会拼坏 URL）", () => {

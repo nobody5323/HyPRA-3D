@@ -1,6 +1,7 @@
 /** 后端接口封装（与 backend/app/api/*.py 一一对应）。 */
 
 import type {
+  AvatarLayout,
   AvatarModelInfo,
   AvatarModelKind,
   AvatarModelSources,
@@ -512,10 +513,19 @@ export async function uploadAvatarModel(input: {
   return (await res.json()) as AvatarModelInfo;
 }
 
-/** 更新模型（改名 / 指定情绪映射） */
+/**
+ * 更新模型（改名 / 指定情绪映射 / 构图校准）。
+ *
+ * `layout` **不传** = 保持原校准；传 `null` = 清除校准（回到默认构图）。
+ * 后端按「请求里有没有这个键」区分这两件事，所以这里不能把它写成 `layout: null` 的默认值。
+ */
 export async function updateAvatarModel(
   modelId: string,
-  patch: { name?: string; expressionMap?: Record<string, string> },
+  patch: {
+    name?: string;
+    expressionMap?: Record<string, string>;
+    layout?: AvatarLayout | null;
+  },
 ): Promise<AvatarModelInfo> {
   const res = await fetch(`${API_BASE}/media/avatar/models/${encodeURIComponent(modelId)}`, {
     method: "PATCH",
@@ -524,6 +534,35 @@ export async function updateAvatarModel(
   });
   if (!res.ok) await throwApiError(res, "更新模型");
   return (await res.json()) as AvatarModelInfo;
+}
+
+/**
+ * 当前选用的模型 id（空串 = 内置模型）。
+ *
+ * 返回 `null` 专指「后端读不到」（离线 / 5xx）——与「没选任何模型」（空串）是两件事：
+ * 前者要保留本地缓存，后者要回落到内置模型。
+ */
+export async function getAvatarSelection(): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/media/avatar/models/selection`, { cache: "no-store" });
+    if (!res.ok) return null;
+    const data = (await res.json()) as { modelId?: string };
+    return String(data.modelId ?? "");
+  } catch {
+    return null;
+  }
+}
+
+/** 切换当前选用的模型（空串 = 回到内置模型）；返回后端归一后的值 */
+export async function setAvatarSelection(modelId: string): Promise<string> {
+  const res = await fetch(`${API_BASE}/media/avatar/models/selection`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ modelId }),
+  });
+  if (!res.ok) await throwApiError(res, "切换当前模型");
+  const data = (await res.json()) as { modelId?: string };
+  return String(data.modelId ?? "");
 }
 
 /** 删除模型（连同其全部文件） */

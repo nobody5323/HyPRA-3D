@@ -18,13 +18,14 @@ import {
 } from "@/lib/live2d/live2d-renderer";
 import { resolveLive2DModel } from "@/lib/live2d/model-assets";
 import { PORTRAIT_LABELS } from "@/lib/avatar/portrait-assets";
-import type { EmotionInfo, VisemeFrame } from "@/lib/api/types";
+import type { AvatarLayout, EmotionInfo, VisemeFrame } from "@/lib/api/types";
 
 export function Live2DStage({
   emotion,
   motion,
   characterLabel = "数字人形象",
   modelUrl = null,
+  modelLayout = null,
   lipSync = null,
   onStageChange,
   onError,
@@ -34,6 +35,8 @@ export function Live2DStage({
   characterLabel?: string;
   /** 外部模型入口 URL（上传的模型）；null = 项目内置模型 */
   modelUrl?: string | null;
+  /** 构图校准（随模型存在后端）；null / 省略 = 用渲染层默认构图 */
+  modelLayout?: AvatarLayout | null;
   /** 口型时间轴（后端 viseme）；`null` = 停止并闭嘴 */
   lipSync?: readonly VisemeFrame[] | null;
   onStageChange?: (stage: Live2DLoadStage, detail: string) => void;
@@ -48,6 +51,14 @@ export function Live2DStage({
   onStageChangeRef.current = onStageChange;
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
+
+  /*
+   * 构图校准也放 ref：它会在控制台里被实时拖动调整，
+   * 写进下面那个创建 effect 的依赖会让渲染器**重建**（重新下载一遍模型），
+   * 而拖动时我们要的只是就地应用新布局。
+   */
+  const modelLayoutRef = useRef(modelLayout);
+  modelLayoutRef.current = modelLayout;
 
   const [loadStage, setLoadStage] = useState<Live2DLoadStage>("idle");
   const [detail, setDetail] = useState("");
@@ -65,13 +76,13 @@ export function Live2DStage({
        * 渲染器保证调用本函数的时机在 Core 就绪之后。
        */
       loadBridge: async () => (await import("@cubism-bridge")).default,
-      // 上传的模型用它的入口 URL；没有则用内置模型
+      // 上传的模型用它的入口 URL + 后端存的构图校准；没有则用内置模型（构图在 model-assets 里）
       model: modelUrl
         ? {
             id: "uploaded",
             name: "上传的模型",
             modelUrl,
-            layout: { scale: 1, anchor: "bottom center" },
+            layout: modelLayoutRef.current ?? undefined,
           }
         : resolveLive2DModel(),
       onError: (error) => onErrorRef.current?.(error),
@@ -110,6 +121,11 @@ export function Live2DStage({
   useEffect(() => {
     rendererRef.current?.setLipSync(lipSync ?? null);
   }, [lipSync]);
+
+  // ⑥ 构图校准变化（控制台里拖动 / 调滑块）→ 就地应用，不重建渲染器
+  useEffect(() => {
+    rendererRef.current?.setPortraitLayout(modelLayout ?? null);
+  }, [modelLayout]);
 
   return (
     <div ref={stageRef} className="relative h-full w-full">
