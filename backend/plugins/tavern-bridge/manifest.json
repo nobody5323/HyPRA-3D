@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "layer": "builtin",
   "category": "datasource",
-  "description": "只读接入本地 SillyTavern 数据（世界书 / 角色卡 / 会话历史），用于设定注入与跨会话长期记忆构建。绝不修改酒馆数据。",
+  "description": "只读接入本地 SillyTavern 数据（世界书 / 角色卡 / 会话历史）。世界书写入个人知识库后按需检索，会话按选择与预算进入长期记忆。绝不修改酒馆数据。",
   "homepage": "https://github.com/nobody5323/HyPRA-3D-",
   "loading_order": 200,
   "capabilities": ["datasource", "tool", "settings"],
@@ -24,6 +24,47 @@
         "type": "string",
         "title": "酒馆数据目录",
         "description": "SillyTavern 的用户数据目录，例如 D:\\\\AB\\\\SillyTavern\\\\data\\\\default-user（也可填其上级目录，插件会自动识别）"
+      },
+      "tavern_worldbook_enabled": {
+        "type": "boolean",
+        "title": "酒馆世界书直注入（已停用）",
+        "description": "兼容旧配置，当前不会把酒馆世界书直接写入提示词。酒馆世界书统一通过「同步到知识库」后按需检索召回。"
+      },
+      "tavern_sync_on_startup": {
+        "type": "boolean",
+        "title": "启动时自动同步新对话",
+        "description": "打开后每次启动后端会把酒馆里新增的对话增量同步进长期记忆（已同步过的轮次不会重复写入；按角色各进各的陪伴对象）。同步在后台线程跑，不阻塞启动；首次同步历史会话可能较慢。不打开时可在「酒馆记忆导入」面板手动点同步。"
+      },
+      "prompt_total_budget": {
+        "type": "integer",
+        "title": "提示词总预算（token）",
+        "description": "各层注入量的**总上限**。接了大量外部设定（酒馆世界书 / 角色卡）后，人设层可能把预算吃掉、导致其他层被整体裁掉——调大它是最直接的解法。默认 4000。"
+      },
+      "worldbook_budget": {
+        "type": "integer",
+        "title": "世界书注入预算（token）",
+        "description": "世界书命中块的预算，在没有声明注入档位时按此分配。默认 400。"
+      },
+      "knowledge_context_budget": {
+        "type": "integer",
+        "title": "个人记忆（知识库）注入预算（token）",
+        "description": "个人记忆/知识库召回结果的注入预算。酒馆世界书也可以走这条路（「同步到知识库」按需召回，不占常驻预算）。默认 900。"
+      },
+      "memory_layer_budget": {
+        "type": "integer",
+        "title": "记忆块注入预算（token）",
+        "description": "情景记忆召回与语义事实各自的注入预算。默认 400。"
+      },
+      "prompt_history_budget": {
+        "type": "integer",
+        "title": "对话窗口注入预算（token）",
+        "description": "滚动窗口（最近几轮对话）的注入预算，超出后从最旧的开始丢。默认 700。"
+      },
+      "tavern_disabled_books": {
+        "type": "array",
+        "items": { "type": "string" },
+        "title": "不参与接入的世界书",
+        "description": "列在这里的来源既不注入对话，也不同步进知识库（角色卡本身与它们的对话不受影响）。一般不用手改：在「酒馆记忆导入」面板里勾选即可，这里存的就是那份勾选结果。格式：world/<文件名> 或 char/<角色名>。"
       }
     }
   },

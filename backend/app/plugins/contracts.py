@@ -41,6 +41,12 @@ class DataSourceEntry:
     depth: int = 4
     """当 `position == "at_depth"` 时，插入到对话历史的倒数第几条之前。"""
 
+    role: str = "system"
+    """`at_depth` 档注入的消息角色：`system` | `user` | `assistant`。
+
+    ST 世界书的 `role` 只在按深度插入时生效（默认 system）；其余档位忽略。
+    """
+
     order: int = 100
     """同档位内的排序权重（小者先）。"""
 

@@ -14,11 +14,13 @@ import logging
 import sys
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 from app.plugins.capabilities import PluginState
 from app.plugins.context import PluginContext
 from app.plugins.manifest import MANIFEST_FILENAME, load_manifest, sort_manifests
 from app.plugins.registry import PluginRegistration, PluginRegistry, get_registry
+from app.plugins.settings_runtime import apply_runtime_overrides, collect_runtime_overrides
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +84,14 @@ class PluginManager:
                     logger.warning("插件 %s 载入失败：%s", manifest.id, registration.error)
                 else:
                     registration.entry_path = entry_path
-            self.registry.register(registration)
+            # 注册本身可能被拒（如权限声明自相矛盾，见 Permission.check_consistent）。
+            # 这里必须拓下来：`discover()` 在 `create_app()` 里也会跑，
+            # 一个坏 manifest 不该让**整个后端起不来**——它只该是“这个插件失败”。
+            try:
+                self.registry.register(registration)
+            except Exception as exc:  # noqa: BLE001 - 单个插件不合法，不阻断宿主
+                logger.warning("插件 %s 注册被拒（已跳过）：%s", manifest.id, exc)
+                continue
             found.append(registration)
 
         # 全部插件（内置 + 目录）都已入册后再恢复启用状态：
@@ -106,9 +115,15 @@ class PluginManager:
         return module
 
     def _collect_contributions(self, reg: PluginRegistration, ctx: PluginContext) -> None:
-        """导入目录插件入口并收集它声明的贡献（约定入口暴露 `build(ctx)`）。"""
-        if reg.entry_path is None or reg.module_loaded:
+        """导入目录插件入口并收集它声明的贡献（约定入口暴露 `build(ctx)`）。
+
+        每次 setup 都**先清后填**：`build()` 按当前配置重算贡献（酒馆接入就在这一步
+        读用户目录），不清会累加出重复工具，而按 `module_loaded` 整体跳过则会让
+        `reload_all()` 空转——「保存配置立刻生效」对目录插件是假的。
+        """
+        if reg.entry_path is None:
             return
+        reg.reset_contributions()
         module = self._import_entry_module(reg.manifest.id, reg.entry_path)
         builder = getattr(module, "build", None)
         if builder is None:
@@ -218,6 +233,35 @@ class PluginManager:
             self.reload_all()
         else:
             self._teardown(reg)
+            # 禁用即意味着它的声明式配置不再生效：立刻重算覆盖层，
+            # 否则「关掉插件但配置还在覆盖宿主配置」会变成一个看不清的幽灵。
+            self._refresh_runtime_overrides()
+
+    # ---------------- 声明式配置 → 运行时覆盖 ----------------
+
+    def _collect_runtime_overrides(self) -> dict[str, Any]:
+        """从**当前启用**的插件收集运行时覆盖值（`AGENTS.md §9.5`）。
+
+        取值优先用插件的运行上下文（`ctx.settings`，含刚保存的内存值），
+        没有上下文时回落磁盘配置——两者内容一致，只是前者更新鲜。
+        """
+        out: dict[str, Any] = {}
+        for reg in self.registry.enabled():
+            if reg.state is PluginState.FAILED:
+                continue
+            ctx = self._contexts.get(reg.manifest.id)
+            values = (
+                ctx.settings
+                if ctx is not None
+                else self._settings.get(reg.manifest.id)
+                or self._load_settings(reg.manifest.id)
+            )
+            out.update(collect_runtime_overrides(reg.manifest.settings_schema, values))
+        return out
+
+    def _refresh_runtime_overrides(self) -> bool:
+        """重算并应用覆盖层（全量替换），返回是否发生变化。"""
+        return apply_runtime_overrides(self._collect_runtime_overrides())
 
     def reload_all(self) -> list[str]:
         """重新 setup + start（配置变更 / 运行期启用后让新状态真正生效）。
@@ -237,11 +281,24 @@ class PluginManager:
                 logger.warning("插件 %s 关闭异常：%s", reg.manifest.id, exc)
         reg.state = PluginState.DISCOVERED
         self._contexts.pop(reg.manifest.id, None)
+        # 贡献一并下线（只对**目录插件**）：否则「已禁用」的插件仍留着能用的数据源与
+        # 工具对象——聚合视图看不到，但直接读 `registration.datasources` 的地方看得到，
+        # 如 `/plugins/tavern-bridge/status` 会在插件停跑后继续去读用户目录。
+        # 代码内注册的插件（`builtin.py`）不能这样清：它们的贡献是注册那一刻定下的，
+        # `setup` 不会重跑 `build()` 把它们补回来（`_collect_contributions` 见
+        # `entry_path is None` 直接返回），清掉就是永久丢失能力。
+        if reg.entry_path is not None:
+            reg.reset_contributions()
 
     # ---------------- 生命周期 ----------------
 
     def setup_all(self, settings: dict[str, dict] | None = None) -> list[str]:
         """对全部启用插件调用 `setup(ctx)`（执行插件注册的能力挂载）。
+
+        同时把插件的声明式配置接到运行时（`AGENTS.md §9.5`）：`settings_schema` 里
+        与宿主 `Settings` 同名的键成为**运行时覆盖**（界面设置 > .env，见
+        `app/config.py` 的白名单）。这一步是「声明了」与「生效了」之间的那段路——
+        少了它，`data/plugins/<id>/settings.json` 就只是一份没人读的 JSON。
 
         返回成功 setup 的插件 id 列表。
         """
@@ -272,6 +329,10 @@ class PluginManager:
                 reg.state = PluginState.FAILED
                 reg.error = str(exc)
                 logger.warning("插件 %s setup 失败（不阻断宿主）：%s", reg.manifest.id, exc)
+
+        # 上下文建好后再收集：全量替换的语义让「被禁用/被卸载的插件」自然不再覆盖，
+        # 不会留下上一轮的残留（增量合并做不到这点）。
+        self._refresh_runtime_overrides()
         return ready
 
     def start_all(self) -> list[str]:
@@ -313,6 +374,7 @@ class PluginManager:
             {
                 "id": reg.manifest.id,
                 "display_name": reg.manifest.display_name,
+                "description": reg.manifest.description,
                 "version": reg.manifest.version,
                 "layer": reg.manifest.layer.value,
                 "category": reg.manifest.category,

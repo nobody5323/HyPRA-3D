@@ -104,6 +104,24 @@ class Permission(BaseModel):
         """是否为只读插件（不写任何文件）。"""
         return not self.filesystem.write
 
+    def check_consistent(self) -> None:
+        """校验跨字段不变量：只读插件不得声明写路径。
+
+        收在这里做**单一事实来源**的理由：这是宿主自己的硬约束，而校验它的地方有两个
+        ——注册表（拒绝注册）与插件写入器（拒绝落盘）。两处各写一份判断，就会出现
+        「一个放行了、另一个拒收」的组合：写入器放行 → manifest 已落盘 →
+        发现阶段注册失败——最坏的形态是**安装接口 500 且后端下次启动直接报错**。
+        （真实发生过一次，见 `tests/test_plugins/test_writer.py` 的相应用例。）
+
+        抛出:
+            ValueError: 声明自相矛盾（调用方转成自己的错误类型/状态码）。
+        """
+        if self.is_read_only and self.filesystem.write_paths:
+            raise ValueError(
+                "声明了写路径但 filesystem.write=false：只读插件的写声明无效"
+                "（AGENTS.md §9.3）"
+            )
+
 
 class PluginState(str, Enum):
     """插件在宿主中的运行状态（供管理 UI 展示）。"""

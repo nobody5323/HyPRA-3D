@@ -35,6 +35,50 @@ def test_registry_has_all_capabilities() -> None:
         assert capability in summary, f"缺少能力：{capability}"
 
 
+# ---------------- 声明式配置 → 运行时覆盖（§9.5）----------------
+
+
+def test_setup_applies_overrides_from_saved_settings(tmp_path, monkeypatch) -> None:
+    """重启后仍生效：磁盘上的插件配置在 setup_all 时重新成为运行时覆盖。
+
+    这是「界面设置保存到本机」那一半的闭环测试——只测「能写进文件」不够，
+    用户真正关心的是重启后还在不在。
+    """
+    from app.config import Settings, runtime_overrides
+
+    monkeypatch.setenv("EMBEDDING_MODEL", "env-model")
+    saved = tmp_path / "plugins" / "embedding" / "settings.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"embedding_model": "ui-model"}), encoding="utf-8")
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+    manager = PluginManager(registry, data_dir=tmp_path)
+    manager.setup_all()
+
+    assert runtime_overrides() == {"embedding_model": "ui-model"}
+    assert Settings(_env_file=None).embedding_model == "ui-model"
+
+
+def test_setup_skips_disabled_plugin_settings(tmp_path, monkeypatch) -> None:
+    """禁用的插件不参与覆盖——它的配置只是存在那儿，不代表生效。"""
+    from app.config import Settings, runtime_overrides
+
+    monkeypatch.setenv("EMBEDDING_PROVIDER", "deterministic")
+    saved = tmp_path / "plugins" / "embedding" / "settings.json"
+    saved.parent.mkdir(parents=True)
+    saved.write_text(json.dumps({"embedding_provider": "dashscope"}), encoding="utf-8")
+
+    registry = PluginRegistry()
+    register_all_builtin(registry)
+    registry.set_enabled("embedding", False)
+    manager = PluginManager(registry, data_dir=tmp_path)
+    manager.setup_all()
+
+    assert runtime_overrides() == {}
+    assert Settings(_env_file=None).embedding_provider == "deterministic"
+
+
 # ---------------- /health 暴露 ----------------
 
 

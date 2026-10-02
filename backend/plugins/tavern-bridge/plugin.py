@@ -3,9 +3,9 @@
 定位（`AGENTS.md §8` / `§9.8`）：HyPRA **不做** SillyTavern 客户端，而是作为
 伴随 Agent **只读接入**用户的酒馆数据：
 
-    世界书 worlds/*.json      → 中性条目 → 宿主映射为 WorldBookEntry → 提示词注入
+    世界书 worlds/*.json      → 中性条目 → 宿主写入个人知识库 → 按需检索
     角色卡 characters/*.png   → 中性角色 → 宿主映射为 persona
-    会话   chats/**/*.jsonl   → 中性会话 → 宿主抽取为跨会话长期记忆
+    会话   chats/**/*.jsonl   → 中性会话 → 按选择/预算抽取为长期记忆
 
 **零风险承诺**：manifest 声明 `filesystem.write = false`，宿主因此**不会**授予写句柄；
 即使本文件尝试写入，`ctx.write_text()` 也会抛 `PermissionError`。这不是约定，是架构约束。
@@ -41,14 +41,25 @@ if TYPE_CHECKING:  # 仅供类型检查：运行时不导入宿主实现，避�
 
 PLUGIN_ID = "tavern-bridge"
 
-#: ST 世界书 `position` 数值 → 中性档位字符串（0/1 在人设前后，2/3 在作者注前后，4 按深度插入）
+#: 用户在界面里取消勾选的来源（`world/<文件名>` / `char/<角色名>`）。
+#: 存在插件配置（`data/plugins/tavern-bridge/settings.json`）里，与 `tavern_dir` 同处。
+DISABLED_BOOKS_KEY = "tavern_disabled_books"
+
+#: ST 世界书 `position` 数值 → 中性档位字符串（对齐 ST 的 `world_info_position`）。
+#: 0/1 在人设前后，2/3 在作者注前后，4 按 depth 插入，5/6 在示例消息前后，7 是 outlet。
 _POSITION_MAP: dict[int, str] = {
     0: "before_char",
     1: "after_char",
     2: "before_an",
     3: "after_an",
     4: "at_depth",
+    5: "em_top",
+    6: "em_bottom",
+    7: "outlet",
 }
+
+#: ST 世界书 `role` 数值 → 消息角色；只在 `position == at_depth` 时生效
+_ROLE_MAP: dict[int, str] = {0: "system", 1: "user", 2: "assistant"}
 
 #: PNG 文件签名
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -82,6 +93,7 @@ _KNOWN_ENTRY_FIELDS = frozenset(
         "constant",
         "position",
         "depth",
+        "role",
         "order",
         "disable",
         "caseSensitive",
@@ -210,6 +222,11 @@ def entries_from_book(data: Any, *, source_id: str) -> list[DataSourceEntry]:
         except (TypeError, ValueError):
             probability = 100
 
+        try:
+            role_value = int(raw.get("role", 0))
+        except (TypeError, ValueError):
+            role_value = 0
+
         out.append(
             DataSourceEntry(
                 title=title,
@@ -218,6 +235,7 @@ def entries_from_book(data: Any, *, source_id: str) -> list[DataSourceEntry]:
                 constant=bool(raw.get("constant", False)),
                 position=_POSITION_MAP.get(position_value, "after_char"),
                 depth=int(raw.get("depth") or 4),
+                role=_ROLE_MAP.get(role_value, "system"),
                 order=int(raw.get("order") or 100),
                 enabled=not bool(raw.get("disable", False)),
                 case_sensitive=bool(raw.get("caseSensitive", False)),
@@ -279,6 +297,12 @@ class TavernDataSource:
     def __init__(self, ctx: PluginContext) -> None:
         self.ctx = ctx
         self.root = self._detect_root()
+        # 用户勾选结果：取消勾选的来源**既不参与注入、也不同步进知识库**
+        self._disabled = {
+            str(item)
+            for item in (ctx.settings.get(DISABLED_BOOKS_KEY) or [])
+            if str(item).strip()
+        }
 
     # ---- 目录定位 ----
 
@@ -298,7 +322,50 @@ class TavernDataSource:
     # ---- 读取 ----
 
     def read(self) -> DataSourceSnapshot:
-        """读一遍全部数据；单个文件损坏只记 warning，不中断整体接入。"""
+        """读一遍全部数据（**按用户勾选筛选**）；单个文件损坏只记 warning，不中断整体接入。"""
+        return self._read(filtered=True)
+
+    def book_catalog(self) -> list[dict[str, Any]]:
+        """可选来源清单（供界面勾选）：`[{source, label, entries, enabled}]`。
+
+        **不受勾选影响**——否则取消勾选的项就从清单里消失了，用户再也勾不回来。
+        代价是一次不过滤的全量读取；它只被状态接口按需调用（不吐对话路径）。
+        """
+        snapshot = self._read(filtered=False)
+        counts: dict[str, int] = {}
+        for entry in snapshot.entries:
+            counts[entry.source_id.split("#", 1)[0]] = (
+                counts.get(entry.source_id.split("#", 1)[0], 0) + 1
+            )
+        sources = list(counts)
+        # 无条目的来源（空世界书 / 没有内嵌书的角色卡）也要出现，否则用户看不到它
+        for character in snapshot.characters:
+            sources.append(f"char/{character.source_id}")
+        if self.root is not None:
+            for path in self._iter_dir(self.root / "worlds", snapshot):
+                if path.suffix.lower() == ".json":
+                    sources.append(f"world/{path.stem}")
+
+        catalog: list[dict[str, Any]] = []
+        for source in sorted(set(sources)):
+            kind, _, name = source.partition("/")
+            label = f"角色内嵌设定·{name}" if kind == "char" else f"世界书·{name}"
+            catalog.append(
+                {
+                    "source": source,
+                    "label": label,
+                    "entries": counts.get(source, 0),
+                    "enabled": source not in self._disabled,
+                }
+            )
+        return catalog
+
+    def _read(self, *, filtered: bool) -> DataSourceSnapshot:
+        """读一遍全部数据。
+
+        参数:
+            filtered: 是否应用用户的勾选（`book_catalog` 需要看到全部来源，故传 False）。
+        """
         snapshot = DataSourceSnapshot()
         if self.root is None:
             snapshot.warnings.append(
@@ -306,10 +373,13 @@ class TavernDataSource:
             )
             return snapshot
 
-        self._read_worlds(snapshot)
-        self._read_characters(snapshot)
+        self._read_worlds(snapshot, filtered=filtered)
+        self._read_characters(snapshot, filtered=filtered)
         self._read_sessions(snapshot)
         return snapshot
+
+    def _is_selected(self, source_file: str) -> bool:
+        return source_file not in self._disabled
 
     def _iter_dir(self, directory: Path, snapshot: DataSourceSnapshot) -> list[Path]:
         """列目录；越权或缺失都只记 warning。"""
@@ -321,22 +391,27 @@ class TavernDataSource:
             snapshot.warnings.append(f"目录不在插件读权限内：{directory.name}（{exc}）")
             return []
 
-    def _read_worlds(self, snapshot: DataSourceSnapshot) -> None:
+    def _read_worlds(self, snapshot: DataSourceSnapshot, *, filtered: bool = True) -> None:
         assert self.root is not None  # noqa: S101 - read() 已保证
         for path in self._iter_dir(self.root / "worlds", snapshot):
             if path.suffix.lower() != ".json":
+                continue
+            source_file = f"world/{path.stem}"
+            if filtered and not self._is_selected(source_file):
                 continue
             try:
                 data = self.ctx.read_json(path)
             except Exception as exc:
                 snapshot.warnings.append(f"世界书读取失败：{path.name}（{exc}）")
                 continue
-            entries = entries_from_book(data, source_id=f"world/{path.stem}")
+            entries = entries_from_book(data, source_id=source_file)
             if not entries:
                 snapshot.warnings.append(f"世界书没有可用条目：{path.name}")
             snapshot.entries.extend(entries)
 
-    def _read_characters(self, snapshot: DataSourceSnapshot) -> None:
+    def _read_characters(
+        self, snapshot: DataSourceSnapshot, *, filtered: bool = True
+    ) -> None:
         assert self.root is not None  # noqa: S101
         for path in self._iter_dir(self.root / "characters", snapshot):
             if path.suffix.lower() != ".png":
@@ -350,13 +425,15 @@ class TavernDataSource:
                 snapshot.warnings.append(f"角色卡没有内嵌数据（跳过）：{path.name}")
                 continue
 
+            # 角色卡本身总是接入（它就是 persona）；勾选只针对它**内嵌的世界书**
             character = character_from_card(data, avatar_path=str(path), source_id=path.stem)
             snapshot.characters.append(character)
 
-            # 角色内嵌世界书同样产出为条目，并标注归属角色（宿主据此设 scope）
-            book_entries = entries_from_book(
-                data.get("character_book"), source_id=f"char/{path.stem}"
-            )
+            book_source = f"char/{path.stem}"
+            if filtered and not self._is_selected(book_source):
+                continue
+
+            book_entries = entries_from_book(data.get("character_book"), source_id=book_source)
             for entry in book_entries:
                 entry.extra.setdefault("character", character.name)
             snapshot.entries.extend(book_entries)

@@ -1,0 +1,39 @@
+{
+  "id": "plugin-hello",
+  "display_name": "示例插件·问候",
+  "version": "0.1.0",
+  "layer": "third-party",
+  "category": "tool",
+  "description": "插件接口的最小示例：注册一个打招呼工具，并把自己的调用次数记在插件自己的数据目录里。",
+  "homepage": "https://example.invalid/hypra-plugin-hello",
+  "loading_order": 500,
+  "capabilities": ["tool", "settings"],
+  "permissions": {
+    "filesystem": {
+      "read": [],
+      "write": false
+    },
+    "network": {
+      "hosts": []
+    }
+  },
+  "settings_schema": {
+    "type": "object",
+    "properties": {
+      "greeting": {
+        "type": "string",
+        "title": "问候语",
+        "description": "工具返回时用的开头。留空则用「你好」。",
+        "default": "你好"
+      },
+      "signature": {
+        "type": "string",
+        "title": "署名",
+        "description": "附在问候语后面的署名，可留空。",
+        "default": ""
+      }
+    }
+  },
+  "entry": "plugin.py",
+  "enabled": true
+}

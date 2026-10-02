@@ -3,7 +3,15 @@
 设计见 `AGENTS.md §9`。三层插件（core / builtin / third-party）经**同一注册表**
 暴露能力；能力面（provider / tool / datasource / prompt / hook / settings）描述"贡献什么"。
 
-典型用法：
+**写插件的入口是 `app.plugins.sdk`**（公开接口面），不是本模块：
+
+    from app.plugins.sdk import PluginContext, ToolSpec, DataSourceSnapshot
+
+    def build(ctx: PluginContext) -> dict:
+        return {"tools": [...]}
+
+接口说明见 `docs/plugin-development.md`，可复制的最小示例见
+`docs/examples/plugin-hello/`。本模块（`__init__`）是**宿主侧**的聚合导出：
 
     from app.plugins import PluginRegistry, PluginRegistration, PluginManifest
     from app.plugins.builtin import register_all_builtin

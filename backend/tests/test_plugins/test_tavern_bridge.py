@@ -211,6 +211,33 @@ def test_disabled_entry_mapped_as_disabled(tb) -> None:
     assert tb.entries_from_book(book, source_id="w")[0].enabled is False
 
 
+def test_at_depth_role_is_mapped_to_message_role(tb) -> None:
+    """ST 的 `role` 数值 → 消息角色（只在按深度插入时生效）。
+
+    ST：0=system / 1=user / 2=assistant；缺省与未知值一律 system。
+    """
+    book = {
+        "entries": [
+            {"content": "甲", "position": 4, "role": 0},
+            {"content": "乙", "position": 4, "role": 1},
+            {"content": "丙", "position": 4, "role": 2},
+            {"content": "丁", "position": 4},
+            {"content": "戊", "position": 4, "role": "怪值"},
+        ]
+    }
+
+    roles = [entry.role for entry in tb.entries_from_book(book, source_id="w")]
+
+    assert roles == ["system", "user", "assistant", "system", "system"]
+
+
+def test_role_is_not_leaked_into_extra(tb) -> None:
+    """`role` 已有中性字段，不该再在 `extra` 里留一份（两处会漂移）。"""
+    book = {"entries": [{"content": "甲", "role": 1}]}
+
+    assert "role" not in tb.entries_from_book(book, source_id="w")[0].extra
+
+
 def test_title_falls_back_to_first_key_then_index(tb) -> None:
     book = {"entries": [{"content": "甲", "key": ["首个关键词"]}, {"content": "乙"}]}
     entries = tb.entries_from_book(book, source_id="w")
@@ -261,7 +288,10 @@ def test_character_mapped_with_greetings_and_tags(tb) -> None:
 # =============================================================
 
 
-def _ctx_for(tmp_path: Path, tavern_dir: Path, *, write: bool = False) -> PluginContext:
+def _ctx_for(
+    tmp_path: Path, tavern_dir: Path, *, write: bool = False, disabled: list[str] | None = None
+) -> PluginContext:
+    """带读权限的插件上下文；`disabled` 模拟用户在界面里取消勾选的来源。"""
     from app.plugins.capabilities import FilesystemPermission, Permission
 
     manifest = PluginManifest(
@@ -271,9 +301,10 @@ def _ctx_for(tmp_path: Path, tavern_dir: Path, *, write: bool = False) -> Plugin
             filesystem=FilesystemPermission(read=[str(tavern_dir)], write=write)
         ),
     )
-    return PluginContext(
-        manifest=manifest, settings={"tavern_dir": str(tavern_dir)}, data_dir=tmp_path
-    )
+    settings: dict[str, object] = {"tavern_dir": str(tavern_dir)}
+    if disabled is not None:
+        settings["tavern_disabled_books"] = disabled
+    return PluginContext(manifest=manifest, settings=settings, data_dir=tmp_path)
 
 
 @pytest.fixture
@@ -355,10 +386,90 @@ def test_data_source_reads_everything(tb, tmp_path, populated_tavern) -> None:
     assert session.character_name == "示例角色"
     assert session.created_at == "2026-01-02"
     assert [(m.role, m.text) for m in session.messages] == [
-        ("assistant", "你好呀"),
-        ("user", "今天很累"),
+        ("assistant", "你好呀"),        ("user", "今天很累"),
     ]
     assert snapshot.counts == {"entries": 3, "characters": 1, "sessions": 1}
+
+
+# =============================================================
+# 用户勾选：哪些世界书参与接入
+# =============================================================
+
+
+def test_disabled_worldbook_is_not_read(tb, tmp_path, populated_tavern) -> None:
+    """★ 取消勾选的世界书不产出条目（既不注入、也不同步进知识库）。"""
+    source = tb.TavernDataSource(
+        _ctx_for(tmp_path, populated_tavern, disabled=["world/世界甲"])
+    )
+
+    snapshot = source.read()
+
+    assert {e.title for e in snapshot.entries} == {"角色内嵌设定"}   # 只剩内嵌书
+
+
+def test_disabled_character_book_keeps_the_character_and_chats(
+    tb, tmp_path, populated_tavern
+) -> None:
+    """★ 取消勾选角色内嵌书：设定条目不进，但**角色卡与它的对话照常**。
+
+    勾选对象是「设定」，不是「这个角色」——取消一本书不该让角色或历史对话消失。
+    """
+    source = tb.TavernDataSource(
+        _ctx_for(tmp_path, populated_tavern, disabled=["char/示例角色"])
+    )
+
+    snapshot = source.read()
+
+    assert {e.title for e in snapshot.entries} == {"常驻条目", "关键词条目"}
+    assert [c.name for c in snapshot.characters] == ["示例角色"]
+    assert len(snapshot.sessions) == 1
+
+
+def test_book_catalog_lists_everything_regardless_of_selection(
+    tb, tmp_path, populated_tavern
+) -> None:
+    """★ 清单**不受勾选影响**：否则取消勾选的项就从界面消失了，用户再也勾不回来。"""
+    source = tb.TavernDataSource(
+        _ctx_for(tmp_path, populated_tavern, disabled=["world/世界甲", "char/示例角色"])
+    )
+
+    catalog = {item["source"]: item for item in source.book_catalog()}
+
+    assert set(catalog) == {"world/世界甲", "char/示例角色"}
+    assert catalog["world/世界甲"]["entries"] == 2
+    assert catalog["char/示例角色"]["entries"] == 1
+    assert catalog["world/世界甲"]["enabled"] is False
+    assert catalog["char/示例角色"]["label"] == "角色内嵌设定·示例角色"
+
+
+def test_book_catalog_marks_enabled_by_default(tb, tmp_path, populated_tavern) -> None:
+    source = tb.TavernDataSource(_ctx_for(tmp_path, populated_tavern))
+
+    assert all(item["enabled"] for item in source.book_catalog())
+
+
+def test_book_catalog_is_empty_without_a_configured_dir(tb, tmp_path) -> None:
+    from app.plugins.capabilities import FilesystemPermission, Permission
+
+    manifest = PluginManifest(
+        id="tavern-bridge",
+        display_name="酒馆数据接入",
+        permissions=Permission(filesystem=FilesystemPermission(read=["${tavern_dir}"])),
+    )
+    source = tb.TavernDataSource(
+        PluginContext(manifest=manifest, settings={}, data_dir=tmp_path)
+    )
+
+    assert source.book_catalog() == []
+
+
+def test_unselected_sources_are_not_counted(tb, tmp_path, populated_tavern) -> None:
+    """状态接口的计数也只算选中的——界面显示的应当就是实际接入的量。"""
+    source = tb.TavernDataSource(
+        _ctx_for(tmp_path, populated_tavern, disabled=["world/世界甲"])
+    )
+
+    assert source.read().counts == {"entries": 1, "characters": 1, "sessions": 1}
 
 
 def test_root_detection_accepts_three_levels(tb, tmp_path, populated_tavern) -> None:
@@ -498,6 +609,65 @@ def test_directory_plugin_loads_end_to_end(tmp_path, populated_tavern) -> None:
     manager.start_all()
     manager.shutdown_all()
     assert registry.get("tavern-bridge").state is PluginState.DISCOVERED
+
+
+def test_reload_reruns_build_so_config_change_takes_effect(
+    tmp_path, populated_tavern
+) -> None:
+    """★ 回归：配置变了必须**重跑 `build()`**，且贡献是替换而非追加。
+
+    实际踩到的病：`_collect_contributions` 见 `module_loaded` 为真就直接 return，
+    于是 `reload_all()`（保存配置与启用插件都走它）变成空转——用户把酒馆数据目录
+    改成正确的路径，磁盘配置写了、界面也说保存了，插件却仍拿着旧目录（重启才对）。
+    同一个原因还会让 `extend` 把贡献累加成两份。
+    """
+    from app.plugins.manager import PluginManager
+
+    plugins_root = _PLUGIN_PATH.parents[1]
+    registry = PluginRegistry()
+    manager = PluginManager(registry, data_dir=tmp_path / "data", plugin_dirs=[plugins_root])
+    manager.discover()
+
+    # 1) 先指到一个没有 worlds/ characters/ 的空目录（模拟「先填错」）
+    empty = tmp_path / "空目录"
+    empty.mkdir()
+    manager.save_settings("tavern-bridge", {"tavern_dir": str(empty)})
+    registry.set_enabled("tavern-bridge", True)
+    manager.reload_all()
+    assert registry.get("tavern-bridge").datasources[0].root is None
+
+    # 2) 改成装满数据的目录，走同一条 reload_all（= 保存配置走的那条路）
+    manager.save_settings("tavern-bridge", {"tavern_dir": str(populated_tavern)})
+    manager.reload_all()
+
+    registration = registry.get("tavern-bridge")
+    source = registration.datasources[0]
+    assert source.root == populated_tavern
+    assert source.read().counts["entries"] == 3
+    # 重跑是替换：数据源与工具都只有一份
+    assert len(registration.datasources) == 1
+    assert [spec.name for spec in registration.tools] == ["tavern_library_status"]
+
+
+def test_teardown_drops_contributions(tmp_path, populated_tavern) -> None:
+    """禁用即贡献下线：停跑后不该还留着一个能读用户目录的数据源。"""
+    from app.plugins.manager import PluginManager
+
+    plugins_root = _PLUGIN_PATH.parents[1]
+    registry = PluginRegistry()
+    manager = PluginManager(registry, data_dir=tmp_path / "data", plugin_dirs=[plugins_root])
+    manager.discover()
+    manager.save_settings("tavern-bridge", {"tavern_dir": str(populated_tavern)})
+    registry.set_enabled("tavern-bridge", True)
+    manager.reload_all()
+    assert registry.get("tavern-bridge").datasources
+
+    manager.set_enabled("tavern-bridge", False)
+
+    registration = registry.get("tavern-bridge")
+    assert registration.state is PluginState.DISCOVERED
+    assert registration.datasources == []
+    assert registration.tools == []
 
 
 def test_disabled_plugin_is_not_setup(tmp_path, populated_tavern) -> None:

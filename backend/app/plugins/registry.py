@@ -59,10 +59,34 @@ class PluginRegistration:
     """入口模块文件（目录插件，manifest 里声明 entry）；代码内注册的插件为 None。"""
 
     module_loaded: bool = False
-    """入口模块是否已导入并收集贡献（避免重复加载）。"""
+    """本次 setup 是否已导入入口模块并收集贡献。"""
 
     state: PluginState = PluginState.DISCOVERED
     error: str = ""
+
+    def reset_contributions(self) -> None:
+        """清空上一轮 `build()` 的贡献，使 setup 可以**幂等重跑**。
+
+        目录插件的贡献是 `build(ctx)` 在运行期算出来的（酒馆接入甚至会在这一步把
+        用户的 worlds / characters / chats 读一遍），所以每次 setup 都必须重跑，
+        并且**先清后填**：
+
+        - 只 `extend` 不清 → 同一个工具 / 数据源会累加成两份；
+        - 若因「已加载过」而整体跳过 → `reload_all()`（保存配置 / 启用插件）变成空转，
+          用户改了酒馆数据目录却仍读旧目录，只能靠重启后端。
+
+        只清贡献，不动 `manifest` 与 `state`；`error` 一并清掉，避免重跑成功后
+        `/health` 还挂着上一轮的失败说明。
+        """
+        self.providers = {}
+        self.tools = []
+        self.datasources = []
+        self.prompt_fragments = []
+        self.hooks = {}
+        self.startup = None
+        self.shutdown = None
+        self.module_loaded = False
+        self.error = ""
 
 
 class PluginRegistry:
@@ -80,13 +104,13 @@ class PluginRegistry:
         """注册一个插件；同 id 重复注册以最后一次为准（便于测试替换）。"""
         manifest = registration.manifest
 
-        # 权限强制：只读插件不可能带写路径（声明自相矛盾时直接拒绝）
-        perms = manifest.permissions
-        if not perms.filesystem.write and perms.filesystem.write_paths:
-            raise ValueError(
-                f"插件 {manifest.id} 声明了写路径但 filesystem.write=false："
-                "只读插件的写声明无效，请修正 manifest（AGENTS.md §9.3）"
-            )
+        # 权限强制：只读插件不可能带写路径（声明自相矛盾时直接拒绝）。
+        # 不变量本身住在 Permission 里（单一事实来源）：插件写入器也调它，
+        # 否则会出现「写入器放行 → 落盘 → 这里拒收」的断层。
+        try:
+            manifest.permissions.check_consistent()
+        except ValueError as exc:
+            raise ValueError(f"插件 {manifest.id} {exc}") from exc
 
         if manifest.id in self._plugins:
             logger.warning("插件 %s 重复注册，覆盖前一份", manifest.id)

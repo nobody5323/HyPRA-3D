@@ -2,6 +2,7 @@
 
 import pytest
 
+from app.config import RUNTIME_OVERRIDABLE_FIELDS, Settings
 from app.plugins.builtin import build_builtin_registrations, register_all_builtin
 from app.plugins.capabilities import CapabilityType, PluginLayer
 from app.plugins.manifest import PluginManifest
@@ -22,6 +23,15 @@ EXPECTED_IDS = [
     "knowledge-parser",
     "knowledge-chunker",
     "preset-ai-adaptation",
+    # 感知层与主动链路（docs/proactive-multimodal.md §4 / §5）：
+    # asr 提供语音识别、vision 提供图片理解（能力名 `asr` / `vision`）；
+    # perception-ambient 提供时间 / 行踪 / 画像的声明式配置（§4.8 / §4.9）；
+    # proactive 无 provider，注册它是为了拿到声明式配置表单
+    # （七道闸门的参数要在界面上可调）
+    "asr",
+    "vision",
+    "perception-ambient",
+    "proactive",
 ]
 
 
@@ -289,3 +299,79 @@ def test_disabling_builtin_removes_its_tools(no_skills) -> None:
 
     registry.set_enabled("tools-builtin", False)
     assert registry.tools() == []
+
+
+# =============================================================
+# 声明式配置（§9.5）：能直接配云端 embedding / TTS 参数
+# =============================================================
+
+#: 「一定要能在界面上配」的能力：向量化 API、语音合成、语音识别、图片理解、主动沟通
+_CONFIGURABLE_IDS = ("embedding", "tts", "asr", "vision", "proactive")
+
+
+def _schema_of(plugin_id: str) -> dict:
+    for registration in build_builtin_registrations():
+        if registration.manifest.id == plugin_id:
+            return registration.manifest.settings_schema
+    raise AssertionError(f"未找到内置插件：{plugin_id}")
+
+
+@pytest.mark.parametrize("plugin_id", _CONFIGURABLE_IDS)
+def test_cloud_config_plugins_declare_settings(plugin_id: str) -> None:
+    """这两个插件的配置要在能力中心可见可改，因此必须声明 settings_schema。"""
+    schema = _schema_of(plugin_id)
+
+    assert schema.get("type") == "object"
+    assert schema.get("properties")
+    for key, field in schema["properties"].items():
+        assert field.get("title"), f"{key} 缺 title：界面上会显示成一串英文字段名"
+        assert field.get("description"), f"{key} 缺 description：用户不知道填什么"
+
+
+@pytest.mark.parametrize("plugin_id", _CONFIGURABLE_IDS)
+def test_settings_keys_are_overridable_settings_fields(plugin_id: str) -> None:
+    """键名 = Settings 字段名，且必须在白名单内——否则「填了不生效」。"""
+    for key in _schema_of(plugin_id)["properties"]:
+        assert key in Settings.model_fields, f"{key} 不是宿主配置字段"
+        assert key in RUNTIME_OVERRIDABLE_FIELDS, f"{key} 未在宿主白名单内，改了不会生效"
+
+
+def test_embedding_schema_covers_api_credentials() -> None:
+    """向量化 API 的四件套（provider / key / model / base_url）一个都不能少。"""
+    props = _schema_of("embedding")["properties"]
+
+    assert set(props) >= {
+        "embedding_provider",
+        "embedding_api_key",
+        "embedding_model",
+        "embedding_base_url",
+        "embedding_dim",
+    }
+    # 密钥字段要标成密码框：前端才不会明文回显，后端才不把它回传
+    assert props["embedding_api_key"]["format"] == "password"
+    assert "deterministic" in props["embedding_provider"]["enum"]
+
+
+def test_tts_schema_covers_service_and_voice() -> None:
+    """语音合成的服务地址与音色配置都要可改。"""
+    props = _schema_of("tts")["properties"]
+
+    assert set(props) >= {
+        "gpt_sovits_base_url",
+        "gpt_sovits_ref_audio",
+        "gpt_sovits_prompt_text",
+        "gpt_sovits_voices_file",
+        "gpt_sovits_default_voice",
+    }
+    # 裸 PCM 放不了，不该出现在候选里
+    assert "raw" not in props["gpt_sovits_media_type"]["enum"]
+
+
+def test_tts_plugin_description_points_to_the_switch() -> None:
+    """不设第二个 TTS 开关（§9.10 第 12 项），但说明必须讲清开关在哪。"""
+    for registration in build_builtin_registrations():
+        if registration.manifest.id == "tts":
+            assert "DIGITAL_HUMAN_PROVIDER" in registration.manifest.description
+            break
+    else:  # pragma: no cover - 防御性
+        raise AssertionError("未找到 tts 插件")
