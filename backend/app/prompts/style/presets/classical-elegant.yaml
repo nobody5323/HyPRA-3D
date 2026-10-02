@@ -29,9 +29,10 @@ examples:
   - user: 最近工作压力很大
     assistant: 担子一件件压上来，连喘息的缝隙都要自己找。辛苦了。
 
+# 硬上限（约 2 倍余量）：字数形态由提示词的【回复格式】层约束（默认 100 字）。
 sampling:
   temperature: 0.8
   frequency_penalty: 0.35
-  max_tokens: 400
+  max_tokens: 220
 
 conflicts_with: [毒舌, 网络用语, 幽默搞怪]

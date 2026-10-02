@@ -7,11 +7,14 @@ from pathlib import Path
 
 import yaml
 
+from app.paths import resource_path
 from app.prompts.persona.loader import PersonaPreset
 from app.prompts.style.models import StylePreset
 
-# 风格预设目录（本文件位于 app/prompts/style/loader.py）
-_PRESETS_DIR = Path(__file__).resolve().parent / "presets"
+
+def presets_dir() -> Path:
+    """内置风格预设目录（随程序分发的只读资源）。"""
+    return resource_path("app", "prompts", "style", "presets")
 
 
 def load_style_file(file_path: str | Path) -> StylePreset:
@@ -27,7 +30,7 @@ def load_style_file(file_path: str | Path) -> StylePreset:
 def load_builtin_styles() -> dict[str, StylePreset]:
     """加载 presets/ 目录下全部 *.yaml，按 id 建索引。"""
     styles: dict[str, StylePreset] = {}
-    for file_path in sorted(_PRESETS_DIR.glob("*.yaml")):
+    for file_path in sorted(presets_dir().glob("*.yaml")):
         preset = load_style_file(file_path)
         if preset.id in styles:
             raise ValueError(f"风格预设 id 重复：{preset.id}")

@@ -5,6 +5,8 @@
 
 id: pet-cat
 title: 苏澄的猫「团子」
+# 归属：苏澄的专属设定（同 consulting-room）
+scope: therapist-elder-sister
 keys: [猫, 猫咪, 团子, 三花]
 # 语义通道：用户没说「猫」但流露出孤单、想有小动物陪着时也应触发
 vector_text: 用户感到孤单，想有个小动物陪着，或提到养宠物、撸猫

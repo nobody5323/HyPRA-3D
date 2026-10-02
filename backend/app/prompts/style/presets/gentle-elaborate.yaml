@@ -29,9 +29,10 @@ examples:
   - user: 最近工作压力很大
     assistant: 事情一件压着一件，连喘口气都得挑时间。你大概已经很久没好好问过自己"累不累"了。
 
+# 硬上限：细腻长句仍受【回复格式】层（默认 100 字）约束，这里留出更宽的余量。
 sampling:
   temperature: 0.9
   frequency_penalty: 0.35
-  max_tokens: 500
+  max_tokens: 280
 
 conflicts_with: [极简, 惜字, 冷淡]

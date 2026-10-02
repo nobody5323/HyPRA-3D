@@ -10,8 +10,12 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-# 预设存放目录（本文件位于 app/prompts/persona/loader.py）
-_PRESETS_DIR = Path(__file__).resolve().parent / "presets"
+from app.paths import resource_path
+
+
+def presets_dir() -> Path:
+    """内置人设预设目录（随程序分发的只读资源）。"""
+    return resource_path("app", "prompts", "persona", "presets")
 
 
 class PersonaPreset(BaseModel):
@@ -55,7 +59,7 @@ def load_preset_file(file_path: str | Path) -> PersonaPreset:
 def load_builtin_presets() -> dict[str, PersonaPreset]:
     """加载 presets/ 目录下全部 *.yaml，按 id 建索引。"""
     presets: dict[str, PersonaPreset] = {}
-    for file_path in sorted(_PRESETS_DIR.glob("*.yaml")):
+    for file_path in sorted(presets_dir().glob("*.yaml")):
         preset = load_preset_file(file_path)
         if preset.id in presets:
             raise ValueError(f"预设 id 重复：{preset.id}")

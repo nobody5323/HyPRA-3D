@@ -29,9 +29,9 @@ BUILTIN_STATE_VARS: dict[str, StateVar] = {
         ),
         StateVar(
             name="char_name",
-            description="AI 角色（本预设）的名字",
-            default="苏澄",
-            example="苏澄",
+            description="AI 角色（本预设）的名字（对话链路会传入真实角色名，此处只是兜底）",
+            default="角色",
+            example="阿岸",
         ),
         StateVar(
             name="current_mood",

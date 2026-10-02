@@ -7,10 +7,13 @@ from pathlib import Path
 
 import yaml
 
+from app.paths import resource_path
 from app.worldbook.models import WorldBookEntry
 
-# 条目存放目录（本文件位于 app/worldbook/loader.py）
-_ENTRIES_DIR = Path(__file__).resolve().parent / "entries"
+
+def entries_dir() -> Path:
+    """内置世界书条目目录（随程序分发的只读资源）。"""
+    return resource_path("app", "worldbook", "entries")
 
 
 def load_entry_file(file_path: str | Path) -> WorldBookEntry:
@@ -24,7 +27,7 @@ def load_entry_file(file_path: str | Path) -> WorldBookEntry:
     if not entry.has_trigger:
         raise ValueError(
             f"世界书条目 {entry.id} 缺少触发条件"
-            "（keys / regex / vector_text 至少一项）"
+            "（keys / regex / vector_text 至少一项，或 constant: true）"
         )
     return entry
 
@@ -32,6 +35,6 @@ def load_entry_file(file_path: str | Path) -> WorldBookEntry:
 def load_builtin_entries() -> list[WorldBookEntry]:
     """加载 entries/ 目录下全部 *.yaml，按文件名字母序返回列表。"""
     entries: list[WorldBookEntry] = []
-    for file_path in sorted(_ENTRIES_DIR.glob("*.yaml")):
+    for file_path in sorted(entries_dir().glob("*.yaml")):
         entries.append(load_entry_file(file_path))
     return entries

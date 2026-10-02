@@ -10,7 +10,9 @@
   （对应 SillyTavern 条目 Vectorized 后经向量检索命中的机制，见 vector_index.py）；
 - 三通道是「或」的关系，任一命中即算条目命中；未传 vector_index 时
   **仅前两通道生效**，行为与加入向量通道前完全一致；
-- 命中结果按 priority 降序排列，供后续 PromptManager 注入编排使用。
+- **常驻条目（`constant=True`）不依赖任何触发词**，恒命中（仍受归属过滤）——
+  真实酒馆世界书以「常驻 + 深度注入」为主，不认这个字段就基本什么都读不到；
+- 命中结果按 priority 降序（同优先级按 order 升序）排列，供后续 PromptManager 注入编排使用。
 """
 
 import re
@@ -56,7 +58,7 @@ def match_entries(
     vector_index: WorldBookVectorIndex | None = None,
     companion_id: str = "",
 ) -> list[WorldBookEntry]:
-    """对给定文本匹配世界书条目，返回按 priority 降序的命中列表。
+    """对给定文本匹配世界书条目，返回按 priority 降序（同优先级按 order 升序）的命中列表。
 
     参数:
         include_disabled: 是否把 enabled=False 的条目也纳入匹配
@@ -77,11 +79,12 @@ def match_entries(
         if not entry.applies_to(companion_id):
             continue
         if (
-            entry.id in vector_hits
+            entry.constant
+            or entry.id in vector_hits
             or matched_keys(entry, text)
             or matched_regex(entry, text)
         ):
             hits.append(entry)
-    # 稳定排序：priority 高者在前；同优先级保持加载顺序
-    hits.sort(key=lambda e: e.priority, reverse=True)
+    # 稳定排序：priority 高者在前，同优先级按 order 小者在前，再保持加载顺序
+    hits.sort(key=lambda e: (-e.priority, e.order))
     return hits

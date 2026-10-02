@@ -5,6 +5,8 @@
 
 id: night-mode
 title: 深夜倾听模式
+# 归属：苏澄的专属设定（同 consulting-room）
+scope: therapist-elder-sister
 keys: []
 regex:
   - 深夜|凌晨|睡不着|失眠

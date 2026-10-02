@@ -18,10 +18,13 @@ from pathlib import Path
 import yaml
 from pydantic import ValidationError
 
+from app.paths import resource_path
 from app.prompts.adaptation.models import AdaptationRules
 
-#: 内置规则文件（本文件位于 app/prompts/adaptation/loader.py）
-_RULES_FILE = Path(__file__).resolve().parent / "rules.yaml"
+
+def rules_file() -> Path:
+    """内置适配规则文件（随程序分发的只读资源）。"""
+    return resource_path("app", "prompts", "adaptation", "rules.yaml")
 
 #: (mtime, 规则) —— mtime 变了就重新解析
 _rules_cache: tuple[float, AdaptationRules] | None = None
@@ -51,13 +54,14 @@ def load_rules() -> AdaptationRules:
     成功的解析结果（比整条适配链路报错更可取）。
     """
     global _rules_cache
+    target = rules_file()
     try:
-        mtime = _RULES_FILE.stat().st_mtime
+        mtime = target.stat().st_mtime
     except OSError:
         if _rules_cache is None:
             raise
         return _rules_cache[1]
 
     if _rules_cache is None or _rules_cache[0] != mtime:
-        _rules_cache = (mtime, load_rules_file(_RULES_FILE))
+        _rules_cache = (mtime, load_rules_file(target))
     return _rules_cache[1]

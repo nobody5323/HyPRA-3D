@@ -25,7 +25,7 @@ client = TestClient(app)
 
 
 def test_style_layer_at_end_of_system_prompt() -> None:
-    """风格块应排在 system 末尾（越靠近输入影响越强）。"""
+    """风格块排在 system 末尾（越靠近输入影响越强），其后只跟「回复格式」约束。"""
     pm = PromptManager()
     result = pm.build(
         persona_text="人设",
@@ -35,8 +35,10 @@ def test_style_layer_at_end_of_system_prompt() -> None:
         style_text="【表达风格：现代口语】说人话。",
     )
     prompt = result.system_prompt
-    assert prompt.rstrip().endswith("说人话。")
     assert prompt.index("[角色人设]") < prompt.index("世界书") < prompt.index("【表达风格")
+    # 内容层（人设 / 世界书 / 记忆）之后才是风格块；输出约束排在它之后收尾
+    assert prompt.index("【表达风格") < prompt.index("【回复格式】")
+    assert prompt.rstrip().endswith("等对方回应再接着说。")
 
 
 def test_style_layer_recorded_in_layers() -> None:
@@ -138,7 +140,7 @@ def test_assemble_prompt_style_override(nodes: ChatNodes) -> None:
     state = {**_state(style_id="brief-direct"), "persona_text": "人设", "user_input": "问"}
     out = nodes.assemble_prompt(state)
     assert out["style_id"] == "brief-direct"
-    assert out["sampling"].max_tokens == 180   # 简短利落的采样建议生效
+    assert out["sampling"].max_tokens == 140   # 简短利落的采样建议生效
 
 
 def test_assemble_prompt_unknown_style_warns(nodes: ChatNodes) -> None:
@@ -156,7 +158,7 @@ def test_graph_uses_style_sampling(nodes: ChatNodes) -> None:
     sampling = result["sampling"]
     assert sampling is not None
     # 文风覆盖 max_tokens，模型档保留 top_p
-    assert sampling.max_tokens == 350
+    assert sampling.max_tokens == 220
     assert sampling.top_p == 0.9
     # 示例对话进入 messages
     roles = [m["role"] for m in result["messages"]]

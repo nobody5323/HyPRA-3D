@@ -1,7 +1,10 @@
 """PromptManager 测试：分层顺序、预算裁剪、优先级、必留层。"""
 
+from app.prompts.assemble import DepthInjection
 from app.rag.prompt_manager import (
+    DIALOGUE_ONLY_RULE,
     LAYER_FACTS,
+    LAYER_FORMAT,
     LAYER_HISTORY,
     LAYER_KNOWLEDGE,
     LAYER_PERSONA,
@@ -9,6 +12,7 @@ from app.rag.prompt_manager import (
     LAYER_USER,
     LAYER_WARM,
     LAYER_WORLDBOOK,
+    LAYER_WORLDBOOK_BEFORE,
     PromptManager,
 )
 from app.session.context import ChatTurn
@@ -243,3 +247,132 @@ def test_skills_dropped_after_knowledge() -> None:
     assert result.dropped_layers.index(LAYER_KNOWLEDGE) < result.dropped_layers.index(
         LAYER_SKILLS
     )
+
+
+# =============================================================
+# 世界书分档：人设前块 + 深度注入（`AGENTS.md §8.4`）
+# =============================================================
+
+
+def test_worldbook_before_sits_ahead_of_persona() -> None:
+    """★ `before_char` 档的设定排在**角色人设之前**（ST 的 worldInfoBefore 语义）。
+
+    这一块是「这个世界/这个角色是谁」的前提，必须在人设正文之前交待；
+    排在后面就变成了人设的补充说明，语义反了。
+    """
+    pm = PromptManager()
+    result = pm.build(
+        persona_text="你是苏澄。",
+        user_input="问",
+        worldbook_before_text="[世界观]\n这是一座海边小城。",
+        worldbook_text="[场景]\n现在是深夜。",
+    )
+
+    prompt = result.system_prompt
+    assert prompt.index("[背景设定]") < prompt.index("[角色人设]")
+    assert prompt.index("[角色人设]") < prompt.index("[场景补充]")
+
+
+def test_worldbook_before_omitted_when_empty() -> None:
+    """没声明 `before_char` 档就不该凭空多出一个空块（本项目内置条目都不用它）。"""
+    result = PromptManager().build(
+        persona_text="人设", user_input="问", worldbook_text="场景"
+    )
+
+    assert "[背景设定]" not in result.system_prompt
+    assert LAYER_WORLDBOOK_BEFORE not in result.layers or result.layers[
+        LAYER_WORLDBOOK_BEFORE
+    ].empty
+
+
+def test_worldbook_before_has_its_own_budget() -> None:
+    result = PromptManager(worldbook_budget=5).build(
+        persona_text="人设", user_input="问", worldbook_before_text="设定" * 50
+    )
+
+    assert result.layers[LAYER_WORLDBOOK_BEFORE].truncated is True
+
+
+def test_depth_injection_lands_near_the_input() -> None:
+    """★ `at_depth` 档插进消息，而不是拼进 system。
+
+    它靠**临近输入**施加强影响，拼进 system 就丢掉了这个语义（等于又变成场景补充块）。
+    """
+    pm = PromptManager()
+    result = pm.build(
+        persona_text="人设",
+        user_input="这一轮问",
+        history=_history(4),
+        worldbook_depth=[DepthInjection(depth=1, text="靠近输入的设定")],
+    )
+
+    contents = [m["content"] for m in result.messages]
+    assert contents[-1] == "这一轮问"
+    assert contents[-2] == "靠近输入的设定"
+    assert "靠近输入的设定" not in result.system_prompt
+
+
+def test_depth_injection_uses_its_role() -> None:
+    result = PromptManager().build(
+        persona_text="人设",
+        user_input="问",
+        history=_history(2),
+        worldbook_depth=[DepthInjection(depth=1, text="用户口吻的设定", role="user")],
+    )
+
+    assert result.messages[-2] == {"role": "user", "content": "用户口吻的设定"}
+
+
+def test_no_depth_injection_keeps_message_shape() -> None:
+    """不声明 at_depth 时消息结构完全不变（内置条目的默认路径）。"""
+    result = PromptManager().build(
+        persona_text="人设", user_input="问", history=_history(2)
+    )
+
+    assert [m["role"] for m in result.messages] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+
+
+def test_format_layer_rendered_last() -> None:
+    """输出格式约束：形态（只说话）+ 默认 100 字，排在 system 最末（比风格更贴近输入）。"""
+    result = PromptManager().build(persona_text="人设", user_input="问")
+
+    assert "【回复格式】" in result.system_prompt
+    assert DIALOGUE_ONLY_RULE in result.system_prompt
+    assert "不超过 100 字" in result.system_prompt
+    assert LAYER_FORMAT in result.layers
+    # 格式层收尾：它之后不该再有别的内容层
+    assert result.system_prompt.rstrip().endswith("等对方回应再接着说。")
+
+
+def test_dialogue_only_is_always_on() -> None:
+    """形态约束**恒开**：关掉字数上限也仍然只说话（全局强制的产品口径）。"""
+    off = PromptManager(reply_char_limit=0).build(persona_text="人设", user_input="问")
+
+    assert "【回复格式】" in off.system_prompt
+    assert DIALOGUE_ONLY_RULE in off.system_prompt
+    assert "不超过" not in off.system_prompt     # 长度那条确实关掉了
+    assert not off.layers[LAYER_FORMAT].empty
+
+
+def test_reply_limit_can_be_tuned() -> None:
+    """字数上限可配：其他值按需收紧。"""
+    tight = PromptManager(reply_char_limit=40).build(persona_text="人设", user_input="问")
+    assert "不超过 40 字" in tight.system_prompt
+
+
+def test_reply_limit_not_counted_in_total_budget() -> None:
+    """格式层不参与总量预算：加约束不该把内容层挤掉。"""
+    pm = PromptManager(total_budget=40)
+    result = pm.build(
+        persona_text="人设",
+        user_input="问",
+        worldbook_text="世界书内容",
+    )
+
+    assert LAYER_FORMAT not in result.dropped_layers
+    assert "【回复格式】" in result.system_prompt

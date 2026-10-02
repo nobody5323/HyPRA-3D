@@ -128,6 +128,52 @@ def test_missing_companion_id_only_matches_global() -> None:
     assert [h.id for h in hits] == ["global"]
 
 
+# ---------- 常驻条目 ----------
+
+
+def test_constant_entry_hits_without_any_keyword() -> None:
+    """常驻条目不依赖命中，无关键词的输入也触发。
+
+    回归点：真实酒馆世界书近一半条目是常驻型（无 keys），
+    只走三通道的话这些设定永远进不了上下文。
+    """
+    entry = _entry(id="constant", keys=[], constant=True)
+    assert match_entries([entry], "今天天气不错") == [entry]
+    assert match_entries([entry], "") == [entry]
+
+
+def test_constant_entry_still_filtered_by_scope() -> None:
+    """常驻不等于全局：归属过滤优先于恒命中，专属设定不得串味。"""
+    entry = _entry(id="constant", keys=[], constant=True, scope="user-lin")
+    assert match_entries([entry], "随便聊聊", companion_id="user-lin") == [entry]
+    assert match_entries([entry], "随便聊聊", companion_id="user-other") == []
+    assert match_entries([entry], "随便聊聊") == []  # 缺 companion_id → fail-safe
+
+
+def test_disabled_constant_entry_is_skipped() -> None:
+    entry = _entry(id="constant", keys=[], constant=True, enabled=False)
+    assert match_entries([entry], "随便聊聊") == []
+
+
+# ---------- 次序（priority 主键 / order 次键）----------
+
+
+def test_same_priority_sorted_by_order() -> None:
+    """同 priority 时按 order 升序（来源格式自带的次序）。"""
+    late = _entry(id="late", priority=5, order=200)
+    early = _entry(id="early", priority=5, order=10)
+    hits = match_entries([late, early], "路过咖啡馆")
+    assert [h.id for h in hits] == ["early", "late"]
+
+
+def test_priority_outranks_order() -> None:
+    """priority 是主键：order 更小的低优先条目仍然排在后面。"""
+    important = _entry(id="important", priority=9, order=999)
+    minor = _entry(id="minor", priority=1, order=1)
+    hits = match_entries([important, minor], "路过咖啡馆")
+    assert [h.id for h in hits] == ["important", "minor"]
+
+
 def test_scope_filter_applies_to_vector_channel() -> None:
     """向量通道命中的专属条目也必须被归属过滤拦住。
 
