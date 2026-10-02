@@ -21,8 +21,13 @@ import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 
-#: 默认路径：backend/data/llm_runtime.json（本文件位于 backend/app/llm/runtime.py）
-DEFAULT_RUNTIME_PATH = Path(__file__).resolve().parents[2] / "data" / "llm_runtime.json"
+from app.paths import data_path
+
+
+def default_runtime_path() -> Path:
+    """运行时模型配置的默认落盘位置（可写数据目录）。"""
+    return data_path("data", "llm_runtime.json")
+
 
 #: 可选 provider（与 app/llm/factory.py 保持一致）
 PROVIDER_OPTIONS = ("mock", "dashscope", "siliconflow", "openai-compatible")
@@ -102,7 +107,7 @@ class LlmRuntimeConfig:
 def runtime_config_path() -> Path:
     """运行时配置文件路径（可用环境变量 `LLM_RUNTIME_PATH` 覆盖，测试注入用）。"""
     override = os.environ.get("LLM_RUNTIME_PATH", "").strip()
-    return Path(override) if override else DEFAULT_RUNTIME_PATH
+    return Path(override) if override else default_runtime_path()
 
 
 def load_runtime_config(path: str | Path | None = None) -> LlmRuntimeConfig | None:

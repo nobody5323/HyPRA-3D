@@ -21,7 +21,12 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, Field
 
-_PROFILES_FILE = Path(__file__).resolve().parent / "profiles.yaml"
+from app.paths import resource_path
+
+
+def profiles_file() -> Path:
+    """内置模型预设档的位置（随程序分发的只读资源）。"""
+    return resource_path("app", "llm", "profiles.yaml")
 
 
 class ModelProfile(BaseModel):
@@ -98,9 +103,9 @@ class ResolvedSampling:
         }
 
 
-def load_model_profiles(file_path: str | Path = _PROFILES_FILE) -> list[ModelProfile]:
-    """加载全部模型预设档（保序）。"""
-    path = Path(file_path)
+def load_model_profiles(file_path: str | Path | None = None) -> list[ModelProfile]:
+    """加载全部模型预设档（保序）。`file_path` 缺省用内置档。"""
+    path = Path(file_path) if file_path is not None else profiles_file()
     with path.open("r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     items = raw.get("profiles") or []

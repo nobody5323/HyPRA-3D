@@ -15,6 +15,7 @@ from app.session.context import (
     SessionSummary,
     build_session_title,
 )
+from app.session.mode import MODE_COMPANION, normalize_mode
 
 _TS_FMT = "%Y-%m-%dT%H:%M:%S.%f"
 
@@ -41,6 +42,7 @@ class SessionRepository(SessionStore):
         self,
         persona_id: str,
         *,
+        mode: str = MODE_COMPANION,
         user_name: str = "朋友",
         state_vars: dict[str, str] | None = None,
         session_id: str | None = None,
@@ -54,6 +56,7 @@ class SessionRepository(SessionStore):
         session = SessionContext(
             session_id=sid,
             persona_id=persona_id,
+            mode=normalize_mode(mode),
             user_name=user_name,
             state_vars=dict(state_vars or {}),
             max_history_turns=max_history_turns,
@@ -138,6 +141,18 @@ class SessionRepository(SessionStore):
         removed = len(self._archive.pop(session_id, []))
         del self._sessions[session_id]
         return removed
+
+    def delete_sessions(self, persona_id: str) -> tuple[int, int]:
+        """删除某个陪伴对象的全部会话，返回 (会话数, 消息数)。"""
+        targets = [
+            session_id
+            for session_id, session in self._sessions.items()
+            if session.persona_id == persona_id
+        ]
+        removed_turns = sum(len(self._archive.pop(session_id, [])) for session_id in targets)
+        for session_id in targets:
+            del self._sessions[session_id]
+        return len(targets), removed_turns
 
     def _require(self, session_id: str) -> SessionContext:
         session = self._sessions.get(session_id)

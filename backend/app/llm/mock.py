@@ -1,7 +1,7 @@
 """Mock LLM：无 key 的占位实现（开发/测试/演示兜底）。
 
 不调用任何外部服务，根据最后一条 user 消息做**关键词共情**，生成确定性的、
-符合「苏澄」温柔基调的占位回复；同时支持 function calling 协议
+符合情感陪伴温和基调的占位回复；同时支持 function calling 协议
 （chat_with_tools），使情绪链路在无 key 环境下也能完整跑通。
 真实 key 接入后，chat 流程无需改动即可切换 provider（见 factory.create_llm_provider）。
 

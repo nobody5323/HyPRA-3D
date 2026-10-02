@@ -224,3 +224,42 @@ def test_delete_session_removes_session_and_messages(tmp_path) -> None:
         # 不存在 → KeyError（路由层据此返回 404，而不是静默成功）
         with pytest.raises(KeyError, match="会话不存在"):
             store.delete_session(session.session_id)
+
+
+def test_delete_sessions_purges_only_that_persona(tmp_path) -> None:
+    """按角色清空：只清该角色，别的角色原样保留（两种实现一致）。"""
+    stores: list[SessionStore] = [
+        SessionRepository(),
+        SqliteSessionRepository(tmp_path / "sessions.db"),
+    ]
+    for store in stores:
+        first = store.create("persona-a")
+        store.append_turns(
+            first.session_id,
+            [
+                ChatTurn(role="user", text="你好"),
+                ChatTurn(role="assistant", text="嗯，我在"),
+            ],
+        )
+        second = store.create("persona-a")
+        store.append_turn(second.session_id, ChatTurn(role="user", text="在吗"))
+        theirs = store.create("persona-b")
+        store.append_turn(theirs.session_id, ChatTurn(role="user", text="别人的对话"))
+
+        assert store.delete_sessions("persona-a") == (2, 3)
+        assert store.list_sessions(persona_id="persona-a") == []
+        # 别的角色一字未动：按角色清空最容易「顺手清多了」
+        assert [item.session_id for item in store.list_sessions(persona_id="persona-b")] == [
+            theirs.session_id
+        ]
+        assert store.list_history(theirs.session_id, limit=10)[0].text == "别人的对话"
+
+
+def test_delete_sessions_on_empty_persona_is_idempotent(tmp_path) -> None:
+    """该角色没有任何会话时返回 (0, 0)，不报错（清空要幂等）。"""
+    stores: list[SessionStore] = [
+        SessionRepository(),
+        SqliteSessionRepository(tmp_path / "sessions.db"),
+    ]
+    for store in stores:
+        assert store.delete_sessions("persona-nobody") == (0, 0)

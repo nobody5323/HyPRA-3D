@@ -23,6 +23,9 @@
   等待；现由 chat 路由在响应发出后后台执行（见 api/chat.py 的 _write_memory_job）。
 """
 
+import time
+from collections.abc import Callable
+
 from langgraph.graph import END, START, StateGraph
 
 from app.graph.nodes import ChatNodes
@@ -47,16 +50,38 @@ NODE_SEQUENCE = [
 ]
 
 
+def _timed(name: str, node: Callable[[ChatState], dict]) -> Callable[[ChatState], dict]:
+    """给节点包一层耗时统计，把毫秒数累加进 `state["timings"]`。
+
+    为什么包在**图上**而不是写进节点：节点是纯函数，会被测试与脚本直接调用，
+    计时属于编排层关注点；写进每个节点既污染语义，也容易漏。
+    图是唯一的执行入口，包一层就全覆盖。
+
+    累加方式：入口读当前 state 里的 timings（LangGraph 已把上游节点的结果合并
+    进来），追加自己这一项后随返回值一起回写。节点是串行执行的，因此不会互相覆盖。
+    """
+    def wrapped(state: ChatState) -> dict:
+        started = time.perf_counter()
+        update = node(state) or {}
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        timings = dict(state.get("timings") or {})
+        timings[name] = round(elapsed_ms, 1)
+        return {**update, "timings": timings}
+
+    wrapped.__name__ = f"timed_{name}"
+    return wrapped
+
+
 def build_chat_graph(nodes: ChatNodes):
     """编译对话编排图（返回可直接 invoke 的 CompiledStateGraph）。"""
     builder = StateGraph(ChatState)
 
-    builder.add_node(NODE_LOAD_PERSONA, nodes.load_persona)
-    builder.add_node(NODE_WORLDBOOK, nodes.worldbook_recall)
-    builder.add_node(NODE_KNOWLEDGE, nodes.knowledge_recall)
-    builder.add_node(NODE_MEMORY, nodes.memory_recall)
-    builder.add_node(NODE_ASSEMBLE, nodes.assemble_prompt)
-    builder.add_node(NODE_GENERATE, nodes.generate_reply)
+    builder.add_node(NODE_LOAD_PERSONA, _timed(NODE_LOAD_PERSONA, nodes.load_persona))
+    builder.add_node(NODE_WORLDBOOK, _timed(NODE_WORLDBOOK, nodes.worldbook_recall))
+    builder.add_node(NODE_KNOWLEDGE, _timed(NODE_KNOWLEDGE, nodes.knowledge_recall))
+    builder.add_node(NODE_MEMORY, _timed(NODE_MEMORY, nodes.memory_recall))
+    builder.add_node(NODE_ASSEMBLE, _timed(NODE_ASSEMBLE, nodes.assemble_prompt))
+    builder.add_node(NODE_GENERATE, _timed(NODE_GENERATE, nodes.generate_reply))
 
     builder.add_edge(START, NODE_LOAD_PERSONA)
     for current, nxt in zip(NODE_SEQUENCE, NODE_SEQUENCE[1:]):

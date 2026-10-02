@@ -20,6 +20,30 @@ def test_chat_returns_assembled_prompt() -> None:
     assert body["note"]
 
 
+def test_chat_reports_stage_timings() -> None:
+    """★ 响应必须带分阶段耗时与 LLM 调用次数。
+
+    「刚才那句为什么等了这么久」如果只能靠翻日志猜，优化就无从下手。
+    这里锁住的是可观测性契约：召回各节点、图总耗时、路由总耗时都要在。
+    """
+    body = client.post("/chat", json={"text": "今天有点累"}).json()
+
+    timings = body["timings"]
+    for stage in (
+        "load_persona",
+        "worldbook_recall",
+        "knowledge_recall",
+        "memory_recall",
+        "assemble_prompt",
+        "generate_reply",
+        "graph_total",
+        "route_total",
+    ):
+        assert stage in timings, f"缺少阶段耗时：{stage}"
+    assert timings["route_total"] >= 0
+    assert body["llm_rounds"] >= 1
+
+
 def test_chat_continuation_keeps_history() -> None:
     """同一 session_id 续聊：上一轮输入进入 messages 历史。"""
     first = client.post("/chat", json={"text": "昨天被老板批评了", "user_name": "小林"})
@@ -224,6 +248,56 @@ def test_delete_session_endpoint() -> None:
     assert len(remaining) == 1
 
 
+def test_purge_sessions_clears_only_that_persona() -> None:
+    """按角色清空会话：目标角色清空，别的角色原样保留。
+
+    「删多了」是这类批量操作最贵的错误（用户没地方找回来），所以两边都断言。
+    """
+    client.post("/chat", json={"text": "第一段对话"})
+    client.post("/chat", json={"text": "第二段对话"})
+    client.post("/chat", json={"text": "我是另一个角色", "persona_id": "energetic-roommate"})
+
+    listed = client.get(
+        "/chat/sessions", params={"persona_id": "therapist-elder-sister"}
+    ).json()
+    assert len(listed) == 2
+
+    resp = client.delete("/chat/sessions", params={"persona_id": "therapist-elder-sister"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["removed_sessions"] == 2
+    assert body["removed_turns"] == 4  # 每段一轮：user + assistant
+
+    assert (
+        client.get("/chat/sessions", params={"persona_id": "therapist-elder-sister"}).json()
+        == []
+    )
+    others = client.get(
+        "/chat/sessions", params={"persona_id": "energetic-roommate"}
+    ).json()
+    assert len(others) == 1
+
+
+def test_purge_sessions_on_empty_persona_is_idempotent() -> None:
+    """没有会话时返回 0，不报错——清空一个已经空的列表不该是错误。"""
+    resp = client.delete("/chat/sessions", params={"persona_id": "energetic-roommate"})
+
+    assert resp.status_code == 200
+    assert resp.json()["removed_sessions"] == 0
+    assert resp.json()["removed_turns"] == 0
+
+
+def test_purge_memory_endpoint_is_idempotent() -> None:
+    """清空记忆：四层键齐全，没数据时各层返回 0（幂等，不报错）。"""
+    resp = client.delete("/chat/memory", params={"persona_id": "purge-probe"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["persona_id"] == "purge-probe"
+    assert set(body["removed"]) == {"warm", "facts", "mood_log", "knowledge"}
+    assert all(value == 0 for value in body["removed"].values())
+
+
 def test_delete_session_missing_returns_404() -> None:
     resp = client.delete(
         "/chat/sessions/不存在", params={"persona_id": "therapist-elder-sister"}
@@ -384,3 +458,51 @@ def test_chat_reports_knowledge_hits() -> None:
     body = client.post("/chat", json={"text": "深秋的梧桐叶铺满整条街"}).json()
     assert body["knowledge_hits"] >= 1
     assert "[参考资料]" in body["system_prompt"]
+
+
+# --------------------------------------------------------------------------
+# 感知层进提示词（§4.5 / §4.8 / §4.9）
+# --------------------------------------------------------------------------
+
+
+def test_chat_prompt_always_carries_the_current_time() -> None:
+    """时间**不依赖桌宠端上报**：只要后端在跑，模型就该知道现在是什么时候。
+
+    这条是 §4.8 的核心：原先时间只存在于桌面情景上报里，
+    于是 Web 端永远没有时间——模型会在凌晨两点说「今天过得怎么样呀」。
+    """
+    body = client.post("/chat", json={"text": "在吗"}).json()
+    prompt = body["system_prompt"]
+
+    assert "[此刻]" in prompt
+    assert "现在是 " in prompt
+
+
+def test_chat_prompt_carries_recent_activity_after_a_desktop_report() -> None:
+    """行踪与画像真的进了模型看到的提示词（不只是接口里能查到）。"""
+    client.post(
+        "/perception/desktop",
+        json={
+            "foreground_process": "Code.exe",
+            "foreground_title": "",
+            "idle_seconds": 1.0,
+            "local_time": "22:30",
+            "local_date": "2026-09-29",
+        },
+    )
+    body = client.post("/chat", json={"text": "在吗"}).json()
+    prompt = body["system_prompt"]
+
+    assert "[此刻]" in prompt
+    assert "Code.exe" in prompt
+
+
+def test_chat_prompt_omits_activity_when_disabled(monkeypatch) -> None:
+    """关掉行踪后提示词里不该出现任何程序名（关就是真的关）。"""
+    monkeypatch.setenv("PERCEPTION_ACTIVITY_ENABLED", "false")
+    client.post(
+        "/perception/desktop",
+        json={"foreground_process": "Code.exe", "idle_seconds": 1.0},
+    )
+    body = client.post("/chat", json={"text": "在吗"}).json()
+    assert "Code.exe" not in body["system_prompt"]

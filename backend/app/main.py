@@ -22,23 +22,85 @@ from app.api import media as media_module
 from app.api import (
     avatar_models_router,
     chat_router,
+    events_router,
     knowledge_router,
     llm_router,
     media_router,
+    perception_router,
     plugins_router,
+    proactive_router,
     skills_router,
     st_presets_router,
     studio_router,
 )
-from app.config import cors_origin_list, get_settings, skills_disabled_list
+from app.config import cors_origin_list, get_settings, plugin_search_dirs, skills_disabled_list
 from app.digital_human.factory import GPT_SOVITS_NAMES
+from app.events.bus import get_event_bus
 from app.mcp.manager import configure_manager, get_mcp_manager
 from app.plugins.builtin import register_all_builtin
 from app.plugins.manager import PluginManager, get_plugin_manager, set_plugin_manager
 from app.plugins.registry import get_registry, set_registry
+from app.proactive.runner import get_proactive_runner
 from app.skills.registry import configure_skills, get_skill_registry
 
 logger = logging.getLogger(__name__)
+
+
+def _startup_tavern_sync() -> None:
+    """启动期把酒馆里**新增**的对话增量同步进长期记忆（开关默认关）。
+
+    在后台线程里跑：事实抽取要调模型，首次同步历史会话可能几十秒，
+    绝不能拖住启动。失败只记日志——一个外部数据源的同步不该让后端起不来。
+
+    归属用**当前选中的陪伴对象**做回落（启动期没有请求上下文，只能读用户偏好）：
+    匹配不到角色卡的会话写到这里，其余按角色各进各的记忆。
+    """
+    from app.api.chat import current_persona_id, get_memory_store
+    from app.memory.tavern_sync import sync_tavern_sessions
+
+    try:
+        settings = get_settings()
+        memory_store = get_memory_store()
+        if memory_store is None:
+            logger.warning("酒馆对话自动同步跳过：记忆服务未就绪")
+            return
+        result, warnings = sync_tavern_sessions(
+            memory_store,
+            companion_id=current_persona_id(),
+            state_path=settings.tavern_import_state_file,
+        )
+        for warning in warnings:
+            logger.warning("酒馆对话自动同步：%s", warning)
+        logger.info(
+            "酒馆对话自动同步完成：新增 %d 轮（%d 个会话，写入 %d 个陪伴对象）",
+            result.turns,
+            result.sessions_imported,
+            len(result.scopes),
+        )
+    except Exception as exc:  # noqa: BLE001 - 同步失败不应影响应用运行
+        logger.warning("酒馆对话自动同步失败（已忽略）：%s", exc)
+
+
+def _asr_warmup_needed(settings) -> bool:
+    """是否需要预热 ASR（只在用户真的启用了语音识别时才做）。"""
+    if not settings.asr_warmup:
+        return False
+    provider = (settings.asr_provider or "").strip().lower()
+    return provider not in ("", "none")
+
+
+def _warmup_asr() -> None:
+    """后台预热 ASR 模型（首次说话不必等十几秒）。
+
+    失败只记日志：预热是优化，不是功能。真正的失败会在首次转写时
+    以完整的中文提示暴露给用户（见 `faster_whisper_provider._explain_load_failure`）。
+    """
+    try:
+        from app.api.perception import get_asr_provider
+
+        get_asr_provider().warmup()
+    except Exception as exc:  # noqa: BLE001 - 预热失败不影响后端可用
+        logger.warning("ASR 预热失败（首次使用时才会再试）：%s", exc)
 
 
 def create_app() -> FastAPI:
@@ -78,7 +140,37 @@ def create_app() -> FastAPI:
             app.state.tts_warmup_task = asyncio.create_task(
                 asyncio.to_thread(media_module.warmup_digital_human_provider)
             )
+        # 酒馆新对话的启动期自动同步（默认关）。
+        # 必须放在插件 setup 之后：声明式配置会经 `setup_all` → 运行时覆盖层生效，
+        # 在它之前读 `get_settings()` 拿到的还是 .env 里的旧值。
+        if get_settings().tavern_sync_on_startup:
+            app.state.tavern_sync_task = asyncio.create_task(
+                asyncio.to_thread(_startup_tavern_sync)
+            )
+
+        # ---- 感知层与主动链路（docs/proactive-multimodal.md）----
+        # 事件总线绑定当前循环：绑上之后才支持**跨线程**发布
+        # （记忆写入在 `to_thread` 里跑，它可能需要在完成后推一条事件）。
+        get_event_bus().bind_loop(asyncio.get_running_loop())
+
+        # ASR 预热：只在**用户已启用**时做。默认 `asr_provider=none` 时不加载模型
+        # ——否则每次启动都白占几百 MB 内存，而绝大多数用户从不用语音输入。
+        if _asr_warmup_needed(get_settings()):
+            app.state.asr_warmup_task = asyncio.create_task(
+                asyncio.to_thread(_warmup_asr)
+            )
+
+        # 主动链路调度：默认开（见 §5.3「默认开但默认克制」）。
+        # 它自己会检查 `proactive_enabled`，因此这里不必再判一次。
+        runner = get_proactive_runner()
+        runner.start()
+        app.state.proactive_runner = runner
+
         yield
+
+        # 关闭：先停主动链路（它可能正在调 LLM），再断 MCP 与插件
+        await runner.stop()
+        get_event_bus().unbind_loop()
         plugin_manager.shutdown_all()
         if manager is not None:
             await asyncio.to_thread(manager.stop_all)
@@ -116,8 +208,9 @@ def create_app() -> FastAPI:
     plugin_manager = PluginManager(
         plugin_registry,
         data_dir=Path(settings.plugins_dir).parent,
-        # 顺序即优先级：第一方插件先于第三方同名插件（discover 里「内置优先」）
-        plugin_dirs=[settings.builtin_plugins_dir, settings.plugins_dir],
+        # 顺序即优先级：第一方插件先于第三方同名插件（discover 里「内置优先」）；
+        # 末尾接上用户自定义的额外来源目录（PLUGIN_EXTRA_DIRS，见 docs/plugin-development.md）。
+        plugin_dirs=plugin_search_dirs(settings),
     )
     plugin_manager.discover()
     set_plugin_manager(plugin_manager)
@@ -144,6 +237,10 @@ def create_app() -> FastAPI:
             "plugins": manager.status(),
             "plugins_summary": manager.summary(),
             "skills": get_skill_registry().status(),
+            # 主动链路与推送通道：界面据此显示「会自己开口」的状态，
+            # 排查时也先看这里（enabled / running / sent_today / 上次被拦的原因）
+            "proactive": get_proactive_runner().status(),
+            "events": {"subscribers": get_event_bus().subscriber_count()},
         }
 
     app.include_router(chat_router)
@@ -155,6 +252,10 @@ def create_app() -> FastAPI:
     app.include_router(studio_router)
     app.include_router(plugins_router)
     app.include_router(skills_router)
+    # 感知层与主动链路（docs/proactive-multimodal.md）
+    app.include_router(events_router)
+    app.include_router(perception_router)
+    app.include_router(proactive_router)
     return app
 
 

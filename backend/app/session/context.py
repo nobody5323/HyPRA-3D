@@ -9,6 +9,8 @@
 
 from dataclasses import dataclass, field
 
+from app.session.mode import MODE_COMPANION
+
 
 # 会话历史默认保留的消息条数（约 20 轮一往一返）
 DEFAULT_MAX_HISTORY_TURNS = 20
@@ -30,6 +32,9 @@ class SessionContext:
 
     session_id: str
     persona_id: str
+    #: 交互模式（`companion` 桌宠对话 / `tavern` 酒馆聊天，见 app/session/mode.py）。
+    #: 会话级属性：切换模式 = 新建会话，不做逐轮参数（避免上下文语义漂移）。
+    mode: str = MODE_COMPANION
     user_name: str = "朋友"
     state_vars: dict[str, str] = field(default_factory=dict)
     history: list[ChatTurn] = field(default_factory=list)

@@ -12,6 +12,7 @@
 因此 provider 内部可用 asyncio.run 调用魔珐 WebSocket / GPT-SoVITS HTTP。
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -33,6 +34,30 @@ router = APIRouter(prefix="/media", tags=["media"])
 
 # 进程内单例（测试可经 set_digital_human_provider 注入）
 _provider: DigitalHumanProvider | None = None
+
+#: 数字人驱动单例**快照**了这些配置（字名与 `Settings` 字段一致）。
+#: 用途：管理 API（`PUT /plugins/{id}/settings`）判断保存后要不要重建它——
+#: 其中 `gpt_sovits_*` 那一段已可经「能力中心 → 语音合成」在界面上改。
+DIGITAL_HUMAN_CONFIG_FIELDS: tuple[str, ...] = (
+    "digital_human_provider",
+    "xmov_app_id",
+    "xmov_secret",
+    "xmov_voice",
+    "xmov_host",
+    "media_dir",
+    "gpt_sovits_base_url",
+    "gpt_sovits_ref_audio",
+    "gpt_sovits_prompt_text",
+    "gpt_sovits_prompt_lang",
+    "gpt_sovits_text_lang",
+    "gpt_sovits_speed",
+    "gpt_sovits_media_type",
+    "gpt_sovits_timeout",
+    "gpt_sovits_extra_params",
+    "gpt_sovits_voices_file",
+    "gpt_sovits_default_voice",
+    "gpt_sovits_warmup",
+)
 
 # 允许的音频后缀（防目录穿越 + 限制类型）。
 # 刻意**不**包含 .raw：GPT-SoVITS 的 media_type=raw 是裸 PCM，浏览器 <audio> 放不了，
@@ -254,11 +279,11 @@ class TtsVoiceInfo(BaseModel):
 
 
 class TtsVoicesResponse(BaseModel):
-    """语音引擎状态 + 音色清单（前端据此决定用服务端音频还是浏览器原生 TTS）。"""
+    """语音引擎状态 + 音色清单（前端据此决定用服务端音频还是**静默**）。"""
 
     provider: str = Field(description="当前数字人驱动：local | xmov | gpt_sovits")
     server_tts: bool = Field(
-        description="该驱动是否产出服务端音频（false = 前端应回落浏览器 TTS）"
+        description="该驱动是否产出服务端音频（false = 前端不播报语音，只显示文字）"
     )
     configured: bool = Field(description="服务端 TTS 是否已配好（缺配置时会降级为无音频）")
     default_voice: str = Field(default="", description="默认音色 id（空 = 用配置里的默认参考音频）")
@@ -272,7 +297,7 @@ class TtsVoicesResponse(BaseModel):
 
 # 非 gpt_sovits 驱动的状态说明（前端直接展示，不用自己拼文案）
 _TTS_NOTES = {
-    "local": "未启用服务端 TTS（DIGITAL_HUMAN_PROVIDER=local）：前端使用浏览器原生 TTS",
+    "local": "未启用服务端 TTS（DIGITAL_HUMAN_PROVIDER=local）：本轮不播报语音，只显示文字",
     "xmov": "魔珐星云自带 TTS：音色由魔珐控制台的应用配置与 XMOV_VOICE 决定",
 }
 
@@ -325,6 +350,165 @@ def list_tts_voices() -> TtsVoicesResponse:
         emotion_voices=bool(config.emotion_voices),
         note="" if configured else "未配置参考音频（GPT_SOVITS_REF_AUDIO 或音色表）：将降级为无音频",
     )
+
+
+# =============================================================
+# 数字人凭证（魔珐 appId / appSecret）
+# =============================================================
+#
+# 为什么存后端：三个界面的 origin 不同（控制台 / 桌宠窗是
+# 127.0.0.1:34567，Web 端是 localhost:3000），localStorage 天然不共享，
+# 而「用哪套密钥」必须是三处一致的事实。
+#
+# ⚠️ 这**不是「更安全」**：魔珐 SDK 是客户端渲染（`new XmovAvatar({appSecret})`），
+# 密钥最终必然下发到浏览器。真正的防护是 CORS 只放行回环地址
+# （见 app/config.py 的 cors_origin_regex）——**不要**把 CORS_ORIGINS 设成 "*"，
+# 那等于把这份密钥发给任意网页。
+#
+# 两个形态各存一份（web = 横屏给 Web 端，pet = 竖屏给桌宠窗）：横竖屏是魔珐
+# 控制台创建**应用**时定下的，容器比例必须与应用类型一致。
+
+_AVATAR_CREDENTIAL_FORMS = ("web", "pet")
+
+# 单字段长度上限：appId / appSecret 都是短字符串，给足余量又能挡住明显异常
+_MAX_CREDENTIAL_LENGTH = 512
+
+
+class AvatarCredentialsResponse(BaseModel):
+    """某形态的凭证与来源（前端据此决定能不能起魔珐 SDK）。"""
+
+    form: str = Field(description="形态：web（横屏，Web 端）| pet（竖屏，桌宠窗）")
+    appId: str = Field(default="", description="魔珐 appId（未配置时是空串）")
+    appSecret: str = Field(default="", description="魔珐 appSecret（未配置时是空串）")
+    source: str = Field(description="来源：user（界面填写）| env（部署配置）| none（未配置）")
+    configured: bool = Field(description="是否可用（等价于 source != 'none'）")
+
+
+class AvatarCredentialsPatch(BaseModel):
+    """凭证写入；两个字段都为空串 = 清除该形态的覆盖。"""
+
+    form: str = Field(default="web", description="形态：web | pet")
+    appId: str = Field(default="")
+    appSecret: str = Field(default="")
+
+
+def _credentials_path() -> Path:
+    return Path(get_settings().avatar_credentials_path)
+
+
+def _read_credentials() -> dict[str, dict[str, str]]:
+    """读凭证文件；缺失 / 损坏 / 结构不对一律按「全部未设置」处理。
+
+    与对话偏好同样的容错理由：一个被改坏的 JSON 不该让数字人设置面板起不来
+    ——它只是「填过哪些密钥」，丢了顶多回到部署配置。
+    """
+    path = _credentials_path()
+    if not path.is_file():
+        return {}
+
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        logger.warning("数字人凭证文件读不动，按未配置处理：%s", path)
+        return {}
+
+    if not isinstance(raw, dict):
+        return {}
+
+    stored: dict[str, dict[str, str]] = {}
+    for form in _AVATAR_CREDENTIAL_FORMS:
+        entry = raw.get(form)
+        if not isinstance(entry, dict):
+            continue
+        app_id = str(entry.get("appId") or "").strip()
+        app_secret = str(entry.get("appSecret") or "").strip()
+        # 半份凭证视为没有：两个都齐才算这一形态配好
+        if app_id and app_secret:
+            stored[form] = {"appId": app_id, "appSecret": app_secret}
+    return stored
+
+
+def _write_credentials(values: dict[str, dict[str, str]]) -> None:
+    """原子写：先写临时文件再 rename，避免留下半截 JSON。"""
+    path = _credentials_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(
+        json.dumps(values, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(path)
+
+
+def _require_form(form: str) -> str:
+    value = (form or "").strip().lower()
+    if value not in _AVATAR_CREDENTIAL_FORMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"未知形态：{form}（可选 {' / '.join(_AVATAR_CREDENTIAL_FORMS)}）",
+        )
+    return value
+
+
+def _resolve_credentials(form: str) -> AvatarCredentialsResponse:
+    """按「界面填写 > 部署配置」解析某形态的凭证。
+
+    .env 的 XMOV_APP_ID / XMOV_SECRET 是**两个形态共用**的兜底：只建了一个应用
+    的部署仍能跑起来（比例可能不对，但不至于不能用）。
+    """
+    stored = _read_credentials().get(form)
+    if stored:
+        return AvatarCredentialsResponse(
+            form=form,
+            appId=stored["appId"],
+            appSecret=stored["appSecret"],
+            source="user",
+            configured=True,
+        )
+
+    settings = get_settings()
+    app_id = (settings.xmov_app_id or "").strip()
+    app_secret = (settings.xmov_secret or "").strip()
+    if app_id and app_secret:
+        return AvatarCredentialsResponse(
+            form=form, appId=app_id, appSecret=app_secret, source="env", configured=True
+        )
+
+    return AvatarCredentialsResponse(form=form, source="none", configured=False)
+
+
+@router.get("/avatar/credentials", response_model=AvatarCredentialsResponse)
+def get_avatar_credentials(form: str = "web") -> AvatarCredentialsResponse:
+    """查询某形态的魔珐凭证（界面填写优先，否则回落部署配置）。"""
+    return _resolve_credentials(_require_form(form))
+
+
+@router.put("/avatar/credentials", response_model=AvatarCredentialsResponse)
+def put_avatar_credentials(payload: AvatarCredentialsPatch) -> AvatarCredentialsResponse:
+    """写入 / 清除某形态的魔珐凭证（控制台 / Web 端 / 桌宠窗共用同一份）。"""
+    form = _require_form(payload.form)
+    app_id = payload.appId.strip()
+    app_secret = payload.appSecret.strip()
+
+    if len(app_id) > _MAX_CREDENTIAL_LENGTH or len(app_secret) > _MAX_CREDENTIAL_LENGTH:
+        raise HTTPException(
+            status_code=400, detail=f"凭证过长（上限 {_MAX_CREDENTIAL_LENGTH} 字符）"
+        )
+
+    # 半份凭证必须拒掉，而且**不得落盘**：只写一半会让下一次读到
+    # 「配了却用不了」的状态，用户还以为保存成功了
+    if bool(app_id) != bool(app_secret):
+        raise HTTPException(
+            status_code=400, detail="appId 与 appSecret 必须同时填写或同时留空（清除）"
+        )
+
+    stored = _read_credentials()
+    if app_id:
+        stored[form] = {"appId": app_id, "appSecret": app_secret}
+    else:
+        stored.pop(form, None)
+    _write_credentials(stored)
+
+    return _resolve_credentials(form)
 
 
 @router.get("/audio/{filename}")

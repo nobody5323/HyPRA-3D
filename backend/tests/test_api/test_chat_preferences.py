@@ -21,7 +21,17 @@ from app.main import app
 client = TestClient(app)
 BASE = "/chat/preferences"
 
-UNSET = {"persona_id": "", "style_id": "", "preset_id": "", "st_preset_id": ""}
+UNSET = {
+    "persona_id": "",
+    "style_id": "",
+    "preset_id": "",
+    "st_preset_id": "",
+    # 叙事框架（jailbreak）：空串 = 跟随部署默认（出厂为关闭）。
+    # 「未设置」与「用户显式关掉（"none"）」是两种状态，这里断言的是前者。
+    "jailbreak_id": "",
+    "mode": "",
+    "user_name": "",
+}
 
 
 @pytest.fixture(autouse=True)
@@ -91,6 +101,43 @@ def test_overlong_value_is_rejected():
     assert "过长" in response.json()["detail"]
 
 
+# ---------- 用户称呼（`{{user_name}}`）----------
+
+
+def test_user_name_round_trip():
+    """用户称呼存在同一份偏好里（三端共享，改一次处处生效）。"""
+    response = client.put(BASE, json={"user_name": "阿岸"})
+
+    assert response.status_code == 200
+    assert response.json()["user_name"] == "阿岸"
+    assert client.get(BASE).json()["user_name"] == "阿岸"
+
+
+def test_user_name_is_trimmed():
+    client.put(BASE, json={"user_name": "  小满  "})
+
+    assert client.get(BASE).json()["user_name"] == "小满"
+
+
+def test_empty_user_name_clears_it():
+    """空串 = 清除 → 界面回落到默认「朋友」（而不是把称呼改成空字符串）。"""
+    client.put(BASE, json={"user_name": "阿岸"})
+
+    client.put(BASE, json={"user_name": ""})
+
+    assert client.get(BASE).json()["user_name"] == ""
+
+
+def test_user_name_has_its_own_shorter_limit():
+    """称呼比其它偏好更严：它是印在提示词里的一句称呼，不该塞进一段小作文。"""
+    assert client.put(BASE, json={"user_name": "x" * 24}).status_code == 200
+
+    response = client.put(BASE, json={"user_name": "x" * 25})
+
+    assert response.status_code == 400
+    assert "过长" in response.json()["detail"]
+
+
 def test_corrupted_file_falls_back_to_unset(isolated_preferences):
     isolated_preferences.parent.mkdir(parents=True, exist_ok=True)
     isolated_preferences.write_text("{ 这不是 JSON", encoding="utf-8")
@@ -104,3 +151,48 @@ def test_non_object_file_falls_back_to_unset(isolated_preferences):
     isolated_preferences.write_text('["unexpected"]', encoding="utf-8")
 
     assert client.get(BASE).json() == UNSET
+
+
+# =============================================================
+# 交互模式（AGENTS.md §8.1）
+# =============================================================
+
+
+def test_mode_round_trip(isolated_preferences):
+    """模式是三个界面共享的选择：Web / 控制台 / 桌宠窗都读它。"""
+    response = client.put(BASE, json={"mode": "tavern"})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == "tavern"
+    assert client.get(BASE).json()["mode"] == "tavern"
+
+
+def test_unknown_mode_is_rejected():
+    """★ 写错的模式必须**拒绝**，不能静默回落成桌宠模式。
+
+    回落的话用户看到的是「切了酒馆模式却没生效」——一个没有报错、也没生效的开关，
+    比直接报错难查得多。
+    """
+    response = client.put(BASE, json={"mode": "酒馆"})
+
+    assert response.status_code == 400
+    assert "未知交互模式" in response.json()["detail"]
+    assert client.get(BASE).json()["mode"] == ""
+
+
+def test_empty_mode_clears_it():
+    """空串 = 清除：回到「没选过，由后端按酒馆预设推断」。"""
+    client.put(BASE, json={"mode": "tavern"})
+
+    response = client.put(BASE, json={"mode": ""})
+
+    assert response.status_code == 200
+    assert response.json()["mode"] == ""
+
+
+def test_mode_update_keeps_other_fields():
+    client.put(BASE, json={"style_id": "modern-conversational"})
+
+    client.put(BASE, json={"mode": "tavern"})
+
+    assert client.get(BASE).json()["style_id"] == "modern-conversational"

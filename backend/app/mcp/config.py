@@ -31,21 +31,48 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
-#: 默认清单位置：backend/ 目录下（本文件位于 backend/app/mcp/config.py）
-_BACKEND_DIR = Path(__file__).resolve().parent.parent.parent
-_DEFAULT_SERVERS_FILE = _BACKEND_DIR / "mcp_servers.json"
+from app.paths import is_frozen, resource_path, resource_root
+
+
+def default_servers_file() -> Path:
+    """默认清单位置：随程序分发的 mcp_servers.json。"""
+    return resource_path("mcp_servers.json")
 
 
 def expand_path_placeholders(value: str) -> str:
     """展开路径占位符（让同一份清单跨平台/跨容器可用）。
 
     - `${PYTHON}` → 当前解释器（venv 激活与否都正确，Docker 内同样适用）
-    - `${BACKEND_DIR}` → backend 目录的绝对路径
+    - `${BACKEND_DIR}` → 只读资源根的绝对路径
+      （开发形态是 backend/；打包形态是解包目录，两者都含 mcp_servers/）
     """
     return (
         value.replace("${PYTHON}", sys.executable)
-        .replace("${BACKEND_DIR}", str(_BACKEND_DIR))
+        .replace("${BACKEND_DIR}", str(resource_root()))
     )
+
+
+#: 打包入口的自举参数（必须与 backend/run_backend.py 保持一致）
+MCP_SERVER_FLAG = "--mcp-server"
+
+
+def _adjust_args_for_frozen(command: str, args: list[str]) -> list[str]:
+    """打包形态下，把「用本 exe 跑 .py 脚本」改成自举调用。
+
+    frozen 时 `${PYTHON}` 展开成 backend.exe，而 stdio 传输是直接
+    `spawn(command, args)` —— backend.exe 不认识 .py 路径，会被当成
+    uvicorn 启动，造成端口冲突与无限自我重启。
+
+    改成 `backend.exe --mcp-server <script>`，由打包入口（run_backend.py）
+    用 runpy 执行该脚本。开发形态（${PYTHON} = python.exe）不受影响。
+    """
+    if not is_frozen() or command != sys.executable:
+        return args
+
+    if not args or not args[0].lower().endswith(".py"):
+        return args
+
+    return [MCP_SERVER_FLAG, *args]
 
 
 @dataclass
@@ -88,7 +115,10 @@ def _entry_to_config(name: str, raw: dict) -> McpServerConfig:
         name=name,
         transport=transport,
         command=command,
-        args=[expand_path_placeholders(str(a)) for a in (raw.get("args") or [])],
+        args=_adjust_args_for_frozen(
+            command,
+            [expand_path_placeholders(str(a)) for a in (raw.get("args") or [])],
+        ),
         env={str(k): str(v) for k, v in (raw.get("env") or {}).items()},
         url=url,
         enabled=bool(raw.get("enabled", True)),
@@ -97,7 +127,7 @@ def _entry_to_config(name: str, raw: dict) -> McpServerConfig:
 
 def load_mcp_servers(file_path: str | Path | None = None) -> list[McpServerConfig]:
     """读取服务器清单；文件不存在时返回空列表（视为「未配置 MCP」）。"""
-    path = Path(file_path) if file_path else _DEFAULT_SERVERS_FILE
+    path = Path(file_path) if file_path else default_servers_file()
     if not path.exists():
         return []
 

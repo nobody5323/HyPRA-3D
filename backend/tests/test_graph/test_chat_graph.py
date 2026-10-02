@@ -11,10 +11,13 @@ from app.llm.mock import MockLLMProvider
 from app.memory.cold.sqlite_store import SqliteColdStore
 from app.memory.knowledge.inmemory_store import InMemoryKnowledgeStore
 from app.memory.knowledge.retriever import KnowledgeRetriever
+from app.memory.knowledge.scopes import TAVERN_SCOPE
 from app.memory.store import MemoryStore
 from app.memory.warm.inmemory_store import InMemoryWarmStore
+from app.prompts.assemble import DepthInjection
 from app.prompts.persona.loader import load_builtin_presets
 from app.rag.prompt_manager import PromptManager
+from app.session.mode import MODE_COMPANION, MODE_TAVERN
 from app.worldbook.loader import load_builtin_entries
 from app.worldbook.models import WorldBookEntry
 
@@ -65,6 +68,33 @@ def test_load_persona_replaces_state_vars(nodes: ChatNodes) -> None:
     assert "小林" in out["persona_text"]
     assert "低落" in out["persona_text"]
     assert "{{" not in out["persona_text"]
+
+
+def test_load_persona_fills_char_name_from_the_persona(nodes: ChatNodes) -> None:
+    """`{{char_name}}` 取**本轮人设**的角色名，不用注册表的兜底值。
+
+    酒馆角色卡把这条链看重到不行：正文里的 `{{char}}` 会被映射层改写成
+    `{{char_name}}`，拿兜底值渲染就会把角色在提示词里叫成「角色」。
+    """
+    persona = nodes.presets[PERSONA_ID]
+    nodes.presets[PERSONA_ID] = persona.model_copy(
+        update={"prompt": "你是{{char_name}}，{{user_name}} 的朋友。", "name": "苏澄"}
+    )
+
+    out = nodes.load_persona(_state())
+
+    assert "你是苏澄" in out["persona_text"]
+    assert out["warnings"] == []  # 已提供，不该再报「用默认值」
+
+
+def test_state_var_char_name_wins_over_persona_default(nodes: ChatNodes) -> None:
+    """运行时显式传入的 `char_name` 优先（与 `user_name` 同一套优先级）。"""
+    persona = nodes.presets[PERSONA_ID]
+    nodes.presets[PERSONA_ID] = persona.model_copy(update={"prompt": "我是{{char_name}}。"})
+
+    out = nodes.load_persona(_state(state_vars={"char_name": "临时改名"}))
+
+    assert "我是临时改名。" in out["persona_text"]
 
 
 def test_load_persona_appends_background_after_prompt(nodes: ChatNodes) -> None:
@@ -131,6 +161,79 @@ def test_worldbook_recall_no_hit(nodes: ChatNodes) -> None:
     assert out["worldbook_text"] == ""
 
 
+# ---------- 世界书分档（AGENTS.md §8.4）----------
+
+
+def _worldbook_nodes(memory: MemoryStore, *entries: WorldBookEntry) -> ChatNodes:
+    """只装给定世界书条目的节点（内置条目会干扰「命中哪几条」的断言）。"""
+    return ChatNodes(
+        presets=load_builtin_presets(),
+        entries=list(entries),
+        memory_store=memory,
+        llm_provider=MockLLMProvider(),
+        prompt_manager=PromptManager(),
+    )
+
+
+def _placed(**overrides) -> WorldBookEntry:
+    base = {
+        "id": "demo",
+        "title": "演示",
+        "content": "演示正文",
+        "keys": ["触发"],
+        "position": "after_char",
+    }
+    base.update(overrides)
+    return WorldBookEntry.model_validate(base)
+
+
+def test_worldbook_recall_splits_by_position(memory: MemoryStore) -> None:
+    """★ 三种档位各归各的 state 键：人设前 / 人设后 / 深度注入。"""
+    nodes = _worldbook_nodes(
+        memory,
+        _placed(id="before", title="前", content="人设前的设定", position="before_char"),
+        _placed(id="after", title="后", content="人设后的补充"),
+        _placed(
+            id="deep",
+            title="深",
+            content="靠近输入",
+            position="at_depth",
+            depth=1,
+            role="user",
+        ),
+    )
+
+    out = nodes.worldbook_recall(_state(user_input="触发一下"))
+
+    assert out["worldbook_before_text"] == "[前]\n人设前的设定"
+    assert out["worldbook_text"] == "[后]\n人设后的补充"
+    assert [(i.depth, i.role, i.text) for i in out["worldbook_depth"]] == [
+        (1, "user", "[深]\n靠近输入")
+    ]
+
+
+def test_assemble_prompt_places_before_block_ahead_of_persona(memory: MemoryStore) -> None:
+    """★ 端到端：`[背景设定]` 在 `[角色人设]` 之前，at_depth 进消息而非 system。"""
+    nodes = _worldbook_nodes(memory)
+    state = {
+        **_state(),
+        "persona_text": "人设正文",
+        "worldbook_before_text": "人设前的设定",
+        "worldbook_text": "人设后的补充",
+        "worldbook_depth": [DepthInjection(depth=1, text="靠近输入的设定")],
+    }
+
+    out = nodes.assemble_prompt(state)
+
+    prompt = out["system_prompt"]
+    assert prompt.index("[背景设定]") < prompt.index("[角色人设]")
+    assert prompt.index("[角色人设]") < prompt.index("[场景补充]")
+    # 深度注入在**消息**里，紧贴在用户输入之前
+    assert "靠近输入的设定" not in prompt
+    assert out["messages"][-2]["content"] == "靠近输入的设定"
+    assert out["messages"][-1]["content"] == state["user_input"]
+
+
 def test_memory_recall_empty_initially(nodes: ChatNodes) -> None:
     out = nodes.memory_recall(_state())
     assert out["warm_lines"] == []
@@ -191,6 +294,67 @@ def test_graph_end_to_end(graph) -> None:
     assert "小林" in result["persona_text"]
     # 记忆写入已移出图（改为路由层后台执行），因此图输出中不含 writes
     assert "writes" not in result
+
+
+# ---------- 耗时埋点（排查「回复慢」的观测面）----------
+
+
+def test_graph_records_per_node_timings(graph) -> None:
+    """★ 每个节点都要留下耗时，否则「慢在哪」只能靠猜。"""
+    result = graph.invoke(_state())
+
+    timings = result["timings"]
+    assert set(NODE_SEQUENCE) <= set(timings)
+    assert all(value >= 0 for value in timings.values())
+
+
+def test_generate_reply_reports_llm_rounds(nodes: ChatNodes) -> None:
+    """LLM 调用次数必须能被看到——它是「回复为什么慢」最直接的解释量。"""
+    out = nodes.generate_reply(
+        {
+            **_state(),
+            "messages": [{"role": "user", "content": "我最近总是失眠"}],
+        }
+    )
+
+    assert out["llm_rounds"] >= 1
+
+
+def test_emotion_probe_omits_system_prompt_and_caps_tokens() -> None:
+    """★ 强制补调情绪只发极简消息、且压小额度。
+
+    原实现会把整份 system prompt（人设 + 世界书 + 记忆 + 技能清单，数千 token）
+    重发一遍，并要求模型再写一遍完整回复——而那份回复随后会被已生成正文覆盖，
+    等于白付一次完整的 prefill + decode。
+    """
+    from app.graph.nodes import (
+        _EMOTION_PROBE_MAX_TOKENS,
+        _emotion_probe_kwargs,
+        _emotion_probe_messages,
+    )
+
+    state = {
+        **_state(),
+        "messages": [
+            {"role": "system", "content": "很长的人设与记忆" * 200},
+            {"role": "user", "content": "我最近总是失眠"},
+        ],
+    }
+    messages = _emotion_probe_messages(state, "我在这儿，慢慢说。")
+
+    assert len(messages) == 1
+    assert messages[0].role == "user"
+    assert all(m.role != "system" for m in messages)
+    assert "很长的人设与记忆" not in messages[0].content
+    assert "我最近总是失眠" in messages[0].content
+
+    capped = _emotion_probe_kwargs({"max_tokens": 3000, "temperature": 0.8})
+    assert capped["max_tokens"] == _EMOTION_PROBE_MAX_TOKENS
+    assert capped["temperature"] == 0.8  # 采样参数沿用本轮
+
+    # 开了思考的模型不动额度：思考 token 会先吃掉预算，压小会让 JSON 出不来
+    thinking = {"max_tokens": 3000, "enable_thinking": True}
+    assert _emotion_probe_kwargs(thinking)["max_tokens"] == 3000
 
 
 def test_knowledge_recall_without_retriever_is_empty(nodes: ChatNodes) -> None:
@@ -300,3 +464,56 @@ def test_graph_warnings_accumulate(graph) -> None:
     result = graph.invoke({**_state(), "state_vars": {}})
     assert result["warnings"]  # current_mood 缺失告警
     assert result["reply"]
+
+
+# =============================================================
+# 知识召回：酒馆来源只在酒馆聊天模式可见（AGENTS.md §8.2）
+# =============================================================
+
+
+def _nodes_with_knowledge(memory: MemoryStore, store) -> ChatNodes:
+    return ChatNodes(
+        presets=load_builtin_presets(),
+        entries=load_builtin_entries(),
+        memory_store=memory,
+        knowledge=KnowledgeRetriever(store, top_k=3, candidate_n=10),
+        llm_provider=MockLLMProvider(),
+        prompt_manager=PromptManager(),
+    )
+
+
+def _tavern_store() -> InMemoryKnowledgeStore:
+    store = InMemoryKnowledgeStore()
+    store.add_document(TAVERN_SCOPE, title="酒馆世界书", chunks=["某作品的设定：她住在城南。"])
+    return store
+
+
+def test_knowledge_recall_hides_tavern_worldbook_in_companion_mode(memory) -> None:
+    """★ 桌宠模式查不到酒馆世界书——内置人设不该「知道」别的作品的设定。"""
+    nodes = _nodes_with_knowledge(memory, _tavern_store())
+
+    result = nodes.knowledge_recall(_state(mode=MODE_COMPANION))
+
+    assert result["knowledge_lines"] == []
+
+
+def test_knowledge_recall_sees_tavern_worldbook_in_tavern_mode(memory) -> None:
+    """★ 酒馆模式查得到——否则这条链路就是白同步。"""
+    nodes = _nodes_with_knowledge(memory, _tavern_store())
+
+    result = nodes.knowledge_recall(
+        _state(mode=MODE_TAVERN, user_input="她住在城南还是城北")
+    )
+
+    assert result["knowledge_lines"]
+    assert "城南" in result["knowledge_lines"][0]
+
+
+def test_knowledge_recall_defaults_to_companion_mode(memory) -> None:
+    """state 里没带 `mode`（老调用方 / 手搓 state）时按桌宠处理：宁可少注入。
+
+    这是刻意的 fail-safe：酒馆内容漏进桌宠会话，比桌宠少召回一条知识更糟。
+    """
+    nodes = _nodes_with_knowledge(memory, _tavern_store())
+
+    assert nodes.knowledge_recall(_state())["knowledge_lines"] == []

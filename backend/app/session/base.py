@@ -17,6 +17,7 @@ from app.session.context import (
     SessionContext,
     SessionSummary,
 )
+from app.session.mode import MODE_COMPANION
 
 
 class SessionStore(ABC):
@@ -27,12 +28,16 @@ class SessionStore(ABC):
         self,
         persona_id: str,
         *,
+        mode: str = MODE_COMPANION,
         user_name: str = "朋友",
         state_vars: dict[str, str] | None = None,
         session_id: str | None = None,
         max_history_turns: int = DEFAULT_MAX_HISTORY_TURNS,
     ) -> SessionContext:
-        """创建会话；session_id 缺省时自动生成，重复则抛 ValueError。"""
+        """创建会话；session_id 缺省时自动生成，重复则抛 ValueError。
+
+        `mode` 见 `app/session/mode.py`：会话级属性，创建后不再变（切模式 = 新会话）。
+        """
 
     @abstractmethod
     def get(self, session_id: str) -> SessionContext | None:
@@ -73,4 +78,15 @@ class SessionStore(ABC):
 
         会话不存在时抛 KeyError（路由层据此返回 404，而不是静默成功）。
         归属校验（不属于该陪伴对象不得删）由路由层负责。
+        """
+
+    @abstractmethod
+    def delete_sessions(self, persona_id: str) -> tuple[int, int]:
+        """删除某个陪伴对象的**全部**会话，返回 (会话数, 消息数)。
+
+        为什么要有它：会话是「每轮对话都可能新建」的对象，试聊很容易积累出
+        几十个同名会话（标题就是首条用户消息，看着一模一样）。一条条删不现实。
+
+        该角色没有任何会话时返回 (0, 0)——不是错误：清空一个已经空的列表
+        是幂等操作，调用方不需要先查一遍。
         """

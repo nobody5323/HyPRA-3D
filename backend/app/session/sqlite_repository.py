@@ -3,7 +3,7 @@
 存储位置默认与冷层同一库文件（`backend/data/memory.db`，已在 gitignore），
 表名独立、不复用记忆表：
 
-    chat_sessions  会话元信息（人设、称呼、状态变量、窗口大小、时间）
+    chat_sessions  会话元信息（人设、模式、称呼、状态变量、窗口大小、时间）
     chat_turns     逐条消息 —— **原始留档，不裁剪**
 
 「窗口裁剪」与「原始留档」分开是刻意的：
@@ -30,6 +30,7 @@ from app.session.context import (
     SessionSummary,
     build_session_title,
 )
+from app.session.mode import MODE_COMPANION, normalize_mode
 
 # 与冷层一致的紧凑时间格式（datetime.fromisoformat 可直接解析）
 _TS_FMT = "%Y-%m-%dT%H:%M:%S.%f"
@@ -42,6 +43,7 @@ _SCHEMA = (
     CREATE TABLE IF NOT EXISTS chat_sessions (
         session_id        TEXT PRIMARY KEY,
         persona_id        TEXT NOT NULL,
+        mode              TEXT NOT NULL DEFAULT 'companion',
         user_name         TEXT NOT NULL DEFAULT '朋友',
         state_vars        TEXT NOT NULL DEFAULT '{}',
         max_history_turns INTEGER NOT NULL DEFAULT 20,
@@ -61,6 +63,23 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS idx_chat_turns_session ON chat_turns(session_id, id)",
     "CREATE INDEX IF NOT EXISTS idx_chat_sessions_persona ON chat_sessions(persona_id, updated_at)",
 )
+
+#: 存量库的增量迁移，每项 `(表, 列, 列定义)`。
+#:
+#: `CREATE TABLE IF NOT EXISTS` **不会**给已存在的老表补列，而 `data/memory.db`
+#: 是长期留存的（用户的会话不能因为加个字段就丢），所以新增列必须在这里补一次。
+#: 老会话补上默认值 `companion` 是对的：加 `mode` 之前的行为就是桌宠对话模式。
+_MIGRATIONS = (
+    ("chat_sessions", "mode", "TEXT NOT NULL DEFAULT 'companion'"),
+)
+
+
+def _apply_migrations(conn: sqlite3.Connection) -> None:
+    """给存量表补上缺失的列（幂等：已存在则跳过）。"""
+    for table, column, ddl in _MIGRATIONS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _now() -> str:
@@ -95,6 +114,7 @@ class SqliteSessionRepository(SessionStore):
             if not self._schema_ready:
                 for statement in _SCHEMA:
                     conn.execute(statement)
+                _apply_migrations(conn)
                 self._schema_ready = True
             yield conn
             conn.commit()
@@ -106,6 +126,8 @@ class SqliteSessionRepository(SessionStore):
         return SessionContext(
             session_id=row["session_id"],
             persona_id=row["persona_id"],
+            # 迁移保证列一定存在；仍过一道 normalize，手改过的值不让它炸
+            mode=normalize_mode(row["mode"]),
             user_name=row["user_name"],
             state_vars=json.loads(row["state_vars"] or "{}"),
             history=history,
@@ -144,6 +166,7 @@ class SqliteSessionRepository(SessionStore):
         self,
         persona_id: str,
         *,
+        mode: str = MODE_COMPANION,
         user_name: str = "朋友",
         state_vars: dict[str, str] | None = None,
         session_id: str | None = None,
@@ -155,12 +178,13 @@ class SqliteSessionRepository(SessionStore):
             try:
                 conn.execute(
                     "INSERT INTO chat_sessions"
-                    " (session_id, persona_id, user_name, state_vars,"
+                    " (session_id, persona_id, mode, user_name, state_vars,"
                     "  max_history_turns, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         sid,
                         persona_id,
+                        normalize_mode(mode),
                         user_name,
                         json.dumps(dict(state_vars or {}), ensure_ascii=False),
                         max_history_turns,
@@ -274,3 +298,28 @@ class SqliteSessionRepository(SessionStore):
             removed = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
             conn.execute("DELETE FROM chat_sessions WHERE session_id = ?", (session_id,))
         return removed
+
+    def delete_sessions(self, persona_id: str) -> tuple[int, int]:
+        """删除某个陪伴对象的全部会话（**一个事务**），返回 (会话数, 消息数)。
+
+        先查出该角色的全部 session_id，再分两条 IN 语句删消息与会话：
+        顺着 `persona_id` 做子查询也能写，但显示改写时容易漏改一处，
+        把「删某角色」变成「删全部」。
+        """
+        with self._session() as conn:
+            rows = conn.execute(
+                "SELECT session_id FROM chat_sessions WHERE persona_id = ?", (persona_id,)
+            ).fetchall()
+            session_ids = [row["session_id"] for row in rows]
+            if not session_ids:
+                return 0, 0
+
+            placeholders = ",".join("?" * len(session_ids))
+            cursor = conn.execute(
+                f"DELETE FROM chat_turns WHERE session_id IN ({placeholders})", session_ids
+            )
+            removed_turns = cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+            conn.execute(
+                f"DELETE FROM chat_sessions WHERE session_id IN ({placeholders})", session_ids
+            )
+        return len(session_ids), removed_turns
