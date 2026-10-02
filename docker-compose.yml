@@ -9,7 +9,9 @@
 services:
   # ---- 本地向量库（温层，评审零配置、无需 key）----
   qdrant:
-    image: qdrant/qdrant:v1.12.4
+    # 版本须与 backend/pyproject.toml 的 qdrant-client 对齐：
+    # 官方要求 client 与 server 的 minor 差 ≤ 1，否则 delete / query 等调用会报 500
+    image: qdrant/qdrant:v1.19.1
     container_name: hypra-qdrant
     restart: unless-stopped
     ports:

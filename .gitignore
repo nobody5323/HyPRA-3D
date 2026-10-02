@@ -40,10 +40,32 @@ desktop/public/vendor/cubism/
 *.sqlite
 qdrant_storage/
 backend/data/
+# 根目录 data/：开发形态下运行时可能落在这里（如 data/logs/），
+# 属可写数据，不入库（仅锚定仓库根，不影响 backend/data）
+/data/
 media/
 *.mp4
 *.mp3
 *.wav
+
+# ===== 感知层：行踪数据（隐私红线，绝不可入库）=====
+# `timeline.py` 经 `data_path("perception")` 落在 `data_root()/perception`，
+# 开发形态下即 `backend/perception/`（**不是** backend/data/，见 §4.9）。
+# 内容是「几点到几点在用什么程序」的用户行踪，属个人隐私数据。
+backend/perception/
+
+# ===== 工作区工具数据（非项目产物）=====
+.workbuddy-ai/
+
+# ===== 审查报告（内部分析产物，不入库）=====
+*审查报告*.md
+*优化评估报告*.md
+
+# ===== 感知层：ASR 模型权重（绝不可入库）=====
+# 模型不可自由分发（AGENTS.md §6），且体积达数百 MB。
+# 目录由 `ASR_MODEL_DIR` 决定（默认 <数据目录>/models/whisper），
+# 开发形态下即 backend/models/whisper/。
+backend/models/
 
 # ===== 本地私有资料（自备 SDK/模型包、开发留档、旧备份、生成缓存）=====
 # 与源码无关但需要留在本机的文件统一放这里，保证根目录只出现项目本身

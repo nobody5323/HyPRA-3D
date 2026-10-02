@@ -5,6 +5,7 @@ rem  Thin wrapper: all logic lives in start.ps1 (Chinese help there).
 rem  Default target = backend + desktop console.
 rem  Usage: start.bat [desktop|web|all|backend|frontend|console|docker|check] [-Release]
 rem         start.bat help
+rem  Also starts _local\qdrant\qdrant.exe when .env uses a local Qdrant.
 rem  Bypass affects only this process; it does not change system policy.
 rem  NOTE: keep this file ASCII-only -- cmd parses .bat as ANSI before
 rem        chcp takes effect, so non-ASCII comments become garbage commands.

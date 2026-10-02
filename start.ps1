@@ -48,6 +48,9 @@ $EnvExample   = Join-Path $BackendDir '.env.example'
 $ComposeFile  = Join-Path $Root 'docker-compose.yml'
 $BackendPort  = 8000
 $FrontendPort = 3000
+$QdrantExe    = Join-Path $Root '_local\qdrant\qdrant.exe'
+$QdrantPort   = 6333
+$QdrantHealth = "http://127.0.0.1:$QdrantPort/healthz"
 
 # ============================================================
 #  辅助函数
@@ -70,6 +73,7 @@ function Show-Usage {
     Write-Host ''
     Write-Host '  -Release           桌面端用构建产物启动（先 build 再 start），演示用'
     Write-Host ''
+    Write-Host '  若 backend\.env 用 qdrant 且指向本机，会先拉起 _local\qdrant\qdrant.exe。'
     Write-Host '  每端各占一个窗口，日志分开可见；关掉窗口即停止该端。'
     Write-Host '  桌宠窗与 Web 端不会自动打开——都在「程序控制台 → 模式启动」里选。'
     Write-Host ''
@@ -87,18 +91,24 @@ function Test-PortInUse {
     return [bool]$conn
 }
 
-# 轮询后端 /health：就绪返回 $true，超时返回 $false
-function Wait-BackendReady {
-    param([int]$Port, [int]$TimeoutSeconds = 40)
+# 轮询某个 HTTP 端点：200 视为就绪
+function Wait-HttpReady {
+    param([string]$Url, [int]$TimeoutSeconds = 40)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
         try {
-            $resp = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health" -UseBasicParsing -TimeoutSec 2
+            $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 2
             if ($resp.StatusCode -eq 200) { return $true }
         } catch { }
         Start-Sleep -Milliseconds 700
     }
     return $false
+}
+
+# 轮询后端 /health：就绪返回 $true，超时返回 $false
+function Wait-BackendReady {
+    param([int]$Port, [int]$TimeoutSeconds = 40)
+    return Wait-HttpReady -Url "http://127.0.0.1:$Port/health" -TimeoutSeconds $TimeoutSeconds
 }
 
 # 新开一个 cmd 窗口跑某端（关窗即停该端）
@@ -144,11 +154,41 @@ function Test-Environment {
     return $ok
 }
 
+# 读 backend\.env 里某个键的值（读不到返回空串）。
+# 只用于「要不要起本机 Qdrant」这一个判断，值本身不打印到屏幕——那里可能有 Key。
+function Get-EnvSetting {
+    param([string]$Key)
+    if (-not (Test-Path $EnvFile)) { return '' }
+    foreach ($line in Get-Content -LiteralPath $EnvFile -Encoding UTF8) {
+        $trimmed = $line.Trim()
+        if ($trimmed.Length -eq 0 -or $trimmed.StartsWith('#')) { continue }
+        $eq = $trimmed.IndexOf('=')
+        if ($eq -le 0) { continue }
+        if ($trimmed.Substring(0, $eq).Trim() -ne $Key) { continue }
+        $value = $trimmed.Substring($eq + 1).Trim()
+        # 去掉行内注释（.env 里很常见：`WARM_BACKEND=qdrant   # 本机向量库`）
+        $comment = $value.IndexOf(' #')
+        if ($comment -ge 0) { $value = $value.Substring(0, $comment).Trim() }
+        return $value.Trim('"').Trim("'")
+    }
+    return ''
+}
+
+# 要不要由本脚本拉起本机 Qdrant？
+# 只认「温层用 qdrant 且指向本机回环」这一种情况：云 Qdrant 不归本脚本管，
+# 乱起一个本地实例只会让后端连错地方（而“连错了”比“没起来”难查得多）。
+function Test-NeedsLocalQdrant {
+    if ((Get-EnvSetting 'WARM_BACKEND').ToLowerInvariant() -ne 'qdrant') { return $false }
+    $url = Get-EnvSetting 'QDRANT_URL'
+    if (-not $url) { return $true }   # 空 = 用后端默认的 127.0.0.1:6333
+    return [bool]($url -match '(?i)(127\.0\.0\.1|localhost)(:6333)?')
+}
+
 # ============================================================
 #  目标分派
 # ============================================================
 
-$plan = [ordered]@{ Backend = $false; Frontend = $false; Desktop = $false; Docker = $false; Mode = 'run' }
+$plan = [ordered]@{ Backend = $false; Frontend = $false; Desktop = $false; Docker = $false; Qdrant = $false; Mode = 'run' }
 
 switch ($Target.ToLowerInvariant()) {
     ''         { $plan.Backend = $true; $plan.Desktop = $true }
@@ -171,6 +211,10 @@ switch ($Target.ToLowerInvariant()) {
     }
 }
 
+# Qdrant 只在「后端由本脚本启动」时才管（后端会去连它）——
+# `console` 那种“后端已在别处跑”的目标不碰它，避免两处各起一个实例。
+$plan.Qdrant = $plan.Backend
+
 # ------------------------------------------------------------
 #  check：只自检，不启动
 # ------------------------------------------------------------
@@ -183,9 +227,21 @@ if ($plan.Mode -eq 'check') {
 
     $backendPortText = if (Test-PortInUse $BackendPort) { '已被占用（后端可能已在跑）' } else { '空闲' }
     $frontendPortText = if (Test-PortInUse $FrontendPort) { '已被占用（前端可能已在跑）' } else { '空闲' }
+    $qdrantPortText = if (Test-PortInUse $QdrantPort) { '已被占用（可能已在跑）' } else { '空闲' }
 
     Write-Host "  [i] 后端端口 $BackendPort ：$backendPortText"
     Write-Host "  [i] Web 前端端口 $FrontendPort ：$frontendPortText"
+    Write-Host "  [i] Qdrant 端口 $QdrantPort ：$qdrantPortText"
+
+    if (Test-NeedsLocalQdrant) {
+        if (Test-Path $QdrantExe) {
+            Write-Host '  [OK] 温层用本机 Qdrant，且 _local\qdrant\qdrant.exe 就位'
+        } else {
+            Write-Host '  [!] 温层用本机 Qdrant，但缺 _local\qdrant\qdrant.exe（启动时会提示获取方式）'
+        }
+    } else {
+        Write-Host '  [i] 温层未用本机 Qdrant（memory 或云 Qdrant），本脚本不会拉起本地实例'
+    }
 
     if (Test-Path $ComposeFile) {
         Write-Host '  [OK] docker-compose.yml 存在（评审模式 docker 可用）'
@@ -239,6 +295,25 @@ if ($plan.Docker) {
         }
     } else {
         Write-Host '  [X] 缺少 docker-compose.yml，无法走评审模式'
+    }
+}
+
+if ($plan.Qdrant -and (Test-NeedsLocalQdrant)) {
+    if (Test-PortInUse $QdrantPort) {
+        Write-Host "  [--] Qdrant  端口 $QdrantPort 已被占用，跳过启动（复用已在跑的那个）"
+    } elseif (-not (Test-Path $QdrantExe)) {
+        Write-Host '  [!] 缺少本机 Qdrant：_local\qdrant\qdrant.exe'
+        Write-Host '      温层记忆会连不上（后端仍能启动，语义召回降级）；获取见 docs/deployment.md'
+    } else {
+        # cwd 设为 exe 所在目录：Qdrant 把 storage / snapshots 落在 cwd 下
+        # （与桌面端 serviceManager 同一口径，两边不会各写一份数据）
+        Start-EndWindow "HyPRA-Qdrant :$QdrantPort" (Split-Path $QdrantExe -Parent) 'qdrant.exe'
+        Write-Host "  [OK] Qdrant http://127.0.0.1:$QdrantPort"
+        if (Wait-HttpReady -Url $QdrantHealth -TimeoutSeconds 20) {
+            Write-Host '  [OK] Qdrant 已就绪'
+        } else {
+            Write-Host '  [!] Qdrant 20 秒内未就绪（后端仍会启动，首屏可能提示记忆不可用）'
+        }
     }
 }
 

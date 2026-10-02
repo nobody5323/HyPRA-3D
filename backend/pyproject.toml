@@ -12,7 +12,9 @@ dependencies = [
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
     "python-dotenv>=1.0",
-    "qdrant-client>=1.12",
+    # 与服务端版本对齐（docker-compose.yml 的 qdrant/qdrant 镜像）：
+    # 官方要求 client 与 server 的 minor 差 ≤ 1，否则部分调用会报 500
+    "qdrant-client>=1.19,<1.20",
     "openai>=1.54",
     "langgraph>=1.0",
     "mcp>=1.28,<2",
@@ -29,6 +31,17 @@ dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
     "httpx>=0.27",
+]
+# 感知层：本地语音识别（见 docs/proactive-multimodal.md §4.3）。
+# **刻意不放进主依赖**：它拖进 ctranslate2 / onnxruntime / av 三个原生扩展
+# （实测约 70 MB wheel），而「要不要语音输入」由 ASR_PROVIDER 决定——
+# 不装它，整个对话链路与其余感知能力照常工作。
+#
+# ⚠️ 清华镜像**没有** faster-whisper，装它必须带上官方源：
+#     pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
+#                 --extra-index-url https://pypi.org/simple ".[asr]"
+asr = [
+    "faster-whisper>=1.1",
 ]
 
 [build-system]
