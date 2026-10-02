@@ -11,8 +11,8 @@
  *   关键词、哪个正则、语义相似度与阈值），用户才知道该往哪儿改。
  * - **归属隔离**（scope）：条目可归属到某一个角色，给专属角色写的设定不会串味到
  *   别的角色；`*` 表示对所有角色生效。
- * - **内置条目可停用**：后端把开关写成用户侧的停用偏好（内置 YAML 一字未改），
- *   界面因此既能「停用不想要的设定」，又不会污染包内的原创内容。
+ * - **内置条目可停用或删除**：后端把状态写成用户侧偏好（内置 YAML 一字未改），
+ *   界面因此既能停用不想要的设定，也能从当前工坊删除它。
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -159,7 +159,7 @@ export function WorldBookStudio({
   const [form, setForm] = useState<EntryForm>(() =>
     emptyForm(defaultScope ?? catalog.scope_all),
   );
-  /** 当前选中条目（内置 = 只读，仅可停用） */
+  /** 当前选中条目（内置不可编辑，但可停用或删除） */
   const [current, setCurrent] = useState<StudioWorldBookEntry | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -264,7 +264,7 @@ export function WorldBookStudio({
       setCurrent(null);
       setSelectedId(null);
       setConfirmDelete(false);
-      setStatus(`已删除条目「${result.entry.title}」`);
+      setStatus(`已删除条目「${result.title}」`);
     } catch (exc) {
       setError(messageOf(exc, "删除失败"));
     } finally {
@@ -387,7 +387,7 @@ export function WorldBookStudio({
         )}
         {isBuiltin && (
           <p className="rounded-lg bg-surface-raised px-3 py-2 text-xs text-ink-muted">
-            这是内置条目，正文不可改（可用左侧开关停用它）。
+            这是内置条目，正文不可改。可以用左侧开关停用，也可以从当前创作工坊删除；删除不会修改包内资源。
           </p>
         )}
         {error && (
@@ -415,7 +415,7 @@ export function WorldBookStudio({
                   onChange={(event) => update("title", event.target.value)}
                   disabled={locked}
                   className={INPUT_CLASS}
-                  placeholder="例如：深夜倾听模式"
+                  placeholder="例如：雨夜便利店"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -585,7 +585,7 @@ export function WorldBookStudio({
                 </button>
               )}
 
-              {!isBuiltin && current && !confirmDelete && (
+              {current && !confirmDelete && (
                 <button
                   type="button"
                   onClick={() => setConfirmDelete(true)}
@@ -596,9 +596,9 @@ export function WorldBookStudio({
                 </button>
               )}
 
-              {!isBuiltin && current && confirmDelete && (
+              {current && confirmDelete && (
                 <span className="flex flex-wrap items-center gap-2 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger-text">
-                  删除后这条设定不再注入，确定？
+                  删除后这条设定不再出现在当前工坊与对话里，确定？
                   <button
                     type="button"
                     onClick={() => void remove()}

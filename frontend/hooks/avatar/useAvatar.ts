@@ -3,10 +3,17 @@
 /**
  * 具身状态机 + 语音播报控制器（三种实现，同一接口，可自动降级）。
  *
- * - `useBrowserAvatar`：浏览器原生 TTS（Web Speech API）——零依赖，无密钥可用；
- * - `useXmovAvatar`：魔珐具身驱动 SDK（XmovAvatar）——真实 3D 数字人渲染；
+ * - `useSilentAvatar`：**不出声**（未接入 TTS 时的默认）——对话、字幕、情绪照常，
+ *   只是没有语音；
+ * - `useXmovAvatar`：魔珐具身驱动 SDK（XmovAvatar）——真实 3D 数字人渲染，
+ *   声音由 SDK 自带 TTS 出；
  * - `useServerTtsAvatar`：服务端 TTS（GPT-SoVITS）——**给 Live2D / 静态立绘出真声音**，
- *   拿不到音频时逐句降级为浏览器 TTS（借助上面的 useBrowserAvatar）。
+ *   拿不到音频时**保持静音**（不再回落浏览器语音，见下）。
+ *
+ * ⚠️ 浏览器原生 TTS（Web Speech API）已**整体移除**：
+ * 系统音色与项目人设对不上，默认开启只会让陪伴体验失真，而它又长期作为
+ * 「零依赖兜底」被自动选中——结果就是「没配 TTS 也能出声，但声音不是角色」。
+ * 现在规则很简单：**只有接入 TTS 才出声，否则整轮静音**（`resolveVoiceSource`）。
  *
  * 状态机（赛题明确的评分点）：
  *   idle → listen（用户输入）→ think（等待后端）→ speak（播报）→ idle
@@ -14,7 +21,7 @@
  *                       └──────── interrupt（打断）──────────┘
  *
  * 降级策略（赛题「稳定性与容错」评分点）：
- *   未配置密钥 / SDK 脚本加载失败 / init 失败 → 自动回退浏览器 TTS，并**完整暴露原因**
+ *   未配置密钥 / SDK 脚本加载失败 / init 失败 → 自动回退**静默**，并**完整暴露原因**
  *   （stage/detail 会显示在数字人区域，便于现场排查）。
  */
 
@@ -53,7 +60,7 @@ export interface SpeechChunk {
  * 为什么按「调用时传入」而不是 hook 参数：情绪是本轮对话的**产物**
  * （`useChatSession` 拿到回复后才知道），而 hook 在 `useChatSession` 之前调用，
  * 用 hook 参数会形成循环依赖。只有服务端 TTS 会用它，
- * 浏览器 TTS / 魔珐 SDK 各自有别的情绪通道（SSML 里已含 KA 动作），直接忽略。
+ * 魔珐 SDK 有别的情绪通道（SSML 里已含 KA 动作），直接忽略。
  */
 export interface SpeakContext {
   /** 情绪标签（英文，如 anxious） */
@@ -67,9 +74,15 @@ export interface SpeakContext {
 export interface AvatarController {
   state: AvatarState;
   stateLabel: string;
+  /**
+   * 控制器是否可用（**不是**「有没有声音」）。
+   *
+   * 静默实现同样算可用：`speak` 调用不会出错，只是不出声。
+   * 「有没有声音」看 `provider`（`none` = 没接入 TTS）。
+   */
   ready: boolean;
-  /** 语音来源：browser（浏览器原生）/ xmov（魔珐 SDK 自带）/ server（服务端 TTS） */
-  provider: "browser" | "xmov" | "server";
+  /** 语音来源：none（不出声）/ xmov（魔珐 SDK 自带）/ server（服务端 TTS） */
+  provider: "none" | "xmov" | "server";
   /** 初始化阶段（诊断用） */
   stage: AvatarInitStage;
   /** 阶段详情 / 失败原因（诊断用） */
@@ -85,7 +98,7 @@ export interface AvatarController {
   timeline?: readonly VisemeFrame[] | null;
   /**
    * 播报一段回复。
-   * @param text 纯文本（字幕 / 浏览器 TTS / 服务端 TTS 用）
+   * @param text 纯文本（字幕 / 服务端 TTS 用）
    * @param ssml SSML（魔珐 SDK 用；含 KA 动作指令）
    * @param context 本轮情绪等上下文（仅服务端 TTS 使用，其余实现忽略）
    */
@@ -151,7 +164,7 @@ const SPEAK_TIMEOUT_MAX_MS = 90_000;
  * 播报收尾缓冲（毫秒，仅魔珐 SDK 路径）。
  *
  * voice_end 之后仍可能有极短的尾音/渲染收尾；调用方紧接着就切回待机，
- * 留一点缓冲避免把最后一句的尾巴切掉。浏览器 TTS 由 onend 直接告知播放完毕，不需要。
+ * 留一点缓冲避免把最后一句的尾巴切掉。
  */
 const SPEAK_TAIL_MS = 600;
 
@@ -163,7 +176,7 @@ function speakTimeoutMs(textLength: number): number {
   );
 }
 
-/** 断线自动重连的最大次数（超过后降级为浏览器语音，由用户手动重试） */
+/** 断线自动重连的最大次数（超过后降级为静默，由用户手动重试） */
 const MAX_RECONNECT_ATTEMPTS = 3;
 
 /** 重连退避基数（毫秒）：1s → 2s → 4s */
@@ -173,127 +186,42 @@ const RECONNECT_BASE_MS = 1_000;
 const RECONNECT_MAX_MS = 8_000;
 
 // =============================================================
-// 实现一：浏览器原生 TTS（零依赖，默认）
+// 实现一：不出声（未接入 TTS 时的默认）
 // =============================================================
 
-export function useBrowserAvatar(): AvatarController {
+/**
+ * 静默控制器：**没有任何语音**，只维护具身状态机。
+ *
+ * 什么时候用它：既没走魔珐 SDK、后端也没配好服务端 TTS（`resolveVoiceSource`
+ * 返回 `"none"`）。对话、字幕、情绪、记忆全部照常，只是不播报——
+ * 这正是「默认不使用浏览器语音，只有接入 TTS 才出声」的落点。
+ *
+ * 为什么仍然要实现 speak / speakChunks 而不是让调用方判空：调用方
+ * （`useChatSession`）只认 `AvatarController` 这一个接口。接口保持一致，
+ * 「有没有声音」这件事就只在选择层（`resolveVoiceSource`）决定，
+ * 不会散落成一堆 `if (有没有语音)`。
+ */
+export function useSilentAvatar(): AvatarController {
   const [state, setState] = useState<AvatarState>("idle");
-  const [ready, setReady] = useState(false);
-  const voiceRef = useRef<SpeechSynthesisVoice | null>(null);
-  /**
-   * 播报代次：每次新播报或打断都自增。
-   *
-   * 分段循环必须据此判断「是否已被打断 / 被取代」——**不能用 state 判断**：
-   * 一段正常播完与被打断在 state 上无法区分（两者都会回到 idle）。
-   */
-  const speakGenerationRef = useRef(0);
-  /** 组件是否已卸载：卸载后分段循环必须停（否则音频会在卸载后继续出声） */
-  const mountedRef = useRef(false);
 
-  useEffect(() => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-    mountedRef.current = true;
-    const pickVoice = () => {
-      const voices = window.speechSynthesis.getVoices();
-      voiceRef.current =
-        voices.find((v) => /zh/i.test(v.lang) && /female|Xiaoxiao|Huihui/i.test(v.name)) ??
-        voices.find((v) => /zh/i.test(v.lang)) ??
-        null;
-    };
-    pickVoice();
-    // ready 表示「浏览器 TTS 可用」，与是否匹配到中文音色无关（否则语义失真）
-    setReady(true);
-    window.speechSynthesis.onvoiceschanged = pickVoice;
-    return () => {
-      mountedRef.current = false;
-      speakGenerationRef.current += 1; // 作废进行中的分段循环
-      // 清理挂在全局单例上的回调：否则组件卸载后仍会被浏览器调用
-      if (window.speechSynthesis.onvoiceschanged === pickVoice) {
-        window.speechSynthesis.onvoiceschanged = null;
-      }
-      window.speechSynthesis?.cancel();
-    };
-  }, []);
-
-  /**
-   * 播一段并等它结束（**不含** cancel）——整段播报与分段播报共用。
-   */
-  const speakUtterance = useCallback(async (text: string) => {
-    if (typeof window === "undefined" || !("speechSynthesis" in window) || !text.trim()) return;
-
-    // 超时兜底：onend / onerror 在部分浏览器上可能不触发，
-    // 否则 await 会永久挂起，调用方永远不回到 idle
-    const timeoutMs = speakTimeoutMs(text.length);
-    await new Promise<void>((resolve) => {
-      let settled = false;
-      let timer: ReturnType<typeof setTimeout> | undefined;
-      const finish = () => {
-        if (settled) return;
-        settled = true;
-        if (timer) clearTimeout(timer);
-        resolve();
-      };
-      timer = setTimeout(() => {
-        console.warn(`[HyPRA][avatar] 浏览器 TTS 未收到结束事件，${timeoutMs}ms 后按超时收尾`);
-        finish();
-      }, timeoutMs);
-
-      const utterance = new SpeechSynthesisUtterance(text);
-      if (voiceRef.current) utterance.voice = voiceRef.current;
-      utterance.rate = 0.95;
-      utterance.onend = finish;
-      utterance.onerror = finish;
-      window.speechSynthesis.speak(utterance);
-    });
-  }, []);
-
-  const speak = useCallback(
-    async (text: string) => {
-      if (typeof window === "undefined" || !("speechSynthesis" in window) || !text.trim()) return;
-      speakGenerationRef.current += 1; // 抢占：作废进行中的分段循环
-      window.speechSynthesis.cancel();
-      await speakUtterance(text);
-    },
-    [speakUtterance],
-  );
-
-  /**
-   * 分段播报（浏览器原生 TTS）。
-   *
-   * 逐段朗读并等待段结束（使字幕能随段落推进）；浏览器队列本身会衔接，
-   * 不需要 SDK 那样的 interactive_idle 过渡。
-   */
+  /** 静默：立即返回（调用方据此把状态打回 idle） */
+  const speak = useCallback(async () => {}, []);
+  /** 静默：逐段推进字幕，但不出声（无音频，段间也不需要等待） */
   const speakChunks = useCallback(
     async (chunks: SpeechChunk[], onChunk?: (index: number) => void) => {
-      if (typeof window === "undefined" || !("speechSynthesis" in window)) return;
-      const generation = ++speakGenerationRef.current;
-      window.speechSynthesis.cancel();
-      for (let index = 0; index < chunks.length; index += 1) {
-        // 已被打断 / 被新播报取代 / 组件已卸载 → 停止后续分段。
-        // 只挡住字幕不够：循环本身必须停下，否则打断后语音会继续念下去。
-        if (!mountedRef.current || generation !== speakGenerationRef.current) return;
-        onChunk?.(index);
-        await speakUtterance(chunks[index].text);
-      }
+      for (let index = 0; index < chunks.length; index += 1) onChunk?.(index);
     },
-    [speakUtterance],
+    [],
   );
-
-  const interrupt = useCallback(() => {
-    speakGenerationRef.current += 1; // 作废分段循环
-    if (typeof window !== "undefined" && "speechSynthesis" in window) {
-      window.speechSynthesis.cancel();
-    }
-    setState("idle");
-  }, []);
+  const interrupt = useCallback(() => setState("idle"), []);
 
   return {
     state,
     stateLabel: AVATAR_STATE_LABELS[state],
-    ready,
-    provider: "browser",
-    stage: "ready",
-    detail: "",
+    ready: true, // 接口可用（不出声是 provider="none" 的表达，不是「不可用」）
+    provider: "none",
+    stage: "unconfigured",
+    detail: "未接入 TTS：本轮只显示文字，不播报语音",
     setState,
     speak,
     speakChunks,
@@ -314,7 +242,7 @@ interface UseXmovOptions {
   revision?: number;
   /** 渲染容器 ref（优先使用，避免选择器解析问题） */
   containerRef?: RefObject<HTMLElement | null>;
-  /** 不可用时回调（调用方据此回退浏览器实现） */
+  /** 不可用时回调（调用方据此回退静默实现） */
   onUnavailable?: (reason: string) => void;
 }
 
@@ -589,7 +517,7 @@ export function useXmovAvatar(
           if (finished) {
             avatar?.interactiveidle?.(); // SDK 公开方法（小写无下划线）
             updateState("idle");
-            // 播报结束 → resolve speak()，使 xmov 与浏览器 TTS 的 await 语义一致
+            // 播报结束 → resolve speak()，使 xmov 与另两个实现的 await 语义一致
             finishSpeakRef.current?.();
           }
         };
@@ -599,14 +527,14 @@ export function useXmovAvatar(
         //
         // 断线（WebSocket 断开 / 网关重启）走**指数退避自动重连**，而不是立刻永久降级：
         // 演示现场网络抖动或服务重启后，界面应当自己恢复；
-        // 连续失败超过上限才降级为浏览器语音，并保留失败原因供现场排查。
+        // 连续失败超过上限才降级为静默，并保留失败原因供现场排查。
         avatar.onError = (error: unknown) => {
           // 旧实例（已 destroy）的迟到回调：不得再排重连或改界面状态
           if (disposed) return;
           const reason = describeError(error);
           // 未超出上限 → 指数退避重连（评审现场拔网线插回、魔珐服务抖动都能自恢）
           if (scheduleReconnect(reason)) return;
-          // 重连用尽 → 降级为浏览器语音（页面保留失败原因供现场排查）
+          // 重连用尽 → 降级为静默（页面保留失败原因供现场排查）
           setStage("failed");
           setDetail(
             `SDK 运行错误（已自动重连 ${MAX_RECONNECT_ATTEMPTS} 次未成功）：${reason}`,
@@ -704,7 +632,7 @@ export function useXmovAvatar(
    * 调用一次 SDK speak 并等待 voice_end（含超时兜底）。
    *
    * 等 voice_end 再返回：原先直接 fire-and-forget，调用方 `await speak()` 会立刻
-   * 继续并把「说话中」打回 idle（与浏览器 TTS 实现语义不一致，字幕/徽标提前回落）。
+   * 继续并把「说话中」打回 idle（与另两个实现语义不一致，字幕/徽标提前回落）。
    */
   const speakOnce = useCallback(async (payload: string, textLength: number) => {
     const avatar = avatarRef.current;
@@ -867,7 +795,7 @@ interface FetchedSegment {
  * `playSegmentAudio` 的结局。
  *
  * `blocked`（自动播放被拦）**不降级**：拦得住它就意味着用户还没交互，
- * 浏览器 TTS 同样会被拦，再降级只会双重出声或白等一次超时。
+ * 再降级（改用别的语音）只会双重出声或白等一次超时，所以整轮静音收尾。
  */
 type SegmentPlayOutcome = "played" | "blocked";
 
@@ -920,7 +848,7 @@ function waitAudioFinished(
 }
 
 export interface ServerTtsOptions {
-  /** 是否使用服务端 TTS（false = 跳过服务端，直接用浏览器 TTS） */
+  /** 是否使用服务端 TTS（false = 跳过服务端，整轮静音） */
   enabled?: boolean;
   /** 情绪标签（英文）；一般不用设，以调用时传入的 `SpeakContext` 为准 */
   emotion?: string | null;
@@ -931,7 +859,7 @@ export interface ServerTtsOptions {
 }
 
 /**
- * 服务端 TTS 播报控制器（GPT-SoVITS），失败**逐句**降级为浏览器原生 TTS。
+ * 服务端 TTS 播报控制器（GPT-SoVITS）；拿不到音频时**保持静音**。
  *
  * 与另两个实现的关键差别：**音频与口型同源**。
  * `POST /media/avatar` 一次请求同时返回音频与 viseme 时间轴，所以：
@@ -939,13 +867,19 @@ export interface ServerTtsOptions {
  * - 口型时钟对齐**音频真正开始播放**的时刻（渲染器以收到时间轴为 0 点）；
  * - 字幕按段推进用 `audio.currentTime` 驱动，不用定时器猜。
  *
- * 降级是**逐句**的而不是全局开关：服务在对话中途挂掉，下一句自动改走浏览器 TTS，
- * 不需要重启也不需要用户干预（这也是不直接抛错的原因）。
+ * 降级是**逐句**的而不是全局开关：服务在对话中途挂掉，只是后面几句没有声音，
+ * 文字与字幕照常推进，不需要重启也不需要用户干预（这也是不直接抛错的原因）。
+ * 刻意**不**回落到浏览器原生 TTS——那会把「角色音色」换成系统音色。
  */
 export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarController {
   const { enabled = true, emotion = null, intensity = 0.5, voice = null } = options;
-  /** 降级实现：后端没给音频时用它（已单测覆盖，不重复实现一套 TTS） */
-  const browser = useBrowserAvatar();
+  /**
+   * 具身状态机由本实现自己维护。
+   *
+   * 早前这里把状态机委托给浏览器 TTS 实现（`...browser`）省一份代码，
+   * 浏览器语音移除后就没得委托了——状态机本来就该只有一处。
+   */
+  const [state, setState] = useState<AvatarState>("idle");
   const [timeline, setTimeline] = useState<readonly VisemeFrame[] | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -1060,11 +994,7 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
 
   const speak = useCallback(
     async (text: string, _ssml?: string, context?: SpeakContext) => {
-      if (!text.trim()) return;
-      if (!enabled) {
-        await browser.speak(text);
-        return;
-      }
+      if (!text.trim() || !enabled) return;
       const generation = ++generationRef.current;
       stopAudio();
       abortRef.current?.abort();
@@ -1074,14 +1004,13 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
       const segment = await fetchSegment(text, context, controller.signal);
       if (generation !== generationRef.current || !mountedRef.current) return;
       if (!segment) {
-        // 后端没给音频（服务未部署 / 已降级）→ 别让用户等到静音
+        // 后端没给音频（服务未部署 / 本轮降级）→ 静音收尾，不换别的语音
         setTimeline(null);
-        await browser.speak(text);
         return;
       }
       await playSegmentAudio(segment, generation, controller.signal);
     },
-    [browser, enabled, fetchSegment, playSegmentAudio, stopAudio],
+    [enabled, fetchSegment, playSegmentAudio, stopAudio],
   );
 
   /**
@@ -1102,11 +1031,7 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
       onChunk?: (index: number) => void,
       context?: SpeakContext,
     ) => {
-      if (chunks.length === 0) return;
-      if (!enabled) {
-        await browser.speakChunks(chunks, onChunk);
-        return;
-      }
+      if (chunks.length === 0 || !enabled) return;
       const generation = ++generationRef.current;
       stopAudio();
       abortRef.current?.abort();
@@ -1131,10 +1056,8 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
         // 字幕与该段语音**同时**出现：这一行就在 play() 之前
         onChunk?.(index);
         if (!segment) {
-          // 只有这一段拿不到音频 → 只降级这一段，后面的段继续走服务端
+          // 只有这一段拿不到音频 → 这一段静音（字幕照常推进），后面的段继续走服务端
           setTimeline(null);
-          await browser.speak(chunks[index].text);
-          if (generation !== generationRef.current) return;
           continue;
         }
         const outcome = await playSegmentAudio(segment, generation, controller.signal);
@@ -1142,7 +1065,7 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
         if (generation !== generationRef.current) return;
       }
     },
-    [browser, enabled, fetchSegment, playSegmentAudio, stopAudio],
+    [enabled, fetchSegment, playSegmentAudio, stopAudio],
   );
   const interrupt = useCallback(() => {
     generationRef.current += 1; // 作废进行中的播报
@@ -1150,16 +1073,17 @@ export function useServerTtsAvatar(options: ServerTtsOptions = {}): AvatarContro
     abortRef.current = null;
     stopAudio();
     setTimeline(null);
-    browser.interrupt(); // 同时打断可能正在进行的降级 TTS 播报
-  }, [browser, stopAudio]);
+  }, [stopAudio]);
 
   return {
-    // state / stateLabel / ready / setState 沿用降级实现：
-    // 状态机必须**只有一处**在维护，否则两个状态源会互相覆盖。
-    ...browser,
+    state,
+    stateLabel: AVATAR_STATE_LABELS[state],
+    /** 控制器本身可用（有没有声音由 `enabled` 与后端决定，见 detail） */
+    ready: true,
     provider: "server",
-    stage: "ready",
-    detail: enabled ? "" : "服务端 TTS 未启用：使用浏览器原生 TTS",
+    stage: enabled ? "ready" : "unconfigured",
+    detail: enabled ? "" : "服务端 TTS 未启用：本轮不播报语音，只显示文字",
+    setState,
     timeline,
     speak,
     speakChunks,

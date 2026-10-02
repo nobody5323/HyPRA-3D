@@ -151,7 +151,8 @@ describe("选中的模型", () => {
  *
  * 这里锁的是**设计约束**（不是偏好）：魔珐 SDK 的 speak() 只吃 SSML、
  * 不接受外部音频，所以走魔珐时必须用它的自带 TTS；
- * 其余情况服务端 TTS（GPT-SoVITS）优先，最后才是浏览器 TTS。
+ * 其余情况只有「接入服务端 TTS（GPT-SoVITS）」才出声，没接入就静默
+ * ——浏览器原生 TTS（Web Speech API）已整体移除。
  */
 describe("resolveVoiceSource：播报实现选择", () => {
   it("魔珐路径永远用自带 TTS（SDK 不接受外部音频）", () => {
@@ -159,23 +160,17 @@ describe("resolveVoiceSource：播报实现选择", () => {
     expect(resolveVoiceSource({ xmovActive: true, serverTtsAvailable: false })).toBe("xmov");
   });
 
-  it("非魔珐时服务端 TTS 优先于浏览器 TTS", () => {
+  it("非魔珐时接入服务端 TTS 就出声", () => {
     expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: true })).toBe("server");
   });
 
-  it("后端起不来/未配置时回落浏览器 TTS（零依赖，必须能出声）", () => {
-    expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: false })).toBe("browser");
+  it("没接入 TTS 时**不出声**（不再回落浏览器语音）", () => {
+    expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: false })).toBe("none");
   });
 });
 
 describe("resolveVoiceSource：用户偏好覆盖", () => {
-  it("强制浏览器：即使后端服务端 TTS 可用也不用（省算力 / 降延迟）", () => {
-    expect(
-      resolveVoiceSource({ xmovActive: false, serverTtsAvailable: true, preference: "browser" }),
-    ).toBe("browser");
-  });
-
-  it("强制服务端：探测失败也先试一次（真失败会逐句降级，不会没声音）", () => {
+  it("强制服务端：探测失败也先试一次（真失败则整轮静音，不会换系统音色）", () => {
     expect(
       resolveVoiceSource({ xmovActive: false, serverTtsAvailable: false, preference: "server" }),
     ).toBe("server");
@@ -191,7 +186,7 @@ describe("resolveVoiceSource：用户偏好覆盖", () => {
 
   it("不传偏好时等同于 auto", () => {
     expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: true })).toBe("server");
-    expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: false })).toBe("browser");
+    expect(resolveVoiceSource({ xmovActive: false, serverTtsAvailable: false })).toBe("none");
   });
 });
 
@@ -202,11 +197,17 @@ describe("语音引擎偏好", () => {
     expect(TTS_ENGINE_OPTIONS.map((option) => option.value)).toEqual([...TTS_ENGINE_PREFERENCES]);
   });
 
-  it("保存后能读回，三档都支持", () => {
+  it("保存后能读回，两档都支持", () => {
     for (const value of TTS_ENGINE_PREFERENCES) {
       expect(saveTtsEnginePreference(value)).toBe(true);
       expect(readTtsEnginePreference()).toBe(value);
     }
+  });
+
+  it("已移除的 browser 档按非法值处理（老用户回落到 auto）", () => {
+    window.localStorage.setItem("hypra.avatar.tts-engine", "browser");
+    expect(readTtsEnginePreference()).toBe("auto");
+    expect(saveTtsEnginePreference("browser" as never)).toBe(false);
   });
 
   it("首屏安全值不读 localStorage（避免 hydration 不一致）", () => {
@@ -228,7 +229,7 @@ describe("语音引擎偏好", () => {
     expect(listener).toHaveBeenCalledTimes(1);
 
     unsubscribe();
-    saveTtsEnginePreference("browser");
+    saveTtsEnginePreference("auto");
     expect(listener).toHaveBeenCalledTimes(1);
   });
 });

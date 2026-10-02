@@ -17,6 +17,8 @@ import { useEffect, useId, useRef, useState } from "react";
 
 import type { PresetCatalog, PresetInfo } from "@/lib/api/types";
 
+import { useAnchoredPopup } from "./useAnchoredPopup";
+
 /** 键盘焦点样式（浅色主题：鼠尾草绿环） */
 const FOCUS_RING =
   "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-panel";
@@ -48,6 +50,11 @@ export function PresetSwitcher({
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const listboxId = useId();
+  /**
+   * 浮层坐标。**必须是 `fixed`**：面板会被控制台的 `Card overflow-hidden` 包住，
+   * `absolute` 浮层会被裁成一条缝（详见 `useAnchoredPopup` 的文件头）。
+   */
+  const popupStyle = useAnchoredPopup(triggerRef, open);
 
   const autoId = catalog?.auto_preset_id ?? "";
   const autoLabel =
@@ -101,7 +108,12 @@ export function PresetSwitcher({
   if (!catalog) return null; // 后端不可用时不渲染（避免空选择器）
 
   return (
-    <div className="relative" ref={rootRef}>
+    /*
+     * 不需要 `relative`：浮层走 `fixed`（见 popupStyle），锚点由 hook 算。
+     * `rootRef` 仍要留着——「点击外部关闭」用它做命中判定（浮层没有搬进 portal，
+     * 仍是它的 DOM 后代）。
+     */
+    <div ref={rootRef}>
       <button
         ref={triggerRef}
         type="button"
@@ -110,7 +122,7 @@ export function PresetSwitcher({
         aria-haspopup="listbox"
         aria-controls={listboxId}
         onClick={() => setOpen((prev) => !prev)}
-        className={`flex w-full items-center justify-between rounded-xl border border-line bg-surface-panel px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50 ${FOCUS_RING}`}
+        className={`flex w-full items-center justify-between card px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50 ${FOCUS_RING}`}
       >
         <span>
           <span className="text-xs text-ink-soft">预设 · </span>
@@ -126,7 +138,8 @@ export function PresetSwitcher({
           id={listboxId}
           role="listbox"
           aria-label="选择模型预设"
-          className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-line bg-surface-panel shadow-lg"
+          style={popupStyle}
+          className="z-20 overflow-y-auto rounded-2xl border border-line bg-surface-panel shadow-float"
         >
           {options.map((option, index) => (
             <button

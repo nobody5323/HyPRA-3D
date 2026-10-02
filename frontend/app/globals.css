@@ -8,13 +8,36 @@
 }
 
 body {
-  /* 氛围底色：左上鼠尾草绿、右下暖沙色，米白纸上一层极淡的光，避免纯白刺眼 */
+  /*
+   * 氛围底色。
+   *
+   * 三层叠加：左上鼠尾草绿（品牌色）、右下暖沙色（温度感）、
+   * 顶部一层极淡的纵向白雾——让内容区（卡片）与页底之间有「光从上方来」的层次，
+   * 否则整页会是一块平的米色。全部透明度都在 0.1 以下，保证文字对比度不受影响。
+   */
   background-image:
-    radial-gradient(circle at 15% 0%, rgba(94, 139, 126, 0.1), transparent 45%),
-    radial-gradient(circle at 85% 100%, rgba(200, 154, 91, 0.1), transparent 45%);
+    radial-gradient(circle at 15% 0%, rgba(94, 139, 126, 0.12), transparent 46%),
+    radial-gradient(circle at 85% 100%, rgba(200, 154, 91, 0.12), transparent 46%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.65), transparent 340px);
+  background-attachment: fixed;
 }
 
-/* 细滚动条（浅底适配：暖灰滑块） */
+/* 中文正文抗锯齿：浅色底上默认渲染偏粗，这里压一档更接近印刷感 */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 选中态用品牌色（默认的系统蓝与整页暖调不搭） */
+::selection {
+  background: rgba(78, 119, 107, 0.18);
+}
+
+/* 细滚动条（浅底适配：暖灰滑块）；同时给 Firefox 一份 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(125, 116, 106, 0.3) transparent;
+}
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -23,7 +46,13 @@ body {
   background: rgba(125, 116, 106, 0.3);
   border-radius: 9999px;
 }
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(125, 116, 106, 0.45);
+}
 ::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-corner {
   background: transparent;
 }
 
@@ -38,6 +67,12 @@ body {
   }
   * {
     -webkit-tap-highlight-color: rgba(78, 119, 107, 0.15);
+  }
+  /* 标题默认收紧字距：中文大字号标题不收紧会显得松散 */
+  h1,
+  h2,
+  h3 {
+    letter-spacing: -0.01em;
   }
 }
 
@@ -63,6 +98,179 @@ body {
    */
   .focus-ring {
     @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface-panel;
+  }
+
+  /* ============================================================
+   * 基础容器
+   * ============================================================ */
+
+  /**
+   * 卡片。全站唯一的卡片外观来源（Web 端与控制台共用）。
+   *
+   * 为什么用「描边 + 极淡投影」而不是重投影：本项目的底色本身就是暖米白，
+   * 重投影会让整页发灰；一层描边定边界、一层几乎看不见的投影定层次，最干净。
+   */
+  .card {
+    @apply rounded-2xl border border-line bg-surface-panel shadow-card;
+  }
+
+  /** 卡片内的分区标题（小字号、半粗、字距略开） */
+  .card-title {
+    @apply text-sm font-semibold tracking-tight text-ink;
+  }
+
+  /** 卡片内的说明文字 */
+  .card-hint {
+    @apply text-xs leading-relaxed text-ink-soft;
+  }
+
+  /** 卡片头部：标题在左、操作在右，底部一条分隔线 */
+  .card-head {
+    @apply flex items-center justify-between gap-3 border-b border-line px-4 py-3;
+  }
+
+  /**
+   * 可折叠面板的触发器行（历史记录 / 酒馆预设 / 知识库等共用）。
+   * 展开态由调用方通过 aria-expanded 驱动不了样式，故这里只做静态外观。
+   */
+  .disclosure {
+    @apply focus-ring flex w-full items-center justify-between gap-3 rounded-2xl px-4 py-3 text-left transition-colors hover:bg-surface-hover;
+  }
+
+  /* ============================================================
+   * 按钮
+   * ============================================================ */
+
+  /**
+   * 按钮基类：尺寸、排版与焦点环，不定义配色。
+   *
+   * 焦点环在这里**展开写**而不是 `@apply focus-ring`：同一个 @layer 内互相
+   * `@apply` 会让层叠顺序依赖声明先后，展开写没有这个隐患。
+   */
+  .btn {
+    @apply inline-flex shrink-0 items-center justify-center gap-1.5 rounded-xl text-sm font-medium transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none;
+    padding: 0.5rem 0.875rem;
+  }
+  .btn:focus-visible,
+  .btn-sm:focus-visible,
+  .btn-pill:focus-visible {
+    @apply outline-none ring-2 ring-accent ring-offset-2 ring-offset-surface-panel;
+  }
+
+  /** 实底主按钮（鼠尾草绿）：白字实测 5.03:1 ✓ */
+  .btn-primary {
+    @apply bg-accent text-ink-on shadow-highlight hover:bg-accent-hover active:translate-y-px;
+  }
+
+  /** 次要按钮：白底描边，用于「与主操作并列但不抢戏」的动作 */
+  .btn-secondary {
+    @apply border border-line bg-surface-panel text-ink-muted hover:border-line-strong hover:bg-surface-hover hover:text-ink active:translate-y-px;
+  }
+
+  /** 安静按钮：无边框，用于面板内的低频动作（刷新、展开） */
+  .btn-quiet {
+    @apply text-ink-muted hover:bg-surface-hover hover:text-ink;
+  }
+
+  /** 危险按钮（实底） */
+  .btn-danger {
+    @apply bg-danger text-ink-on shadow-highlight hover:brightness-95 active:translate-y-px;
+  }
+
+  /** 危险按钮（描边，用于「还没到确认那一步」的入口） */
+  .btn-danger-outline {
+    @apply border border-danger/40 text-danger-text hover:bg-danger/10;
+  }
+
+  /** 小号按钮：表格行内 / 芯片式操作 */
+  .btn-sm {
+    @apply rounded-lg text-xs;
+    padding: 0.3125rem 0.625rem;
+  }
+
+  /** 圆角胶囊小按钮（控制台里最常用的一档） */
+  .btn-pill {
+    @apply rounded-full text-xs;
+    padding: 0.375rem 0.875rem;
+  }
+
+  /* ============================================================
+   * 芯片 / 徽标
+   * ============================================================ */
+
+  /** 中性芯片（状态展示，不可点） */
+  .chip {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full px-2.5 py-1 text-xs ring-1 ring-inset;
+  }
+  .chip-neutral {
+    @apply bg-surface-raised text-ink-muted ring-line;
+  }
+  .chip-success {
+    @apply bg-success-soft text-success-text ring-success/30;
+  }
+  .chip-danger {
+    @apply bg-danger-soft text-danger-text ring-danger/30;
+  }
+  .chip-warning {
+    @apply bg-warning-soft text-warning-text ring-warning/30;
+  }
+  .chip-accent {
+    @apply bg-accent-soft text-accent-text ring-accent/30;
+  }
+  .chip-brand {
+    @apply bg-brand-soft text-brand-text ring-brand/30;
+  }
+
+  /** 状态圆点（芯片内或独立使用；运行时配 animate-pulse-dot） */
+  .status-dot {
+    @apply inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-current;
+  }
+
+  /* ============================================================
+   * 表单
+   * ============================================================ */
+
+  /** 输入框 / 下拉 / 多行框的统一外观 */
+  .field {
+    @apply w-full rounded-xl border border-line bg-surface-inset px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/60;
+  }
+
+  /** 表单小标签 */
+  .field-label {
+    @apply text-xs font-medium text-ink-muted;
+  }
+
+  /** 表单辅助说明 */
+  .field-hint {
+    @apply text-[11px] leading-relaxed text-ink-faint;
+  }
+
+  /**
+   * 提示条（信息 / 成功 / 警告 / 危险）。
+   * 用于页面顶部的操作反馈与面板内的说明块。
+   */
+  .notice {
+    @apply rounded-xl border px-4 py-3 text-xs leading-relaxed;
+  }
+  .notice-info {
+    @apply border-line bg-surface-inset text-ink-muted;
+  }
+  .notice-success {
+    @apply border-success/30 bg-success-soft text-success-text;
+  }
+  .notice-warning {
+    @apply border-warning/30 bg-warning-soft text-warning-text;
+  }
+  .notice-danger {
+    @apply border-danger/30 bg-danger-soft text-danger-text;
+  }
+
+  /**
+   * 竖向分组栈：面板内的「标题 + 内容」堆叠统一节奏。
+   * （各处手写 gap-4 容易漂移，统一到这一处。）
+   */
+  .stack {
+    @apply flex flex-col gap-4;
   }
 }
 

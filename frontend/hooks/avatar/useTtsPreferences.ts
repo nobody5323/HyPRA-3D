@@ -10,7 +10,7 @@
  *    必须自动回落到后端默认音色，否则界面会留一个「选了却没有任何变化」的死选项。
  *
  * 降级原则：探测失败（后端未就绪 / 网络异常）只会让 `status` 为 null，
- * 由调用方回落浏览器 TTS，**绝不抛错、绝不阻断页面**。
+ * 由调用方按「没接入 TTS 就静默」处理，**绝不抛错、绝不阻断页面**。
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -60,7 +60,7 @@ export function useTtsPreferences({ enabled }: { enabled: boolean }): TtsPrefere
     };
   }, []);
 
-  // 探测：后端就绪后取一次（探测失败只记 null，由上层回落浏览器 TTS）
+  // 探测：后端就绪后取一次（探测失败只记 null，由上层按「静默」处理）
   useEffect(() => {
     if (!enabled) return;
     let cancelled = false;

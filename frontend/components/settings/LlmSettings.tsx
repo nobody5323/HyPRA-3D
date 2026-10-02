@@ -253,7 +253,7 @@ export function LlmSettings({
       className={
         variant === "inline"
           ? "w-full rounded-2xl border border-line bg-surface-panel p-4"
-          : "absolute right-0 top-full z-30 mt-2 max-h-[min(80vh,620px)] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-lg"
+          : "absolute right-0 top-full z-30 mt-2 max-h-[min(80vh,620px)] w-[420px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-float"
       }
     >
       <div className="flex items-start justify-between">

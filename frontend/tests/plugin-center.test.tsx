@@ -26,7 +26,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 function stubRoutes(
-  handler: (url: string, method: string) => Response | undefined,
+  handler: (url: string, method: string, body: Record<string, unknown> | null) => Response | undefined,
 ): string[] {
   const urls: string[] = [];
   vi.stubGlobal(
@@ -34,8 +34,9 @@ function stubRoutes(
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       const method = (init?.method ?? "GET").toUpperCase();
+      const body = init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : null;
       urls.push(`${method} ${url}`);
-      return handler(url, method) ?? jsonResponse({ detail: "not found" }, 404);
+      return handler(url, method, body) ?? jsonResponse({ detail: "not found" }, 404);
     }),
   );
   return urls;
@@ -45,6 +46,7 @@ function makePlugin(overrides: Partial<PluginStatus> = {}): PluginStatus {
   return {
     id: "llm-providers",
     display_name: "对话模型接入",
+    description: "LLM provider 工厂",
     version: "0.1.0",
     layer: "builtin",
     category: "provider",
@@ -165,6 +167,123 @@ describe("PluginCenter", () => {
     render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
     expect(screen.getByText("对话模型接入")).toBeTruthy();
     expect(screen.queryByText(/运行中\b.*\//)).toBeNull();
+  });
+});
+
+describe("PluginCenter 添加插件（§9.3：插件由用户自己写）", () => {
+  const DIRS = {
+    user_dir: "backend/data/plugins",
+    extra_dirs: ["D:/my-plugins"],
+    builtin_dir: "backend/plugins",
+  };
+
+  const LIST_BODY = {
+    plugins: [makePlugin()],
+    summary: makeSummary(),
+    capabilities: {},
+    dirs: DIRS,
+  };
+
+  it("展开面板：说清没有沙箱、插件放哪儿、接口文档在哪", async () => {
+    stubRoutes((url, method) =>
+      url.endsWith("/plugins") && method === "GET" ? jsonResponse(LIST_BODY) : undefined,
+    );
+
+    render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加插件" }));
+
+    // 安全口径不许淡化
+    expect(await screen.findByText(/没有沙箱/)).toBeTruthy();
+    // 接口与示例的位置（用户据此自己写插件）
+    expect(screen.getByText(/docs\/plugin-development\.md/)).toBeTruthy();
+    expect(screen.getByText(/docs\/examples\/plugin-hello\//)).toBeTruthy();
+    // 扫描目录按需拉取：用户目录 + 额外来源目录都要可见
+    expect(await screen.findByText("backend/data/plugins")).toBeTruthy();
+    expect(screen.getByText(/D:\/my-plugins/)).toBeTruthy();
+  });
+
+  it("导入：提交目录路径，回传最新列表并提示去启用", async () => {
+    const onPluginsChanged = vi.fn();
+    let importedBody: Record<string, unknown> | null = null;
+    stubRoutes((url, method, body) => {
+      if (url.endsWith("/plugins") && method === "GET") return jsonResponse(LIST_BODY);
+      if (url.endsWith("/plugins/import") && method === "POST") {
+        importedBody = body;
+        return jsonResponse({
+          id: "water-tracker",
+          path: "backend/data/plugins/water-tracker",
+          enabled: false,
+          plugins: [
+            makePlugin({
+              id: "water-tracker",
+              display_name: "喝水记录",
+              enabled: false,
+              state: "disabled",
+            }),
+          ],
+        });
+      }
+      return undefined;
+    });
+
+    render(<PluginCenter plugins={[makePlugin()]} summary={null} onPluginsChanged={onPluginsChanged} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加插件" }));
+    fireEvent.change(await screen.findByLabelText(/插件目录路径/), {
+      target: { value: "D:/my-plugins/water-tracker" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导入插件" }));
+
+    await waitFor(() => expect(onPluginsChanged).toHaveBeenCalled());
+    expect(importedBody).toMatchObject({
+      path: "D:/my-plugins/water-tracker",
+      replace: false,
+    });
+    expect(screen.getByRole("status").textContent).toContain("water-tracker");
+  });
+
+  it("重新扫描：报告新发现的插件", async () => {
+    stubRoutes((url, method) => {
+      if (url.endsWith("/plugins") && method === "GET") return jsonResponse(LIST_BODY);
+      if (url.endsWith("/plugins/reload") && method === "POST") {
+        return jsonResponse({ discovered: ["hand-made"], plugins: [makePlugin()] });
+      }
+      return undefined;
+    });
+
+    render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加插件" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新扫描" }));
+
+    expect((await screen.findByRole("status")).textContent).toContain("hand-made");
+  });
+
+  it("导入失败时展示后端原因（不落盘）", async () => {
+    stubRoutes((url, method) => {
+      if (url.endsWith("/plugins") && method === "GET") return jsonResponse(LIST_BODY);
+      if (url.endsWith("/plugins/import") && method === "POST") {
+        return jsonResponse({ detail: "目录里没有 manifest.json：D:/nope" }, 400);
+      }
+      return undefined;
+    });
+
+    render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加插件" }));
+    fireEvent.change(await screen.findByLabelText(/插件目录路径/), {
+      target: { value: "D:/nope" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "导入插件" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("manifest.json");
+  });
+
+  it("目录信息拿不到时面板仍在（导入 / 重扫两个动作可用）", async () => {
+    stubRoutes(() => undefined); // GET /plugins 也 404
+
+    render(<PluginCenter plugins={[makePlugin()]} summary={null} />);
+    fireEvent.click(screen.getByRole("button", { name: "添加插件" }));
+
+    expect(await screen.findByLabelText(/插件目录路径/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "重新扫描" })).toBeTruthy();
   });
 });
 

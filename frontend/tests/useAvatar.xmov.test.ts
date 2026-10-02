@@ -5,7 +5,7 @@
  * 不插入 script 标签），因此无需网络与真实密钥即可覆盖：
  * - 退避节奏（1s → 2s → 4s）与重建次数；
  * - 「init 期间报错、随后却连上」时**不得**把刚就绪的实例销毁重建；
- * - 重连用尽后回落到 `onUnavailable`（页面据此降级为浏览器语音）。
+ * - 重连用尽后回落到 `onUnavailable`（页面据此降级为静默）。
  */
 
 import { act, renderHook } from "@testing-library/react";

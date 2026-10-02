@@ -3,7 +3,8 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "HyPRA · 苏澄",
+  // 标题不带具体角色名：角色由用户在页面里选，静态 metadata 写死会与所选角色冲突
+  title: "HyPRA",
   description: "打通提示词架构与混合记忆的情感陪伴 3D 交互系统",
 };
 

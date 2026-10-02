@@ -58,6 +58,9 @@ export function AvatarStage({
   containerRef,
   stage = "ready",
   detail = "",
+  characterName = "",
+  characterTitle = "",
+  className,
 }: {
   state: AvatarState;
   emotion: EmotionInfo | null;
@@ -79,6 +82,22 @@ export function AvatarStage({
   containerRef?: RefObject<HTMLDivElement | null>;
   stage?: AvatarInitStage;
   detail?: string;
+  /**
+   * 当前角色名与一句话定位（来自当前人设）。
+   *
+   * 空值时这两行**不渲染**，而不是退回某个具体角色名：内置人设是示例，
+   * 换人设后还显示「苏澄」会让演示与自建角色对不上。
+   */
+  characterName?: string;
+  characterTitle?: string;
+  /**
+   * 额外类名。
+   *
+   * 存在的理由：Web 端希望舞台**撑满左栏剩余高度**（`flex-1`），
+   * 而桌宠/控制台预览这类场景只想要它自然高度——尺寸交给调用方决定，
+   * 组件本身不自作主张。
+   */
+  className?: string;
 }) {
   /** 本地渲染器的状态文案（由 LocalAvatarStage 上报，这里统一展示） */
   const [localStatus, setLocalStatus] = useState("");
@@ -95,30 +114,44 @@ export function AvatarStage({
     ? {}
     : { role: "img", "aria-label": "数字人舞台：魔珐星云实时渲染画面" };
 
+  const rendererLabel = isXmov ? "渲染：魔珐星云具身驱动 SDK" : localStatus || "渲染：本地渲染器";
+
   return (
     <section
       aria-labelledby="avatar-stage-title"
-      className="relative flex flex-col items-center justify-center overflow-hidden rounded-2xl border border-line bg-surface-panel p-6"
+      className={`relative flex flex-col overflow-hidden rounded-2xl border border-line bg-surface-panel shadow-card ${className ?? ""}`}
     >
       {/* 区域可访问名（读屏可按区域跳转，审计 A10） */}
       <h2 id="avatar-stage-title" className="sr-only">
         数字人舞台
       </h2>
 
-      {/* 情绪光晕（两种模式共用，SDK 画布浮在其上） */}
-      {/* 强度变化用 opacity 过渡（可插值），颜色切换即时生效（渐变本身无法插值） */}
+      {/*
+        舞台光影。三层叠加，全部 pointer-events-none：
+        ① 情绪光晕（颜色随情绪变、强度随 intensity 变）——这是「情绪 → 画面」的直观证据；
+        ② 顶部冷光：模拟上方光源，让角色背后不是一块死白；
+        ③ 地面投影：底部一道压暗，把角色「放」在地面上而不是浮在卡片中央。
+        强度变化用 opacity 过渡（可插值），颜色切换即时生效（渐变本身无法插值）。
+      */}
       <div
+        aria-hidden="true"
         className="pointer-events-none absolute inset-0 transition-opacity duration-1000"
         style={{
-          background: `radial-gradient(circle at 50% 45%, ${withAlpha(
-            color,
-            0.55,
-          )} 0%, transparent 65%)`,
-          opacity: 0.2 + intensity * 0.6,
+          background: `radial-gradient(circle at 50% 42%, ${withAlpha(color, 0.55)} 0%, transparent 62%)`,
+          opacity: 0.18 + intensity * 0.55,
         }}
       />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 top-0 h-40 bg-gradient-to-b from-surface-inset/70 to-transparent"
+      />
+      <div
+        aria-hidden="true"
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-32 bg-gradient-to-t from-surface-raised to-transparent"
+      />
 
-      <div className="relative z-10 flex w-full flex-col items-center gap-5">
+      {/* 舞台主体：居中承载画面与角色信息，撑满卡片剩余高度 */}
+      <div className="relative z-10 flex min-h-0 flex-1 flex-col items-center justify-center gap-5 px-6 py-7">
         {isXmov ? (
           /* 魔珐 SDK 挂载容器（真实 3D 渲染）
              底色保持深色不透明：SDK 是否自绘不透明背景无法从代码判定，
@@ -127,7 +160,7 @@ export function AvatarStage({
             id={containerId}
             ref={containerRef}
             {...canvasA11y}
-            className="h-[420px] w-full overflow-hidden rounded-xl bg-stage-canvas"
+            className="h-[420px] w-full max-w-[560px] overflow-hidden rounded-xl bg-stage-canvas shadow-panel ring-1 ring-line/60"
           >
             {loading && (
               /* 初始化中：状态文本必须可读且被播报，因此容器此时不接图片型角色 */
@@ -148,29 +181,58 @@ export function AvatarStage({
              两者实现同一个 AvatarRenderer 接口，选择逻辑封装在 LocalAvatarStage；
              渲染方式由用户在「数字人设置」里指定（renderer），
              状态文案通过 onStatusChange 回传到这里统一展示（避免组件内绝对定位与相邻元素重叠）。 */
-          <LocalAvatarStage
-            emotion={emotion}
-            motion={state}
-            characterLabel="数字人形象"
-            renderer={renderer}
-            source={source}
-            lipSync={lipSync}
-            onStatusChange={setLocalStatus}
-          />
+          <div className="relative flex items-end justify-center">
+            {/*
+              舞台底纹：两圈同心的极淡描边环。
+              存在的理由很实际——本地渲染器的人物是固定尺寸（208×272），
+              在高屏上舞台会空出一大片；没有底纹时那片空白看起来像「没加载出来」，
+              有环之后它就是「舞台」。环用极低透明度的暖灰（与 ink 同族），不抢人物。
+            */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute left-1/2 top-1/2 h-[300px] w-[300px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-[rgba(47,42,38,0.07)]"
+            />
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute left-1/2 top-1/2 h-[420px] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-full border border-[rgba(47,42,38,0.05)]"
+            />
+            {/* 地面：一道压扁的径向阴影，让角色站在台上而不是浮着 */}
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute -bottom-1 h-6 w-44 rounded-[50%] bg-ink/15 blur-md"
+            />
+            <LocalAvatarStage
+              emotion={emotion}
+              motion={state}
+              characterLabel="数字人形象"
+              renderer={renderer}
+              source={source}
+              lipSync={lipSync}
+              onStatusChange={setLocalStatus}
+            />
+          </div>
         )}
 
+        {/* 角色信息：名字给到最大字号（这是这一屏的标题），定位与状态依次降级 */}
         <div className="flex flex-col items-center gap-2">
-          <p className="text-lg font-medium text-ink">
-            <span translate="no">苏澄</span>
-          </p>
-          <p className="text-xs text-ink-muted">心理倾听师 · 温柔年长的知心姐姐</p>
+          {characterName ? (
+            <p className="text-xl font-semibold tracking-tight text-ink">
+              <span translate="no">{characterName}</span>
+            </p>
+          ) : null}
+          {characterTitle ? (
+            <p className="max-w-[36ch] text-center text-xs leading-relaxed text-ink-muted">
+              {characterTitle}
+            </p>
+          ) : null}
           <StateBadge state={state} />
         </div>
-
-        <p className="text-xs text-ink-soft">
-          {isXmov ? "渲染：魔珐星云具身驱动 SDK" : localStatus || "渲染：本地渲染器"}
-        </p>
       </div>
+
+      {/* 渲染路径：贴底一条细状态栏，不占中间的视觉重量 */}
+      <footer className="relative z-10 shrink-0 border-t border-line/70 bg-surface-panel/60 px-4 py-2 text-center text-[11px] leading-relaxed text-ink-soft backdrop-blur-sm">
+        {rendererLabel}
+      </footer>
     </section>
   );
 }

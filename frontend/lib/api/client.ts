@@ -1,13 +1,17 @@
 /** 后端接口封装（与 backend/app/api/*.py 一一对应）。 */
 
 import type {
+  AvatarCredentialsResponse,
+  AvatarCredentialForm,
   AvatarLayout,
   AvatarModelInfo,
   AvatarModelKind,
   AvatarModelSources,
+  AiDraftResponse,
   AvatarTimeline,
   ChatResponse,
   HealthStatus,
+  JailbreakCatalog,
   KnowledgeDeleteResult,
   KnowledgeDoc,
   KnowledgeUploadResult,
@@ -15,16 +19,28 @@ import type {
   LlmConfigInput,
   LlmConfigResponse,
   LlmTestResult,
+  PersonaAiDraft,
   PersonaCatalog,
+  PluginImportInput,
+  PluginImportResponse,
+  PluginListResponse,
+  PluginReloadResponse,
   PluginSettingsResponse,
   PluginStatus,
   PresetCatalog,
   SessionDeleteResult,
+  SessionPurgeResult,
+  MemoryPurgeResult,
   SessionHistory,
   SessionSummary,
+  SkillAiDraft,
   SkillCatalog,
+  SkillCreateInput,
+  SkillDeleteResult,
   SkillDetail,
   SkillInfo,
+  SkillRestoreResult,
+  SkillWriteResponse,
   SpeakCommand,
   StAdaptResult,
   StPresetCatalog,
@@ -32,6 +48,7 @@ import type {
   StPresetPatch,
   StPresetResponse,
   StudioCatalog,
+  StudioEntryDeleteResult,
   StudioEntryInput,
   StudioEntryTestInput,
   StudioEntryTestResult,
@@ -40,10 +57,15 @@ import type {
   StudioPersonaDeleteResult,
   StudioPersonaInput,
   StudioPersonaWriteResult,
+  StudioStyle,
+  StudioStyleDeleteResult,
+  StudioStyleInput,
+  StudioStyleWriteResult,
   StudioWorldBookEntry,
   StyleCatalog,
   TavernBridgeStatus,
   TavernImportResult,
+  TavernKnowledgeSyncResult,
   TtsVoicesStatus,
 } from "@/lib/api/types";
 
@@ -137,6 +159,20 @@ export interface ChatRequest {
    * 与内置 preset_id 相互独立（组装走 ST 预设，采样三分层合并）。
    */
   st_preset_id?: string | null;
+  /**
+   * 交互模式：`companion`（桌宠对话）/ `tavern`（酒馆聊天）。
+   * 不传时由后端按 ST 预设推断；见 `lib/chat/mode.ts`。
+   */
+  mode?: string | null;
+  /**
+   * 叙事框架（jailbreak）预设 id，三种取值语义不同：
+   * - 不传 / `null`：跟随部署默认（出厂为关闭）
+   * - `"none"`：本轮**显式关闭**（覆盖部署默认）
+   * - 具体 id：本轮启用该档
+   *
+   * 前端始终显式传当前选择，因此「用户关掉」不会被动到部署默认覆盖。
+   */
+  jailbreak_id?: string | null;
 }
 
 /** 调用后端对话接口（对话 + 情绪 + 播报指令 + 工具调用）。 */
@@ -285,7 +321,7 @@ export async function deleteKnowledge(
  * 显示当前角色名，并作为个人记忆面板的命名空间。
  */
 /**
- * 对话偏好（人设 / 文风 / 提示词预设 / 酒馆预设）。
+ * 对话偏好（人设 / 文风 / 提示词预设 / 酒馆预设 / 叙事框架）。
  *
  * 空串 = 未设置（界面回落到部署声明的默认）。存在**后端**而不是 localStorage：
  * 三个界面（控制台、Web 端、桌宠窗）的 origin 不同，localStorage 天然不共享。
@@ -295,6 +331,19 @@ export interface ChatPreferences {
   style_id: string;
   preset_id: string;
   st_preset_id: string;
+  /**
+   * 叙事框架（jailbreak）选择。**空串与 `"none"` 语义不同**：
+   * - 空串 = 没选过 → 界面回落到部署默认（出厂关闭）
+   * - `"none"` = 用户**明确关掉** → 即使部署默认开启也不启用
+   *
+   * 因此界面回填时不能用 `if (prefs.jailbreak_id)` 判空——那会把「明确关掉」
+   * 当成「没选过」，部署默认一开就自动亮起来。
+   */
+  jailbreak_id: string;
+  /** 交互模式（`companion` / `tavern`）；空串 = 没选过，由后端按 ST 预设推断 */
+  mode: string;
+  /** 用户自己的称呼（`{{user_name}}`）；空串 = 没设置过，界面回落到「朋友」 */
+  user_name: string;
 }
 
 /**
@@ -342,6 +391,28 @@ export async function getStyles(): Promise<StyleCatalog | null> {
     const res = await fetch(`${API_BASE}/chat/styles`, { cache: "no-store" });
     if (!res.ok) return null;
     return (await res.json()) as StyleCatalog;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 叙事框架（jailbreak）预设清单 + 部署默认开关。
+ *
+ * 清单里的 `enabled` 是**部署默认**，不是用户选择——用户自己的开关在
+ * `GET /chat/preferences` 的 `jailbreak_id` 里。两者都要，因为界面需要区分
+ * 「这层在部署层面是否可用」与「我此刻开没开」。
+ *
+ * 与 `getStyles` 一样返回 `null` 表示后端读不到（离线 / 5xx），此时界面
+ * 不渲染这个开关——留着它只会让用户点了没反应。
+ */
+export async function getJailbreakPresets(): Promise<JailbreakCatalog | null> {
+  try {
+    const res = await fetch(`${API_BASE}/chat/jailbreak-presets`, {
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as JailbreakCatalog;
   } catch {
     return null;
   }
@@ -402,6 +473,45 @@ export async function deleteSession(
   );
   if (!res.ok) await throwApiError(res, "删除对话");
   return (await res.json()) as SessionDeleteResult;
+}
+
+/**
+ * 清空某个陪伴对象的**全部**会话（不可恢复）。
+ *
+ * 用在「试聊留下一堆同名会话」之后：逐条删不现实，按角色一次清完。
+ * 记忆不受影响（记忆按陪伴对象跨会话累积）。
+ */
+export async function deleteSessions(
+  personaId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<SessionPurgeResult> {
+  const query = new URLSearchParams({ persona_id: personaId });
+  const res = await fetch(`${API_BASE}/chat/sessions?${query.toString()}`, {
+    method: "DELETE",
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "清空历史对话");
+  return (await res.json()) as SessionPurgeResult;
+}
+
+/**
+ * 清空某个陪伴对象的**全部记忆**（不可恢复）。
+ *
+ * 四层一起清：情景记忆（温层）/ 语义事实（冷层）/ 情绪日记 / 个人记忆（知识库）。
+ * **不动会话记录**——历史对话是另一个入口（`deleteSessions`），
+ * 「只清记忆、留着聊天记录」是用户会真的要的组合。
+ */
+export async function purgeMemory(
+  personaId: string,
+  options: { signal?: AbortSignal } = {},
+): Promise<MemoryPurgeResult> {
+  const query = new URLSearchParams({ persona_id: personaId });
+  const res = await fetch(`${API_BASE}/chat/memory?${query.toString()}`, {
+    method: "DELETE",
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "清空记忆");
+  return (await res.json()) as MemoryPurgeResult;
 }
 
 // =============================================================
@@ -500,7 +610,7 @@ export async function postAvatar(
  * 查询当前语音引擎与可选音色。
  *
  * 失败/异常一律返回 `null`：这只是「用不用服务端声音」的探测，
- * 拿不到就按浏览器原生 TTS 走，**不该阻断页面加载**（与 postAvatar 同样的处理）。
+ * 拿不到就按「未接入 TTS」处理（静默），**不该阻断页面加载**（与 postAvatar 同样的处理）。
  */
 export async function fetchTtsVoices(
   options: { signal?: AbortSignal } = {},
@@ -643,6 +753,56 @@ export async function listAvatarModelSources(): Promise<AvatarModelSources> {
   const res = await fetch(`${API_BASE}/media/avatar/models/sources`, { cache: "no-store" });
   if (!res.ok) await throwApiError(res, "读取模型来源");
   return (await res.json()) as AvatarModelSources;
+}
+
+// =============================================================
+// 数字人凭证（/media/avatar/credentials）
+// =============================================================
+
+/**
+ * 读某形态的魔珐凭证。
+ *
+ * 返回 `null` 专指「后端读不到」（离线 / 5xx）——与「后端说没配」
+ * （`source: "none"`）是两件事：前者要保持界面现状，后者才是
+ * 「未配置 → 用本地渲染器」。
+ */
+export async function getAvatarCredentials(
+  form: AvatarCredentialForm,
+): Promise<AvatarCredentialsResponse | null> {
+  try {
+    const res = await fetch(
+      `${API_BASE}/media/avatar/credentials?form=${encodeURIComponent(form)}`,
+      { cache: "no-store" },
+    );
+    if (!res.ok) return null;
+    return (await res.json()) as AvatarCredentialsResponse;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 写某形态的凭证（两个字段都传空串 = 清除）。
+ *
+ * 失败返回 `null` 而不抛错：调用方是设置面板，它只需要知道「成没成」，
+ * 由界面给出可读提示（与 `getChatPreferences` 同一套约定）。
+ */
+export async function putAvatarCredentials(input: {
+  form: AvatarCredentialForm;
+  appId: string;
+  appSecret: string;
+}): Promise<AvatarCredentialsResponse | null> {
+  try {
+    const res = await fetch(`${API_BASE}/media/avatar/credentials`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(input),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as AvatarCredentialsResponse;
+  } catch {
+    return null;
+  }
 }
 
 // =============================================================
@@ -945,10 +1105,10 @@ export async function updateStudioPersona(
 }
 
 /**
- * 删除角色卡。
+ * 删除角色卡（**级联**）。
  *
- * **只删角色卡**：该角色的会话与记忆都会保留，响应里的 `sessions` / `bound_entries`
- * 是给界面做删除前提示用的影响面信息。
+ * 该角色的全部会话、四层记忆与专属世界书条目都会一并清除，**不可恢复**——
+ * 界面必须先做二次确认；响应回报各层实际删除的条数。
  */
 export async function deleteStudioPersona(
   personaId: string,
@@ -999,9 +1159,9 @@ export async function updateStudioEntry(
   );
 }
 
-/** 删除世界书条目（内置条目会返回 403）。 */
-export async function deleteStudioEntry(entryId: string): Promise<StudioEntryWriteResult> {
-  return studioJson<StudioEntryWriteResult>(
+/** 删除世界书条目（内置条目写入用户侧隐藏清单，不修改包内文件）。 */
+export async function deleteStudioEntry(entryId: string): Promise<StudioEntryDeleteResult> {
+  return studioJson<StudioEntryDeleteResult>(
     `/chat/studio/worldbook/${encodeURIComponent(entryId)}`,
     "DELETE",
     undefined,
@@ -1043,6 +1203,71 @@ export async function testStudioEntry(
   );
 }
 
+// ---------- 文风预设（/chat/studio/styles*）----------
+//
+// 文风与角色正交，所以这里没有归属也没有级联；但每个写操作同样会让后端
+// 失效重建对话图——「工坊里建好、对话里选不到」那种不一致因此不会发生。
+
+/** 文风详情（含风格指令与示例；内置文风也会返回，由界面置为只读）。 */
+export async function getStudioStyle(styleId: string): Promise<StudioStyle> {
+  const res = await fetch(
+    `${API_BASE}/chat/studio/styles/${encodeURIComponent(styleId)}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) await throwApiError(res, "读取文风");
+  return ((await res.json()) as { style: StudioStyle }).style;
+}
+
+/** 新建文风预设（id 由后端生成）。 */
+export async function createStudioStyle(
+  input: StudioStyleInput,
+): Promise<StudioStyleWriteResult> {
+  return studioJson<StudioStyleWriteResult>(
+    "/chat/studio/styles",
+    "POST",
+    input,
+    "新建文风",
+  );
+}
+
+/** 更新文风预设（未提交的字段不会被修改）。 */
+export async function updateStudioStyle(
+  styleId: string,
+  input: Partial<StudioStyleInput>,
+): Promise<StudioStyleWriteResult> {
+  return studioJson<StudioStyleWriteResult>(
+    `/chat/studio/styles/${encodeURIComponent(styleId)}`,
+    "PUT",
+    input,
+    "保存文风",
+  );
+}
+
+/** 删除文风预设（内置文风写入用户侧隐藏清单，不修改包内文件）。 */
+export async function deleteStudioStyle(
+  styleId: string,
+): Promise<StudioStyleDeleteResult> {
+  return studioJson<StudioStyleDeleteResult>(
+    `/chat/studio/styles/${encodeURIComponent(styleId)}`,
+    "DELETE",
+    undefined,
+    "删除文风",
+  );
+}
+
+/** 复制文风预设（内置文风借此得到一份可编辑的副本）。 */
+export async function duplicateStudioStyle(
+  styleId: string,
+  name?: string,
+): Promise<StudioStyleWriteResult> {
+  return studioJson<StudioStyleWriteResult>(
+    `/chat/studio/styles/${encodeURIComponent(styleId)}/duplicate`,
+    "POST",
+    name ? { name } : {},
+    "复制文风",
+  );
+}
+
 // =============================================================
 // 插件管理（/plugins/*，backend/app/api/plugins.py）
 // =============================================================
@@ -1058,10 +1283,11 @@ export interface PluginToggleResult {
   plugins: PluginStatus[];
 }
 
-/** PUT /plugins/{id}/settings 响应 */
+/** PUT /plugins/{id}/settings 响应（与 GET 同形状，前端不必处理两套；同样不含密钥明文） */
 export interface PluginSettingsWriteResult {
   id: string;
   values: Record<string, unknown>;
+  secrets_set: string[];
   plugins: PluginStatus[];
 }
 
@@ -1093,7 +1319,12 @@ export async function getPluginSettings(pluginId: string): Promise<PluginSetting
   return (await res.json()) as PluginSettingsResponse;
 }
 
-/** 保存插件配置；后端会重新 setup，让新配置当场生效。 */
+/**
+ * 保存插件配置；后端会重新 setup，让新配置当场生效。
+ *
+ * 密钥字段的约定：**不提交 = 沿用已保存的**（密码框不回填，用户没动它），
+ * 提交 `null` = 清除（回落 .env）。因此不要把未修改的密钥字段当成空值提交。
+ */
 export async function putPluginSettings(
   pluginId: string,
   values: Record<string, unknown>,
@@ -1139,6 +1370,20 @@ export async function importTavernMemory(
   });
   if (!res.ok) await throwApiError(res, "导入酒馆记忆");
   return (await res.json()) as TavernImportResult;
+}
+
+/**
+ * 把酒馆世界书同步进**个人知识库**（按角色分作用域，覆盖写）。
+ *
+ * 与「注入到提示词」是两条路：注入是每轮都可能占预算的**常驻**；
+ * 知识库是**按需召回**的索引——问到相关的事才进上下文。
+ */
+export async function syncTavernKnowledge(): Promise<TavernKnowledgeSyncResult> {
+  const res = await fetch(`${API_BASE}/plugins/tavern-bridge/knowledge/sync`, {
+    method: "POST",
+  });
+  if (!res.ok) await throwApiError(res, "同步酒馆世界书到知识库");
+  return (await res.json()) as TavernKnowledgeSyncResult;
 }
 
 // =============================================================
@@ -1196,4 +1441,411 @@ export async function reloadSkills(): Promise<SkillCatalog> {
   const res = await fetch(`${API_BASE}/skills/reload`, { method: "POST" });
   if (!res.ok) await throwApiError(res, "重新扫描技能");
   return (await res.json()) as SkillCatalog;
+}
+
+/**
+ * 删除技能。
+ *
+ * 两种语义（由后端按来源定，界面只管如实说明）：
+ * - **自建**（`data/skills/`）：删掉磁盘上的文件，删了就没了；
+ * - **内置**（`backend/skills/`）：只写用户侧隐藏清单，包内文件一字未改，
+ *   清单里仍带着它（`deleted: true`），可以 `restoreSkill` 找回。
+ */
+export async function deleteSkill(skillId: string): Promise<SkillDeleteResult> {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillId)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) await throwApiError(res, "删除技能");
+  return (await res.json()) as SkillDeleteResult;
+}
+
+/** 恢复被隐藏的内置技能（自建技能是物理删除，没有可恢复的对象）。 */
+export async function restoreSkill(skillId: string): Promise<SkillRestoreResult> {
+  const res = await fetch(`${API_BASE}/skills/${encodeURIComponent(skillId)}/restore`, {
+    method: "POST",
+  });
+  if (!res.ok) await throwApiError(res, "恢复技能");
+  return (await res.json()) as SkillRestoreResult;
+}
+
+// =============================================================
+// LLM 辅助创作（AGENTS.md §9.12）：生成草稿 → 用户审阅 → 显式保存
+// =============================================================
+//
+// 三处 `/ai-draft` 都**只返回内容、不落盘**；写操作是各自独立的接口。
+// 失败语义统一：400 = 前置条件不满足（如模型是本地占位实现，提示里说清了怎么办），
+// 502 = 模型没产出可解析的内容（可以再点一次试试），两者都值得原样展示给用户。
+
+/** 人设草稿（走当前对话模型；不落盘，保存仍由创作工坊的接口负责）。 */
+export async function draftPersona(brief: string): Promise<AiDraftResponse<PersonaAiDraft>> {
+  const res = await fetch(`${API_BASE}/chat/studio/personas/ai-draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brief }),
+  });
+  if (!res.ok) await throwApiError(res, "生成人设草稿");
+  return (await res.json()) as AiDraftResponse<PersonaAiDraft>;
+}
+
+/** 技能草稿（不落盘）。 */
+export async function draftSkill(brief: string): Promise<AiDraftResponse<SkillAiDraft>> {
+  const res = await fetch(`${API_BASE}/skills/ai-draft`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ brief }),
+  });
+  if (!res.ok) await throwApiError(res, "生成技能草稿");
+  return (await res.json()) as AiDraftResponse<SkillAiDraft>;
+}
+
+/** 新建技能：写入用户技能目录，并在同一次请求里重扫技能库。 */
+export async function createSkill(input: SkillCreateInput): Promise<SkillWriteResponse> {
+  const res = await fetch(`${API_BASE}/skills`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await throwApiError(res, "新建技能");
+  return (await res.json()) as SkillWriteResponse;
+}
+
+/**
+ * 插件完整列表（含扫描目录）。
+ *
+ * 列表本身页面已从 `/health` 轮询拿到；这里只在需要 `dirs`（插件放哪儿）时按需调用，
+ * 因此**不参与轮询**。
+ */
+export async function getPlugins(): Promise<PluginListResponse> {
+  const res = await fetch(`${API_BASE}/plugins`, { cache: "no-store" });
+  if (!res.ok) await throwApiError(res, "读取插件列表");
+  return (await res.json()) as PluginListResponse;
+}
+
+/**
+ * 把**写在别处**的插件目录导入到用户插件目录（复制一份）。
+ *
+ * 导入 = 引入可执行代码：插件跑在宿主进程里，没有沙箱。开发期更推荐把插件所在目录
+ * 填进 `PLUGIN_EXTRA_DIRS`（零拷贝，宿主不碰源文件），改完代码点「重新扫描」即可。
+ */
+export async function importPlugin(
+  input: PluginImportInput,
+): Promise<PluginImportResponse> {
+  const res = await fetch(`${API_BASE}/plugins/import`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  if (!res.ok) await throwApiError(res, "导入插件");
+  return (await res.json()) as PluginImportResponse;
+}
+
+/**
+ * 重扫插件目录，发现新放进去的插件（含 `PLUGIN_EXTRA_DIRS` 指向的目录）。
+ *
+ * 只读 `manifest.json` 并登记，**不重跑**已加载插件的代码——它是「发现」不是「热重载」。
+ */
+export async function reloadPlugins(): Promise<PluginReloadResponse> {
+  const res = await fetch(`${API_BASE}/plugins/reload`, { method: "POST" });
+  if (!res.ok) await throwApiError(res, "重新扫描插件目录");
+  return (await res.json()) as PluginReloadResponse;
+}
+
+// =============================================================
+// 感知层（/perception/*，backend/app/api/perception.py）
+// 设计见 docs/proactive-multimodal.md §4
+// =============================================================
+
+/** 语音转写结果。 */
+export interface AsrResult {
+  text: string;
+  provider: string;
+  language: string;
+  duration_seconds: number;
+  warnings: string[];
+  /** 是否识别到内容。为空时**不要覆盖用户已输入的文字** */
+  has_text: boolean;
+}
+
+/** 桌面情景上报体（Electron 桌宠端采集，Web 端拿不到）。 */
+export interface DesktopContextReport {
+  now_playing_title?: string;
+  now_playing_artist?: string;
+  foreground_title?: string;
+  foreground_process?: string;
+  idle_seconds?: number;
+  battery_percent?: number | null;
+  battery_charging?: boolean | null;
+  /** 客户端本地时间 HH:MM（由客户端给，避免主机与用户时区不一致） */
+  local_time?: string;
+  /** 客户端本地日期 YYYY-MM-DD */
+  local_date?: string;
+}
+
+/** 感知能力状态（前端据此决定渲染哪些入口）。 */
+export interface PerceptionStatus {
+  desktop_enabled: boolean;
+  include_window_title: boolean;
+  asr_provider: string;
+  asr_available: boolean;
+  asr_model: string;
+  asr_note: string;
+  /** 是否在对话界面渲染语音按钮（关掉后能力仍在，只是不显示入口） */
+  asr_ui_enabled: boolean;
+  /** 语音快捷键（形如 `Ctrl+Shift+M`；空 = 不启用） */
+  asr_shortcut: string;
+  vision_provider: string;
+  vision_available: boolean;
+  vision_model: string;
+  vision_note: string;
+  /** 是否在对话界面渲染「图片」按钮 */
+  vision_ui_enabled: boolean;
+  /** 是否把时间（日期 / 星期 / 时段）告诉角色 */
+  include_time: boolean;
+  /** 行踪（活动轨迹）是否在记录 */
+  activity_enabled: boolean;
+  /** 行踪里是否连窗口标题一起记（默认 false） */
+  activity_include_title: boolean;
+  /** 行踪保留天数 */
+  activity_retention_days: number;
+  /** 偏好画像是否注入 */
+  profile_enabled: boolean;
+  /** 此刻在用什么程序（空 = 没采到） */
+  activity_current: string;
+  /** 最近几段行踪（给界面核对「它到底记了什么」） */
+  activity_lines: string[];
+  /** 当前生效的感知事实（已渲染成 `- …` 行） */
+  current: string[];
+  summary: string;
+}
+
+/**
+ * 把一段录音转写成文本。
+ *
+ * **只转写、不发送**：结果回填输入框，由用户确认后再走 `/chat`。
+ * ASR 有误识别，自动发送会让「识别错一个字」直接变成「对话跑偏」。
+ *
+ * 失败抛出 `ApiError`（403/400 的 detail 里带着「该把模型放到哪」这类可照做的信息，
+ * 直接展示给用户即可）。
+ */
+export async function transcribeAudio(
+  file: File,
+  options: { language?: string; signal?: AbortSignal } = {},
+): Promise<AsrResult> {
+  const query = new URLSearchParams();
+  if (options.language) query.set("language", options.language);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_BASE}/perception/asr${suffix}`, {
+    method: "POST",
+    body: form, // 不设 Content-Type：浏览器需自行补 multipart 边界
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "语音识别");
+  return (await res.json()) as AsrResult;
+}
+
+/**
+ * 上报桌面情景（**只由 Electron 桌宠端调用**）。
+ *
+ * 主进程只负责采集，经 IPC 交给渲染层后由渲染层直连本接口——
+ * 主进程不直连后端、也不接触任何模型密钥（见 `docs/desktop-pet.md` §4）。
+ *
+ * 后端开关关闭时返回 `accepted: false`（并且不会写入快照），
+ * 调用方据此停止采集，而不是继续白上报。
+ */
+export async function reportDesktopContext(
+  context: DesktopContextReport,
+  options: { signal?: AbortSignal } = {},
+): Promise<{ accepted: boolean; enabled: boolean; perception_text: string }> {
+  const res = await fetch(`${API_BASE}/perception/desktop`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(context),
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "上报桌面情景");
+  return (await res.json()) as { accepted: boolean; enabled: boolean; perception_text: string };
+}
+
+/**
+ * 感知能力状态。
+ *
+ * 失败返回 `null`（与 `fetchTtsVoices` 同一约定）：这只是「要不要渲染麦克风」的探测，
+ * 拿不到就按「不可用」处理，不该阻断页面加载。
+ */
+export async function getPerceptionStatus(
+  options: { signal?: AbortSignal } = {},
+): Promise<PerceptionStatus | null> {
+  try {
+    const res = await fetch(`${API_BASE}/perception/status`, {
+      cache: "no-store",
+      signal: options.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as PerceptionStatus;
+  } catch {
+    return null;
+  }
+}
+
+/** 最近的行踪与偏好画像（**给界面看，不是给模型的**）。 */
+export interface ActivityReport {
+  enabled: boolean;
+  include_title: boolean;
+  retention_days: number;
+  /** 此刻在用什么（空 = 没采到） */
+  current: string;
+  /** 最近几段，形如 `21:03–21:40 Code.exe` */
+  lines: string[];
+  /** 偏好画像渲染成的行（常用程序 / 活跃时段 / 夜猫子） */
+  profile_lines: string[];
+}
+
+/**
+ * 读最近的行踪与画像。
+ *
+ * 「它记住了什么」必须对用户可见——没有这个接口，用户只能靠它说的话去猜，
+ * 而猜出来的结论一定比实际更糟。失败返回 `null`（同 `getPerceptionStatus`）。
+ */
+export async function getActivity(
+  options: { hours?: number; signal?: AbortSignal } = {},
+): Promise<ActivityReport | null> {
+  try {
+    const query = new URLSearchParams();
+    if (options.hours) query.set("hours", String(options.hours));
+    const suffix = query.toString() ? `?${query.toString()}` : "";
+    const res = await fetch(`${API_BASE}/perception/activity${suffix}`, {
+      cache: "no-store",
+      signal: options.signal,
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as ActivityReport;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 清空全部行踪记录。
+ *
+ * 这是「感知数据用户全权可控」的落地动作：一次清干净，而不是只清今天的——
+ * 只清一半反而会让人怀疑「到底删了没」。
+ */
+export async function clearActivity(
+  options: { signal?: AbortSignal } = {},
+): Promise<{ removed: number; message: string }> {
+  const res = await fetch(`${API_BASE}/perception/activity/clear`, {
+    method: "POST",
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "清除行踪");
+  return (await res.json()) as { removed: number; message: string };
+}
+
+/** 图片理解结果（Qwen2.5-VL）。 */
+export interface VisionResult {
+  /** 中性事实描述（VLM 产出，已按「只描述看得见的」约束） */
+  description: string;
+  provider: string;
+  model: string;
+  warnings: string[];
+  /** 后端当前渲染出的「此刻」文本（含这张图），便于展示与排查 */
+  perception_text: string;
+}
+
+/**
+ * 理解一张用户分享的图片，结果作为**感知事实**注入。
+ *
+ * **只理解、不发送**：描述进后端快照后，仍需用户发一条 `/chat` 才会影响回复。
+ * 这样「看图」与「说话」是两次调用、两个模型——视觉模型缺失时，
+ * 整个对话链路照常工作。
+ *
+ * 图片以 data URL 内联进模型请求，**后端不落盘**。
+ */
+export async function describeImage(
+  file: File,
+  options: { question?: string; signal?: AbortSignal } = {},
+): Promise<VisionResult> {
+  const query = new URLSearchParams();
+  if (options.question) query.set("question", options.question);
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await fetch(`${API_BASE}/perception/vision${suffix}`, {
+    method: "POST",
+    body: form, // 不设 Content-Type：浏览器需自行补 multipart 边界
+    signal: options.signal,
+  });
+  if (!res.ok) await throwApiError(res, "图片理解");
+  return (await res.json()) as VisionResult;
+}
+
+// =============================================================
+// 主动链路（/proactive/*，backend/app/api/proactive.py）
+// 设计见 docs/proactive-multimodal.md §5
+// =============================================================
+/** 主动链路状态（配置 + 节流状态 + 触发器清单）。 */
+export interface ProactiveStatus {
+  enabled: boolean;
+  running: boolean;
+  interval_seconds: number;
+  quiet_hours: string;
+  min_interval_minutes: number;
+  daily_quota: number;
+  sent_today: number;
+  last_proactive_at: string;
+  last_user_message_at: string;
+  triggers: { id: string; type: string }[];
+  last_outcome: {
+    fired: boolean;
+    trigger_id: string;
+    skipped_reason: string;
+    declined: boolean;
+  } | null;
+}
+
+/** 一次手动评估的结果（演示 / 调试）。 */
+export interface ProactiveRunResult {
+  fired: boolean;
+  trigger_id: string;
+  reason: string;
+  /** 被闸门拦下的原因（为空表示没有意图，或已成功开口） */
+  skipped_reason: string;
+  declined: boolean;
+  reply: string;
+}
+
+/** 主动链路状态（失败返回 null：面板据此隐藏，而不是显示一堆 0）。 */
+export async function getProactiveStatus(): Promise<ProactiveStatus | null> {
+  try {
+    const res = await fetch(`${API_BASE}/proactive/status`, { cache: "no-store" });
+    if (!res.ok) return null;
+    return (await res.json()) as ProactiveStatus;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 立刻评估一轮主动开口（演示 / 调试用）。
+ *
+ * 调主动沟通最难的就是「等它自己到点」——演示视频里不可能等 90 分钟冷却。
+ * 它走的是**同一条** `run_once`，因此不会绕过任何一道闸门。
+ *
+ * ⚠️ 有 SSE 订阅者才会真的生成（没人听时事件会被总线丢弃，生成纯属浪费一次调用）——
+ * 用它做演示时**必须先打开对话界面**。
+ */
+export async function runProactiveNow(): Promise<ProactiveRunResult> {
+  const res = await fetch(`${API_BASE}/proactive/run`, { method: "POST" });
+  if (!res.ok) await throwApiError(res, "触发一次主动开口");
+  return (await res.json()) as ProactiveRunResult;
+}
+
+/** 重置主动链路的节流状态（冷却锚点 / 当日计数 / 触发器去重表）。 */
+export async function resetProactiveState(): Promise<void> {
+  const res = await fetch(`${API_BASE}/proactive/reset`, { method: "POST" });
+  if (!res.ok) await throwApiError(res, "重置主动沟通节流");
 }

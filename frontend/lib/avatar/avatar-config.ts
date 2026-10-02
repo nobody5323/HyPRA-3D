@@ -1,16 +1,19 @@
 /**
- * 数字人凭证的**运行时配置**（解决构建时内联的问题）。
+ * 数字人凭证与纯前端偏好。
  *
- * 背景：`NEXT_PUBLIC_*` 是**构建时**内联的，改 `.env.local` 必须重新 build，
- * 无法在演示现场临时填写密钥。
+ * 凭证**存后端**（`GET|PUT /media/avatar/credentials`，见
+ * `backend/app/api/media.py`），不再写 localStorage。理由与对话偏好完全相同：
+ * 三个界面的 origin 不同（控制台 / 桌宠窗是 `127.0.0.1:34567`，Web 端是
+ * `localhost:3000`），localStorage 天然不共享，而「用哪套密钥」必须是三处一致的
+ * 事实。凭证还按形态分两套（`web` 横屏 / `pet` 竖屏）——魔珐的容器比例必须与
+ * 控制台选定的应用类型一致。
  *
- * 本模块提供三级来源（优先级从高到低）：
- *   1. **界面填写** → 存 localStorage（可在页面「数字人设置」里随时改，即时生效）
- *   2. **构建时环境变量** → NEXT_PUBLIC_XMOV_APP_ID / APP_SECRET（部署时固化）
- *   3. 都没有 → 自动降级为「浏览器原生 TTS + 占位形象」
+ * ⚠️ 存后端**不是「更安全」**：魔珐 SDK 是客户端渲染
+ * （`new XmovAvatar({appSecret})`），密钥最终必然下发到浏览器。防护靠后端 CORS
+ * 只放行回环地址，不要给 `CORS_ORIGINS` 设 `"*"`。
  *
- * 安全说明：前端密钥按魔珐官方 SDK 设计需在浏览器中使用；
- * 正式上线建议由后端签发临时凭证，此处面向演示/内网场景。
+ * 本模块保留的 localStorage 内容只剩两类：渲染方式 / 语音这类**纯前端偏好**
+ * （各 origin 各存各的，不涉及跨界面一致性），以及旧版凭证的一次性迁移入口。
  */
 
 export interface AvatarCredentials {
@@ -18,29 +21,13 @@ export interface AvatarCredentials {
   appSecret: string;
 }
 
-/** 凭证来源（用于界面展示） */
-export type CredentialSource = "local" | "env" | "none";
+/** 凭证来源（用于界面展示）：界面填写 > 部署配置 > 未配置 */
+export type CredentialSource = "user" | "env" | "none";
 
-const STORAGE_KEY = "hypra.avatar.credentials";
-const CHANGE_EVENT = "hypra:avatar-credentials-changed";
-/** 存储结构版本：结构变更时可据此丢弃旧数据（避免半途结构升级造成的脏读） */
-const STORAGE_VERSION = 1;
-/**
- * 安全提示：localStorage 为**明文**存储。
- * 魔珐官方 SDK 设计上要求前端持有驱动密钥，此处面向演示/内网场景；
- * 正式上线应由后端签发短期临时凭证，不把长期密钥下发到浏览器。
- */
-
-/** 构建时环境变量（可能为空串） */
-const ENV_CREDENTIALS: AvatarCredentials = {
-  appId: (process.env.NEXT_PUBLIC_XMOV_APP_ID ?? "").trim(),
-  appSecret: (process.env.NEXT_PUBLIC_XMOV_APP_SECRET ?? "").trim(),
-};
-
-/** 部署时是否已提供环境变量凭证 */
-export const ENV_CREDENTIALS_PRESENT = Boolean(
-  ENV_CREDENTIALS.appId && ENV_CREDENTIALS.appSecret,
-);
+/** 旧版存凭证用的 localStorage 键（只服务于一次性迁移，迁移完这段可删） */
+const LEGACY_STORAGE_KEY = "hypra.avatar.credentials";
+/** 旧存储结构版本：对不上就当作没有旧数据，避免半途结构升级造成脏读 */
+const LEGACY_STORAGE_VERSION = 1;
 
 function isComplete(value: unknown): value is AvatarCredentials {
   if (!value || typeof value !== "object") return false;
@@ -53,15 +40,21 @@ function isComplete(value: unknown): value is AvatarCredentials {
   );
 }
 
-/** 读取界面填写的凭证（SSR 环境返回 null）。 */
-export function readStoredCredentials(): AvatarCredentials | null {
+/**
+ * 读**旧版**存在 localStorage 里的凭证。
+ *
+ * 只服务于一次性迁移（把用户以前填的密钥搬到后端，见 `useAvatarCredentials`）；
+ * 迁移上线一段时间后，连这个函数一起删。任何异常都按「没有旧数据」处理——
+ * 迁移失败不该影响正常使用。
+ */
+export function readLegacyStoredCredentials(): AvatarCredentials | null {
   if (typeof window === "undefined") return null;
   try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
+    const raw = window.localStorage.getItem(LEGACY_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw);
     // 版本不匹配：结构已变，丢弃旧数据（宁可让用户重填，也不读脏值）
-    if (parsed && typeof parsed === "object" && parsed.v !== STORAGE_VERSION) return null;
+    if (parsed && typeof parsed === "object" && parsed.v !== LEGACY_STORAGE_VERSION) return null;
     return isComplete(parsed)
       ? { appId: parsed.appId.trim(), appSecret: parsed.appSecret.trim() }
       : null;
@@ -70,77 +63,15 @@ export function readStoredCredentials(): AvatarCredentials | null {
   }
 }
 
-/** 取当前生效的凭证与来源。 */
-export function getEffectiveCredentials(): {
-  credentials: AvatarCredentials | null;
-  source: CredentialSource;
-} {
-  const stored = readStoredCredentials();
-  if (stored) return { credentials: stored, source: "local" };
-  if (isComplete(ENV_CREDENTIALS)) return { credentials: ENV_CREDENTIALS, source: "env" };
-  return { credentials: null, source: "none" };
-}
-
-/**
- * 首屏安全值（**不读 localStorage**）。
- *
- * 必须与服务端渲染保持一致，否则 SSR/CSR 内容不一致会触发 hydration 错误：
- * 服务端读不到 localStorage，若客户端首屏就读，两者渲染结果会不同。
- * 因此首屏只用环境变量，localStorage 在挂载后再读取（见 useAvatarCredentials）。
- */
-export function getInitialCredentials(): {
-  credentials: AvatarCredentials | null;
-  source: CredentialSource;
-} {
-  if (isComplete(ENV_CREDENTIALS)) return { credentials: ENV_CREDENTIALS, source: "env" };
-  return { credentials: null, source: "none" };
-}
-
-/**
- * 保存界面填写的凭证（并通知订阅者）。
- *
- * @returns 是否真正写入成功（隐私模式 / 存储配额满时为 false，调用方据此提示用户）
- */
-export function saveCredentials(credentials: AvatarCredentials): boolean {
-  if (typeof window === "undefined") return false;
-  const payload: AvatarCredentials = {
-    appId: credentials.appId.trim(),
-    appSecret: credentials.appSecret.trim(),
-  };
-  try {
-    window.localStorage.setItem(
-      STORAGE_KEY,
-      JSON.stringify({ v: STORAGE_VERSION, ...payload }),
-    );
-  } catch (error) {
-    // localStorage 可能被禁用（隐私模式）或写满：不抛错，交由调用方提示
-    console.warn("[HyPRA] 凭证写入 localStorage 失败：", error);
-    return false;
-  }
-  notifyChange();
-  return true;
-}
-
-/** 清除界面填写的凭证（回落到环境变量或降级）。 */
-export function clearCredentials(): void {
+/** 迁移成功后清掉旧键（否则每次挂载都会把同一份旧数据再搬一次）。 */
+export function clearLegacyStoredCredentials(): void {
   if (typeof window === "undefined") return;
   try {
-    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(LEGACY_STORAGE_KEY);
   } catch (error) {
-    console.warn("[HyPRA] 凭证清除失败：", error);
+    // 隐私模式 / 存储被禁用：清不掉也不影响使用，迁移本身是幂等的
+    console.warn("[HyPRA] 旧凭证清除失败：", error);
   }
-  notifyChange();
-}
-
-/** 订阅凭证变化（保存 / 清除时触发）。 */
-export function subscribeCredentials(listener: () => void): () => void {
-  if (typeof window === "undefined") return () => {};
-  window.addEventListener(CHANGE_EVENT, listener);
-  return () => window.removeEventListener(CHANGE_EVENT, listener);
-}
-
-function notifyChange(): void {
-  window.dispatchEvent(new Event(CHANGE_EVENT));
 }
 
 // =============================================================
@@ -230,22 +161,30 @@ export function subscribeRendererPreference(listener: () => void): () => void {
 // 播报实现选择（声音从哪来）
 // =============================================================
 
-/** 播报实现：魔珐 SDK 自带 TTS / 服务端 TTS（GPT-SoVITS）/ 浏览器原生 TTS */
-export type AvatarVoiceSource = "xmov" | "server" | "browser";
+/**
+ * 播报实现：魔珐 SDK 自带 TTS / 服务端 TTS（GPT-SoVITS）/ **不出声**。
+ *
+ * 刻意没有「浏览器原生 TTS」这一档（Web Speech API 已移除）：
+ * 浏览器语音的音色与项目人设完全对不上，默认开启只会让陪伴体验失真。
+ * 因此**只有真正接入了 TTS（服务端 GPT-SoVITS 或魔珐 SDK）才出声**，
+ * 否则整轮静音、只显示文字与字幕。
+ */
+export type AvatarVoiceSource = "xmov" | "server" | "none";
 
 /**
  * 语音引擎偏好（用户手动指定）。
  *
  * 为什么需要它：探测结果只在**后端就绪那一刻**取一次，而演示现场会变：
- * - 想省 GPU / 降延迟 → 强制浏览器语音；
  * - 探测失败（后端刚启动、请求撞上网络抖动）但服务其实可用 → 强制服务端；
- * - 不想被动降级 → 也能强制（真失败仍旧逐句降级，不会没声音）。
+ * - 不想被动降级 → 也能强制（真失败只会静音，不会改用什么系统语音）。
+ *
+ * 历史值 `"browser"` 已随浏览器语音一起移除：读到它按非法值处理，回落到 `auto`。
  */
-export const TTS_ENGINE_PREFERENCES = ["auto", "server", "browser"] as const;
+export const TTS_ENGINE_PREFERENCES = ["auto", "server"] as const;
 
 export type TtsEnginePreference = (typeof TTS_ENGINE_PREFERENCES)[number];
 
-/** 默认：自动（后端配好服务端 TTS 就用它） */
+/** 默认：自动（后端配好服务端 TTS 就用它，否则静音） */
 export const DEFAULT_TTS_ENGINE: TtsEnginePreference = "auto";
 
 /** 面板里的选项与说明（顺序即展示顺序） */
@@ -254,9 +193,12 @@ export const TTS_ENGINE_OPTIONS: ReadonlyArray<{
   label: string;
   hint: string;
 }> = [
-  { value: "auto", label: "自动", hint: "后端配好服务端 TTS 就用它，否则用浏览器语音" },
-  { value: "server", label: "强制服务端 TTS", hint: "即使探测失败也试一次；真失败会逐句降级" },
-  { value: "browser", label: "强制浏览器语音", hint: "系统自带语音，不消耗算力、响应最快" },
+  {
+    value: "auto",
+    label: "自动",
+    hint: "后端配好服务端 TTS 就播报；没接入 TTS 时整轮静音，只显示文字",
+  },
+  { value: "server", label: "强制服务端 TTS", hint: "即使探测失败也试一次；真失败则静音（不改用系统语音）" },
 ];
 
 /**
@@ -267,8 +209,8 @@ export const TTS_ENGINE_OPTIONS: ReadonlyArray<{
  * 优先级：
  * 1. 魔珐 SDK 路径只能用自带 TTS——SDK 的 `speak()` 只吃 SSML、不接受外部音频，
  *    「魔珐形象 + GPT-SoVITS 声音」当前不可行（已确认的设计边界）；
- * 2. 其余情况尊重用户偏好：`browser` 强制浏览器语音，`server` 强制试服务端；
- * 3. `auto` → 按探测结果决定，最终一定落在能出声的一侧（浏览器 TTS 是零依赖兜底）。
+ * 2. 其余情况尊重用户偏好：`server` 强制试服务端；
+ * 3. `auto` → 按探测结果决定：接入 TTS 才出声，否则落到 `none`（静音）。
  */
 export function resolveVoiceSource({
   xmovActive,
@@ -283,9 +225,8 @@ export function resolveVoiceSource({
   preference?: TtsEnginePreference;
 }): AvatarVoiceSource {
   if (xmovActive) return "xmov"; // 设计约束：SDK 只能用它自带 TTS
-  if (preference === "browser") return "browser";
-  if (preference === "server") return "server"; // 探测失败也先试一次（失败会逐句降级）
-  return serverTtsAvailable ? "server" : "browser";
+  if (preference === "server") return "server"; // 探测失败也先试一次（真失败就静音）
+  return serverTtsAvailable ? "server" : "none";
 }
 
 const TTS_ENGINE_STORAGE_KEY = "hypra.avatar.tts-engine";

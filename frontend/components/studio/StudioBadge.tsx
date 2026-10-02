@@ -7,12 +7,12 @@
  * 而 tab 组件都要用这些徽标。
  */
 
-/** 「内置」徽标：该资源只读（要改就复制成我的）。 */
+/** 「内置」徽标：包内文件不直接编辑，可复制或从当前工坊删除。 */
 export function BuiltinBadge() {
   return (
     <span
       className="rounded-full bg-surface-raised px-2 py-0.5 text-[11px] text-ink-soft ring-1 ring-line"
-      title="内置内容只读；需要修改请先「复制为我的」"
+      title="内置内容不可直接编辑；可复制为我的，或从当前工坊删除"
     >
       内置
     </span>

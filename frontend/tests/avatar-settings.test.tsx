@@ -55,8 +55,8 @@ function renderPanel(overrides: Partial<Parameters<typeof AvatarSettings>[0]> = 
       onClose={vi.fn()}
       credentials={null}
       source="none"
-      save={vi.fn(() => true)}
-      clear={vi.fn()}
+      save={vi.fn(async () => true)}
+      clear={vi.fn(async () => true)}
       renderer="auto"
       onRendererChange={vi.fn()}
       ttsEngine="auto"
@@ -80,14 +80,15 @@ describe("语音引擎区块", () => {
     return within(screen.getByRole("group", { name: "语音引擎" }));
   }
 
-  it("三档引擎都渲染，且按当前偏好选中", () => {
-    renderPanel({ ttsEngine: "browser" });
+  it("两档引擎都渲染，且按当前偏好选中（已无「浏览器语音」档）", () => {
+    renderPanel({ ttsEngine: "server" });
 
     const group = engineGroup();
     expect((group.getByRole("radio", { name: /^自动/ }) as HTMLInputElement).checked).toBe(false);
     expect(
-      (group.getByRole("radio", { name: /强制浏览器语音/ }) as HTMLInputElement).checked,
+      (group.getByRole("radio", { name: /强制服务端 TTS/ }) as HTMLInputElement).checked,
     ).toBe(true);
+    expect(group.queryByRole("radio", { name: /浏览器/ })).toBeNull();
   });
 
   it("切换引擎会回调（由页面决定生效）", () => {
@@ -98,7 +99,7 @@ describe("语音引擎区块", () => {
     expect(onTtsEngineChange).toHaveBeenCalledWith("server");
   });
 
-  it("后端未就绪时给出可读说明（前端据此知道会回落浏览器语音）", () => {
+  it("后端未就绪时给出可读说明（前端据此知道本轮不会播报）", () => {
     renderPanel({ ttsStatus: null });
 
     expect(screen.getByText(/未探测到后端语音引擎/)).toBeTruthy();
@@ -209,5 +210,79 @@ describe("音色选择：情绪联动文案", () => {
 
     expect(screen.getByRole("option", { name: "默认音色（后端配置）" })).toBeTruthy();
     expect(screen.queryByText(/按本轮情绪自动选/)).toBeNull();
+  });
+});
+
+/**
+ * 凭证保存 / 清除。
+ *
+ * 凭证现在存在**后端**（三个界面共享同一份），所以这条路径有两个新性质：
+ * 写失败必须让用户看得见（不再有「写入本机 localStorage 失败」这种静默情形），
+ * 提示文案也不能再声称「只保存在本机浏览器」。
+ */
+describe("凭证保存与清除（走后端）", () => {
+  function fillCredentials(appId: string, appSecret: string) {
+    fireEvent.change(screen.getByRole("textbox", { name: /App ID/ }), {
+      target: { value: appId },
+    });
+    fireEvent.change(screen.getByPlaceholderText("••••••••"), { target: { value: appSecret } });
+  }
+
+  it("保存把两个字段交给回调，并提示会自动重新初始化", async () => {
+    const save = vi.fn(async () => true);
+    renderPanel({ save });
+
+    fillCredentials("ak-1", "sk-1");
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+
+    await waitFor(() =>
+      expect(save).toHaveBeenCalledWith({ appId: "ak-1", appSecret: "sk-1" }),
+    );
+    expect(await screen.findByText(/已保存/)).toBeTruthy();
+  });
+
+  it("后端不可达 / 被拒时给出可读提示（不静默失败）", async () => {
+    renderPanel({ save: vi.fn(async () => false) });
+
+    fillCredentials("ak-1", "sk-1");
+    fireEvent.click(screen.getByRole("button", { name: "保存并启用" }));
+
+    expect(await screen.findByText(/保存失败/)).toBeTruthy();
+  });
+
+  it("清除成功时清空输入并提示", async () => {
+    const clear = vi.fn(async () => true);
+    renderPanel({ credentials: { appId: "ak-1", appSecret: "sk-1" }, clear });
+
+    const appIdInput = screen.getByRole("textbox", { name: /App ID/ }) as HTMLInputElement;
+    expect(appIdInput.value).toBe("ak-1");
+
+    fireEvent.click(screen.getByRole("button", { name: "清除" }));
+
+    await waitFor(() => expect(clear).toHaveBeenCalled());
+    // 等一拍：handleClear 是异步的，输入框清空在 await 之后
+    await waitFor(() => expect(appIdInput.value).toBe(""));
+    expect(await screen.findByText(/已清除后端保存的密钥/)).toBeTruthy();
+  });
+
+  it("清除失败时不假装成功（输入保持原值）", async () => {
+    renderPanel({
+      credentials: { appId: "ak-1", appSecret: "sk-1" },
+      clear: vi.fn(async () => false),
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "清除" }));
+
+    expect(await screen.findByText(/清除失败/)).toBeTruthy();
+    expect((screen.getByRole("textbox", { name: /App ID/ }) as HTMLInputElement).value).toBe(
+      "ak-1",
+    );
+  });
+
+  it("底部说明如实写明密钥存后端，不再声称只在本机", () => {
+    renderPanel();
+
+    expect(screen.getByText(/backend\/data\/avatar-credentials\.json/)).toBeTruthy();
+    expect(screen.queryByText(/仅保存在本机浏览器/)).toBeNull();
   });
 });

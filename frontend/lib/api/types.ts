@@ -54,6 +54,13 @@ export interface MemoryCounts {
 export interface ChatResponse {
   session_id: string;
   persona_id: string;
+  /**
+   * 本轮实际生效的交互模式：`companion`（桌宠对话）/ `tavern`（酒馆聊天）。
+   *
+   * 界面据此解释「这轮为什么没有酒馆世界书」——酒馆来源的知识只在 `tavern`
+   * 模式召回（见 `app/memory/knowledge/scopes.py`）。字段可选：老后端没有它。
+   */
+  mode?: string;
   reply: string;
   /**
    * 本轮情绪判定。
@@ -81,6 +88,14 @@ export interface ChatResponse {
    * empty_markers / unresolved_macros / in_chat_count
    */
   st_preset?: Record<string, unknown>;
+  /**
+   * 本轮生效的叙事框架层（jailbreak）元信息；未启用时为 `{}`。
+   * 字段：jailbreak_id / jailbreak_name / intensity / requires_adult。
+   *
+   * 界面据此显示「这轮开着哪个叙事框架」——用户开了它就该看得见，
+   * 否则会分不清「回复风格变了」是模型的问题还是自己开了开关。
+   */
+  jailbreak?: Record<string, unknown>;
   /**
    * 播报指令。
    * 后端在 avatar 未启用或回复为空时返回空对象 `{}`，由 `api.ts` 规范化为 `null`。
@@ -186,7 +201,7 @@ export interface TtsVoiceInfo {
   is_default: boolean;
 }
 
-/** 当前语音引擎状态（前端据此决定用服务端音频还是浏览器原生 TTS）。 */
+/** 当前语音引擎状态（前端据此决定用服务端音频还是静默）。 */
 export interface TtsVoicesStatus {
   /** 当前数字人驱动：local | xmov | gpt_sovits */
   provider: string;
@@ -206,6 +221,36 @@ export interface TtsVoicesStatus {
   emotion_voices: boolean;
   /** 状态说明 / 不可用原因（可直接展示给用户） */
   note: string;
+}
+
+// =============================================================
+// 数字人凭证（GET|PUT /media/avatar/credentials）
+// =============================================================
+//
+// 凭证存**后端**而不是 localStorage：三个界面的 origin 不同
+// （控制台 / 桌宠窗是 127.0.0.1:34567，Web 端是 localhost:3000），
+// localStorage 天然不共享，而「用哪套密钥」必须是三处一致的事实。
+
+/**
+ * 凭证形态。
+ *
+ * 为什么分两种：魔珐的横屏/竖屏是**控制台创建应用时**定下的，容器比例必须与
+ * 应用类型一致（实测同一个 appId 换比例会变形）。Web 端用横屏应用（`web`）、
+ * 桌宠窗用竖屏应用（`pet`），所以凭证按形态分开存。
+ */
+export type AvatarCredentialForm = "web" | "pet";
+
+/**
+ * 某形态的凭证与来源。
+ *
+ * `source` 三档：`user`（界面填的，存后端）> `env`（部署配置 `.env`）> `none`。
+ */
+export interface AvatarCredentialsResponse {
+  form: AvatarCredentialForm;
+  appId: string;
+  appSecret: string;
+  source: "user" | "env" | "none";
+  configured: boolean;
 }
 
 // =============================================================
@@ -291,6 +336,8 @@ export interface McpServerStatus {
 export interface PluginStatus {
   id: string;
   display_name: string;
+  /** 一句话说明（能力中心在详情里展示：告诉用户这个能力是什么、开关在哪） */
+  description: string;
   version: string;
   /** 必需性分层：core 不可禁用，builtin 可禁用/替换，third-party 用户安装 */
   layer: "core" | "builtin" | "third-party";
@@ -377,8 +424,16 @@ export interface PluginPermissions {
 /** GET /plugins/{id}/settings */
 export interface PluginSettingsResponse {
   id: string;
-  /** 已保存的值；用户尚未填过时为空对象 */
+  /**
+   * 表单初始值：已保存的值 + 未保存字段的「宿主当前生效值」（.env / 运行时覆盖）。
+   * **密钥字段永远不在这里**（见 `secretsSet`）。
+   */
   values: Record<string, unknown>;
+  /**
+   * 已配置的密钥字段名（明文永不下发）：
+   * 前端据此显示「已保存，留空则沿用」，留空提交 = 沿用，提交 `null` = 清除。
+   */
+  secrets_set: string[];
   schema: PluginSettingsSchema;
   permissions: PluginPermissions;
 }
@@ -393,6 +448,47 @@ export interface TavernBridgeStatus {
   /** 已导入到该陪伴对象的会话 id */
   imported_sessions: string[];
   characters: string[];
+  /** 旧兼容字段：酒馆世界书不再直接注入提示词，当前固定为 false */
+  worldbook_enabled: boolean;
+  /** 还没同步进记忆的对话轮次数（与点同步后实际写入的轮次同一套规则算出） */
+  pending_turns: number;
+  /** 有新增内容的会话数 */
+  pending_sessions: number;
+  /** 已同步进个人知识库的酒馆世界书规模（按需召回的那条路） */
+  knowledge: TavernKnowledgeStatus;
+  /** 可选的世界书来源（勾选决定它是否参与接入） */
+  books: TavernBookOption[];
+}
+
+/** 一个可选的世界书来源（世界书文件 / 某个角色的内嵌设定） */
+export interface TavernBookOption {
+  /** 来源标识：`world/<文件名>` 或 `char/<角色名>` */
+  source: string;
+  /** 界面展示名 */
+  label: string;
+  entries: number;
+  enabled: boolean;
+}
+
+/** 知识库里由酒馆世界书同步来的规模（GET /plugins/tavern-bridge/status 的 knowledge 字段） */
+export interface TavernKnowledgeStatus {
+  documents: number;
+  chunks: number;
+  scopes: number;
+}
+
+/** POST /plugins/tavern-bridge/knowledge/sync */
+export interface TavernKnowledgeSyncResult {
+  /** 生效的酒馆数据目录 */
+  root: string;
+  documents: number;
+  chunks: number;
+  /** 清掉的「来源已不存在」文档数 */
+  removed: number;
+  /** 因找不到所属角色卡而没进库的条目数 */
+  skipped: number;
+  scopes: Record<string, number>;
+  warnings: string[];
 }
 
 /** POST /plugins/tavern-bridge/import（backend/app/memory/tavern_import.py 的 ImportResult） */
@@ -407,6 +503,8 @@ export interface TavernImportResult {
   facts: number;
   /** 写入的情景记忆条数 */
   memories: number;
+  /** 每个陪伴对象写入了多少轮：酒馆里不同角色各进各的记忆 */
+  scopes: Record<string, number>;
   warnings: string[];
 }
 
@@ -427,6 +525,14 @@ export interface SkillInfo {
   /** builtin（随项目分发）| user（自己放进 USER_SKILLS_DIR 的） */
   source: string;
   enabled: boolean;
+  /**
+   * 是否已被删除。
+   *
+   * 内置技能的「删除」只是写进用户侧隐藏清单（包内文件一字未改），因此清单里
+   * 仍然带着它、并置此标记——界面靠它列出「已隐藏」并提供恢复入口。
+   * 自建技能是物理删除，不会再出现在清单里。
+   */
+  deleted: boolean;
   /** 正文长度（字符数），用来在列表里提示「这篇有多大」 */
   body_chars: number;
 }
@@ -444,8 +550,124 @@ export interface SkillDetail {
 
 /** GET /skills 与 POST /skills/reload 的统一响应 */
 export interface SkillCatalog {
+  /** **含隐藏项**（`deleted: true`）：界面要能列出「已隐藏」才给得出恢复入口 */
   skills: SkillInfo[];
-  summary: { total: number; enabled: number };
+  /** total / enabled 只数可见技能；hidden 单独报（旧后端不返回时按 0 处理） */
+  summary: { total: number; enabled: number; hidden: number };
+}
+
+/** POST /skills：新建技能的返回值（落盘后的 id / 路径 + 刷新过的清单） */
+export interface SkillWriteResponse extends SkillCatalog {
+  id: string;
+  path: string;
+}
+
+/** DELETE /skills/{id}：删掉了什么 + 刷新过的清单 */
+export interface SkillDeleteResult extends SkillCatalog {
+  deleted: string;
+  name: string;
+  source: string;
+  /** true = 内置技能只是被隐藏（文件仍在 `backend/skills/`，可恢复） */
+  hidden: boolean;
+  /** 磁盘上被删掉的路径；内置技能为 null（什么都没从磁盘上消失） */
+  path: string | null;
+}
+
+/** POST /skills/{id}/restore：恢复被隐藏的内置技能 */
+export interface SkillRestoreResult extends SkillCatalog {
+  restored: string;
+  name: string;
+}
+
+// =============================================================
+// LLM 辅助创作（人设 / 技能 / 插件，AGENTS.md §9.12）
+// =============================================================
+//
+// 三者的流程一致：**生成草稿（不落盘）→ 用户在界面上审阅编辑 → 显式保存**。
+// 因此 `/ai-draft` 一律只返回内容，不产生任何副作用。
+
+/** 一次 AI 草稿的返回：内容 + 用的模型（界面要显示「谁写的」） */
+export interface AiDraftResponse<T> {
+  draft: T;
+  model: string;
+}
+
+/** 人设草稿（字段与创作工坊的表单一一对应） */
+export interface PersonaAiDraft {
+  name: string;
+  title: string;
+  description: string;
+  tags: string[];
+  prompt: string;
+  background: string;
+  variables: string[];
+}
+
+/** 技能草稿（字段与 SKILL.md 的 frontmatter 一一对应） */
+export interface SkillAiDraft {
+  id: string;
+  name: string;
+  description: string;
+  when_to_use: string;
+  body: string;
+}
+
+/** POST /skills 的请求体 */
+export interface SkillCreateInput {
+  id: string;
+  name: string;
+  description?: string;
+  when_to_use?: string;
+  body: string;
+}
+
+/**
+ * 插件扫描目录（GET /plugins 的 `dirs`）。
+ *
+ * 插件由**用户自己写**：把 `<id>/manifest.json` + `plugin.py` 放到 `userDir` 下点
+ * 「重新扫描」即可；开发期也可以把插件所在目录填进 `PLUGIN_EXTRA_DIRS`（`extraDirs`），
+ * 宿主直接扫它、不碰源文件。接口说明见 `docs/plugin-development.md`。
+ */
+export interface PluginDirs {
+  /** 用户插件目录：把插件目录丢进来 + 重新扫描（最常见的一条路） */
+  user_dir: string;
+  /** 额外来源目录（`PLUGIN_EXTRA_DIRS`，逗号分隔）：开发期零拷贝接入 */
+  extra_dirs: string[];
+  /** 第一方插件目录（随项目分发，只读展示） */
+  builtin_dir: string;
+}
+
+/** GET /plugins 的返回 */
+export interface PluginListResponse {
+  plugins: PluginStatus[];
+  summary: PluginsSummary;
+  /** 能力名 → 提供者插件 id 列表 */
+  capabilities: Record<string, string[]>;
+  dirs: PluginDirs;
+}
+
+/** POST /plugins/import 的请求体 */
+export interface PluginImportInput {
+  /** 插件源目录（其下须有 manifest.json） */
+  path: string;
+  /** 目标已存在时是否整体替换（默认拒绝） */
+  replace?: boolean;
+}
+
+/** POST /plugins/import 的返回 */
+export interface PluginImportResponse {
+  id: string;
+  /** 导入后的落盘目录 */
+  path: string;
+  enabled: boolean;
+  plugins: PluginStatus[];
+}
+
+/** POST /plugins/reload 的返回 */
+export interface PluginReloadResponse {
+  /** 本次新发现的插件 id */
+  discovered: string[];
+  plugins: PluginStatus[];
 }
 
 // =============================================================
@@ -590,6 +812,42 @@ export interface StyleCatalog {
   styles: StyleOption[];
 }
 
+// -------------------------------------------------------------
+// 叙事框架（jailbreak）预设（GET /chat/jailbreak-presets）
+// -------------------------------------------------------------
+//
+// 与文风、人设**正交**：人设管「是谁」，文风管「怎么说话」，本层管
+// 「这段对话处在什么框架里」（虚构叙事 / 现实问答）。三者可以任意组合。
+//
+// 这一层**出厂默认关闭**：它会改写模型的回应框架，属于用户知情后自行开启的能力。
+// 因此响应里同时带 `enabled`（部署默认）与预设清单，界面据此决定是否渲染开关。
+//
+// 注意：`requires_adult` 为 true 的档位只应展示给已确认成年的用户。后端不拦截
+// （该字段只做声明），确认动作由前端负责——本组件用一层本地确认拦住它。
+
+/** 一个叙事框架档位——与后端 jailbreak 预设 YAML 对应 */
+export interface JailbreakOption {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  /** 强度 0~2（0 只声明虚构语境，2 在虚构语境内放开题材） */
+  intensity: number;
+  /** 强度的中文说明（由后端 `INTENSITY_LABELS` 给出，前端不自行翻译） */
+  intensity_label: string;
+  /** true = 含成人向内容，展示前需要用户确认成年 */
+  requires_adult: boolean;
+}
+
+/** GET /chat/jailbreak-presets 响应 */
+export interface JailbreakCatalog {
+  /** 部署默认是否启用（`JAILBREAK_ENABLED`）；用户选择在 /chat/preferences 里 */
+  enabled: boolean;
+  /** 部署声明的缺省档位 id（`JAILBREAK_PRESET`，为空时后端给保守档） */
+  default_jailbreak_id: string;
+  presets: JailbreakOption[];
+}
+
 // =============================================================
 // 会话历史（GET /chat/sessions、GET /chat/sessions/{id}/history）
 // =============================================================
@@ -624,6 +882,24 @@ export interface SessionHistory {
 export interface SessionDeleteResult {
   session_id: string;
   removed_turns: number;
+}
+
+/** DELETE /chat/sessions?persona_id=… 响应（清空该角色的全部会话） */
+export interface SessionPurgeResult {
+  persona_id: string;
+  removed_sessions: number;
+  removed_turns: number;
+}
+
+/**
+ * DELETE /chat/memory?persona_id=… 响应（清空该角色的全部记忆）。
+ *
+ * `removed` 的键固定为 warm / facts / mood_log / knowledge，
+ * 值是该层被删掉的条数（分块数 / 记忆条数）。
+ */
+export interface MemoryPurgeResult {
+  persona_id: string;
+  removed: Record<string, number>;
 }
 
 // =============================================================
@@ -881,7 +1157,7 @@ export interface StudioPersonaSummary {
   title: string;
   description: string;
   tags: string[];
-  /** true = 内置角色（只读，可「复制为我的角色」） */
+  /** true = 内置角色（不可直接编辑，但可从当前工坊删除或复制） */
   builtin: boolean;
 }
 
@@ -896,7 +1172,7 @@ export interface StudioPersona extends StudioPersonaSummary {
   creator: string;
 }
 
-/** 世界书条目（内置 + 我的；内置只读） */
+/** 世界书条目（内置 + 我的；内置不可直接编辑，但可停用或删除） */
 export interface StudioWorldBookEntry {
   id: string;
   title: string;
@@ -915,7 +1191,7 @@ export interface StudioWorldBookEntry {
   case_sensitive: boolean;
   /** 注入优先级（越大越靠前） */
   priority: number;
-  /** true = 内置条目（只读，可复制或停用） */
+  /** true = 内置条目（不可直接编辑，可停用或删除） */
   builtin: boolean;
 }
 
@@ -930,13 +1206,23 @@ export interface StudioStateVarHint {
 /** 字段长度上限（后端 LIMITS）：界面用它做即时校验，避免前后端两套数字 */
 export type StudioLimits = Record<string, number>;
 
+/** 文风的采样参数白名单项（键名与取值区间由后端给出，界面不硬编码） */
+export interface StudioSamplingSpec {
+  key: string;
+  min: number;
+  max: number;
+}
+
 /** GET /chat/studio/catalog 响应（工坊的一次性加载） */
 export interface StudioCatalog {
   personas: StudioPersonaSummary[];
   entries: StudioWorldBookEntry[];
+  styles: StudioStyleSummary[];
   /** 读盘警告（用户手改的坏文件被跳过等），界面应展示给用户 */
   warnings: string[];
   limits: StudioLimits;
+  /** 文风可用的采样参数（键名 / 区间），界面据此渲染输入框与即时校验 */
+  sampling_spec: StudioSamplingSpec[];
   /** 归属通配值（后端 SCOPE_ALL，通常为 "*"） */
   scope_all: string;
   state_vars: StudioStateVarHint[];
@@ -954,16 +1240,35 @@ export interface StudioEntryWriteResult {
   catalog: StudioCatalog;
 }
 
-/** 删除角色卡的响应（**只删角色卡**，会话与记忆保留） */
+/** 删除世界书条目的响应（内置条目也是从当前工坊隐藏，不修改包内资源） */
+export interface StudioEntryDeleteResult {
+  deleted: string;
+  title: string;
+  catalog: StudioCatalog;
+}
+
+/**
+ * 删除角色卡的响应。
+ *
+ * **级联删除**：该角色的全部会话、四层记忆（情景 / 事实 / 情绪日记 / 个人语料）
+ * 与专属世界书条目都会一并清除，不可恢复——界面必须先做二次确认。
+ */
 export interface StudioPersonaDeleteResult {
   deleted: string;
   name: string;
-  /** 该角色名下还有多少段对话 */
-  sessions: number;
-  /** 有多少世界书条目只对该角色生效 */
-  bound_entries: number;
-  /** 后端给出的「什么被留下了」说明 */
-  kept: string;
+  /** 被清掉的对话段数 */
+  removed_sessions: number;
+  /** 被清掉的对话消息条数 */
+  removed_turns: number;
+  /** 被清掉的专属世界书条目数（scope = 该角色 id） */
+  removed_entries: number;
+  /** 各层记忆被清掉的条数 */
+  removed_memory: {
+    warm: number;
+    facts: number;
+    mood_log: number;
+    knowledge: number;
+  };
   catalog: StudioCatalog;
 }
 
@@ -1022,4 +1327,71 @@ export interface StudioEntryTestResult {
   injected_text: string;
   estimated_tokens: number;
   warnings: string[];
+}
+
+// =============================================================
+// 文风预设（GET /chat/studio/styles*）
+// =============================================================
+//
+// 文风与角色**正交**：人设管「是谁」，文风管「怎么说话」，所以一份文风可以配任意
+// 角色。也因此它没有归属、删除也没有级联——删掉一份文风不会牵连会话或记忆。
+//
+// 选择器用的清单（`GET /chat/styles` 的 `StyleOption`）刻意只含展示字段；
+// 工坊要编辑正文，所以这里另有一套带 `style_prompt` 的类型。
+
+/** 一组示例对话（few-shot 示范目标语气） */
+export interface StyleExample {
+  user: string;
+  assistant: string;
+}
+
+/** 文风预设清单项（不含风格指令与示例正文） */
+export interface StudioStyleSummary {
+  id: string;
+  name: string;
+  description: string;
+  tags: string[];
+  /** 示例对话组数（详情里的 `examples` 是数组，故此处刻意不同名） */
+  example_count: number;
+  /** true = 内置文风（不可直接编辑，但可复制或从当前工坊删除） */
+  builtin: boolean;
+}
+
+/** 文风预设详情（含风格指令与示例，用于编辑） */
+export interface StudioStyle extends StudioStyleSummary {
+  /** 正向风格指令（放 system 末尾，影响更强） */
+  style_prompt: string;
+  /** 要避免的表达（克制使用，只列最刺眼的 AI 腔） */
+  avoid: string[];
+  /** 示例对话（few-shot，反 AI 腔最有效的手段） */
+  examples: StyleExample[];
+  /** 建议采样参数（只认后端白名单里的键） */
+  sampling: Record<string, number>;
+  /** 与人设冲突的特质关键词（用于一致性告警，不阻断） */
+  conflicts_with: string[];
+}
+
+/** 新建 / 更新文风的请求体 */
+export interface StudioStyleInput {
+  name: string;
+  style_prompt: string;
+  description?: string;
+  tags?: string[];
+  avoid?: string[];
+  examples?: StyleExample[];
+  sampling?: Record<string, number>;
+  conflicts_with?: string[];
+}
+
+/** 文风写入响应（带回刷新后的 catalog，界面不必再拉一次） */
+export interface StudioStyleWriteResult {
+  style: StudioStyle;
+  catalog: StudioCatalog;
+}
+
+/** 删除文风的响应 */
+export interface StudioStyleDeleteResult {
+  deleted: string;
+  name: string;
+  catalog: StudioCatalog;
 }

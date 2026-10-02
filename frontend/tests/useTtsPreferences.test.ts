@@ -2,7 +2,7 @@
  * 语音引擎与音色偏好（`useTtsPreferences`）测试。
  *
  * 锁三件事：
- * 1. 探测失败/后端未就绪 → `status=null`、`serverTtsAvailable=false`（上层据此回落浏览器语音），
+ * 1. 探测失败/后端未就绪 → `status=null`、`serverTtsAvailable=false`（上层据此静默），
  *    **绝不抛错**；
  * 2. 偏好能从 localStorage 读回（挂载后同步，首屏不读）；
  * 3. 音色失效回落：音色表换了之后，本地记的 id 不存在了必须自动清掉，
@@ -67,7 +67,7 @@ describe("useTtsPreferences：探测", () => {
     expect(result.current.serverTtsAvailable).toBe(false);
   });
 
-  it("探测失败时 status 为 null 而不抛错（上层回落浏览器语音）", async () => {
+  it("探测失败时 status 为 null 而不抛错（上层据此静默）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -97,13 +97,22 @@ describe("useTtsPreferences：探测", () => {
 describe("useTtsPreferences：偏好", () => {
   it("首屏用安全默认值，挂载后从 localStorage 读回", async () => {
     vi.stubGlobal("fetch", vi.fn(async (_url: string) => jsonResponse(ttsStatus())));
-    window.localStorage.setItem("hypra.avatar.tts-engine", "browser");
+    window.localStorage.setItem("hypra.avatar.tts-engine", "server");
     window.localStorage.setItem("hypra.avatar.tts-voice", "gentle");
 
     const { result } = renderHook(() => useTtsPreferences({ enabled: false }));
 
-    await waitFor(() => expect(result.current.engine).toBe("browser"));
+    await waitFor(() => expect(result.current.engine).toBe("server"));
     expect(result.current.voice).toBe("gentle");
+  });
+
+  it("存着已移除的 browser 档时按默认值处理（老用户不会卡在无效档）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (_url: string) => jsonResponse(ttsStatus())));
+    window.localStorage.setItem("hypra.avatar.tts-engine", "browser");
+
+    const { result } = renderHook(() => useTtsPreferences({ enabled: false }));
+
+    await waitFor(() => expect(result.current.engine).toBe("auto"));
   });
 
   it("设置后同步写回 localStorage（跨刷新保持）", async () => {

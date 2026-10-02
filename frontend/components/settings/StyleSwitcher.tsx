@@ -18,6 +18,8 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type { StyleCatalog, StyleOption } from "@/lib/api/types";
 
+import { useAnchoredPopup } from "./useAnchoredPopup";
+
 const TRIGGER_ID = "style-trigger";
 const LIST_ID = "style-listbox";
 
@@ -54,6 +56,11 @@ export function StyleSwitcher({
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
   /** 仅当用键盘打开时才把焦点移入选项（鼠标点击时焦点留在触发器上更自然） */
   const focusOnOpenRef = useRef(false);
+  /**
+   * 浮层坐标。**必须是 `fixed`**：面板会被控制台的 `Card overflow-hidden` 包住，
+   * `absolute` 浮层会被裁成一条缝（详见 `useAnchoredPopup` 的文件头）。
+   */
+  const popupStyle = useAnchoredPopup(triggerRef, open);
 
   const styles = useMemo(
     () => [NONE_OPTION, ...(catalog?.styles ?? [])],
@@ -155,7 +162,8 @@ export function StyleSwitcher({
   if (!catalog || !current) return null;
 
   return (
-    <section aria-labelledby="style-title" className="relative">
+    /* 不需要 `relative`：浮层走 `fixed`（见 popupStyle），锚点由 hook 算 */
+    <section aria-labelledby="style-title">
       <h2 id="style-title" className="sr-only">
         文风
       </h2>
@@ -170,7 +178,7 @@ export function StyleSwitcher({
         aria-controls={open ? LIST_ID : undefined}
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={handleTriggerKeyDown}
-        className="focus-ring flex w-full items-center justify-between rounded-xl border border-line bg-surface-panel px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50"
+        className="focus-ring flex w-full items-center justify-between card px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50"
       >
         <span>
           <span className="text-xs text-ink-soft">文风 · </span>
@@ -185,7 +193,8 @@ export function StyleSwitcher({
           id={LIST_ID}
           role="listbox"
           aria-labelledby={TRIGGER_ID}
-          className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-line bg-surface-panel shadow-lg"
+          style={popupStyle}
+          className="z-20 overflow-y-auto rounded-2xl border border-line bg-surface-panel shadow-float"
         >
           {styles.map((style, index) => {
             const selected = style.id === value;

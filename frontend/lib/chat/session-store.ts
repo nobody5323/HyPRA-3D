@@ -1,5 +1,5 @@
 /**
- * 本地持久化：**当前会话指针**与输入草稿（localStorage）。
+ * 本地持久化：**当前会话指针**、输入草稿、一次性界面提示（localStorage）。
  *
  * 为什么只存「指针」而不存消息：
  * 后端已把会话落 SQLite（`chat_sessions` / `chat_turns`），消息的唯一事实来源是后端。
@@ -51,4 +51,25 @@ export function readDraft(personaId: string): string {
 /** 保存/清除输入草稿（空串即清除）。 */
 export function writeDraft(personaId: string, text: string): void {
   write(DRAFT_PREFIX + personaId, text.trim() ? text : null);
+}
+
+// =============================================================
+// 一次性界面提示（「还能语音 / 发图」这类）
+// =============================================================
+
+const HINT_PREFIX = "hypra.hint.";
+
+/**
+ * 某个一次性提示是否已被用户关掉。
+ *
+ * 按 hintId 分开存而不是一个布尔：将来会加更多提示，
+ * 各自独立才不会出现「关掉 A 把 B 也关了」。
+ */
+export function isHintDismissed(hintId: string): boolean {
+  return read(HINT_PREFIX + hintId) === "dismissed";
+}
+
+/** 关掉某个一次性提示（记住不再显示）。 */
+export function dismissHint(hintId: string): void {
+  write(HINT_PREFIX + hintId, "dismissed");
 }

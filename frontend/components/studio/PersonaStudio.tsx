@@ -6,13 +6,13 @@
  * 对应后端 `/chat/studio/personas*`（见 backend/app/api/studio.py）。
  *
  * 几条刻意的设计：
- * - **内置只读**：内置角色的表单整体置灰，只留「复制为我的角色」——要改先复制。
- *   这样包内的原创预设永远不会被界面改写（docker 镜像里它本来就是只读的）。
+ * - **内置不改包文件**：内置角色的表单整体置灰，仍可复制或从当前工坊删除；删除只写用户侧隐藏清单，
+ *   不会修改包内原创预设（docker 镜像里它本来就是只读的）。
  * - **id 只显示、不可编辑**：角色 id 同时是记忆隔离命名空间（温层 collection 名
  *   `memory_{id}`、冷层 companion、个人记忆分库），改 id 等于把角色换成一整套空
  *   记忆，所以后端也不接受修改。
- * - **删除只删角色卡**：会话与记忆保留；删除后的提示会说明「保留了什么」，
- *   免得用户以为数据被一并清掉了。
+ * - **删除即级联**：角色卡、专属世界书条目、该角色的全部会话与四层记忆一起清掉，
+ *   不可恢复——所以二次确认必须把「删了什么」说清楚，删除后再回报各层实际条数。
  * - **上限来自后端**（`catalog.limits`）：界面即时校验与后端写入校验共用同一批
  *   数字，不会出现「界面说没超、后端却拒绝」。
  */
@@ -22,11 +22,14 @@ import { useCallback, useEffect, useState } from "react";
 import {
   createStudioPersona,
   deleteStudioPersona,
+  draftPersona,
   duplicateStudioPersona,
   getStudioPersona,
   updateStudioPersona,
 } from "@/lib/api/client";
 import type { StudioCatalog, StudioLimits, StudioPersona } from "@/lib/api/types";
+
+import { AiBriefForm } from "@/components/settings/AiBriefForm";
 
 import { BuiltinBadge } from "./StudioBadge";
 
@@ -123,6 +126,10 @@ export function PersonaStudio({
   const [status, setStatus] = useState<string | null>(null);
   /** 删除二次确认（不用 window.confirm：阻塞式原生弹窗无法承载影响面说明） */
   const [confirmDelete, setConfirmDelete] = useState(false);
+  /** AI 补全：一句话需求及其生成状态（草稿只填表单，不落盘） */
+  const [aiBrief, setAiBrief] = useState("");
+  const [aiBusy, setAiBusy] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   const limits = catalog.limits;
   const isBuiltin = detail?.builtin ?? false;
@@ -212,6 +219,34 @@ export function PersonaStudio({
     }
   }
 
+  /**
+   * AI 补全：把生成的人设填进**表单**（不保存）。
+   *
+   * 只填不存是刻意的：人设是这个产品的核心内容，模型写的字必须经用户过目。
+   * 填入后用户可随意修改，点「保存」才真正落盘（走既有的 create/update 通路）。
+   */
+  async function generateDraft() {
+    setAiBusy(true);
+    setAiError(null);
+    try {
+      const result = await draftPersona(aiBrief.trim());
+      setForm({
+        name: result.draft.name,
+        title: result.draft.title,
+        description: result.draft.description,
+        tags: result.draft.tags.join("、"),
+        background: result.draft.background,
+        prompt: result.draft.prompt,
+        variables: result.draft.variables.join("、"),
+      });
+      setStatus(`已生成并填入表单（模型：${result.model}），确认或改完再保存`);
+    } catch (exc) {
+      setAiError(messageOf(exc, "生成失败"));
+    } finally {
+      setAiBusy(false);
+    }
+  }
+
   async function duplicate() {
     if (!selectedId) return;
     setBusy(true);
@@ -241,10 +276,14 @@ export function PersonaStudio({
       setSelectedId(null);
       setForm(EMPTY_FORM);
       setConfirmDelete(false);
-      // 把后端算出的影响面念给用户听：删了什么、留了什么
+      // 把后端算出的实际删除量念给用户听（含各层记忆，失败层计 0）
+      const memory = result.removed_memory;
+      const memoryTotal =
+        memory.warm + memory.facts + memory.mood_log + memory.knowledge;
       setStatus(
-        `已删除角色卡「${result.name}」；保留 ${result.sessions} 段对话、` +
-          `${result.bound_entries} 条专属世界书条目（${result.kept}）`,
+        `已删除角色卡「${result.name}」，并清除了 ${result.removed_sessions} 段对话` +
+          `（${result.removed_turns} 条消息）、${result.removed_entries} 条专属世界书条目` +
+          `与 ${memoryTotal} 条记忆`,
       );
     } catch (exc) {
       setError(messageOf(exc, "删除失败"));
@@ -310,7 +349,8 @@ export function PersonaStudio({
         )}
         {isBuiltin && (
           <p className="rounded-lg bg-surface-raised px-3 py-2 text-xs text-ink-muted">
-            这是内置角色，只能查看。想改就点「复制为我的角色」，得到一份可编辑副本。
+            这是内置角色，正文不能直接改。可以复制为我的角色，也可以从当前创作工坊删除；
+            删除只写用户侧隐藏清单、不改包内资源，但它的会话、记忆与专属世界书条目会一并清除。
           </p>
         )}
         {error && (
@@ -328,6 +368,21 @@ export function PersonaStudio({
           <p className="text-sm text-ink-soft">选择左侧角色查看与编辑，或点「新建」。</p>
         ) : (
           <>
+            {/* AI 补全：填的是表单，保存仍是下面那个按钮（草稿不经人手不落盘） */}
+            {!locked && (
+              <AiBriefForm
+                idPrefix="studio-persona-ai"
+                brief={aiBrief}
+                onBriefChange={setAiBrief}
+                onGenerate={() => void generateDraft()}
+                busy={aiBusy}
+                label="不会写？用一句话描述你想要的角色（题材不限），让模型先写一版"
+                placeholder="例如：一位退役后在小城开修表铺的老兵，嘴上刻薄、手很稳"
+                actionLabel="AI 补全"
+                hint="会填入下面这些字段（不会直接保存，也不影响已有角色）"
+                error={aiError}
+              />
+            )}
             <div className="grid gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1">
                 <span className="text-xs text-ink-muted">
@@ -338,7 +393,7 @@ export function PersonaStudio({
                   onChange={(event) => update("name", event.target.value)}
                   disabled={locked}
                   className={INPUT_CLASS}
-                  placeholder="例如：苏澄"
+                  placeholder="例如：陆星野"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -348,7 +403,7 @@ export function PersonaStudio({
                   onChange={(event) => update("title", event.target.value)}
                   disabled={locked}
                   className={INPUT_CLASS}
-                  placeholder="例如：会倾听的邻家姐姐"
+                  placeholder="例如：嘴上不饶人的搭档"
                 />
               </label>
             </div>
@@ -374,7 +429,7 @@ export function PersonaStudio({
                   onChange={(event) => update("tags", event.target.value)}
                   disabled={locked}
                   className={INPUT_CLASS}
-                  placeholder="温柔、倾听、姐姐"
+                  placeholder="毒舌、靠谱、搭档"
                 />
               </label>
               <label className="flex flex-col gap-1">
@@ -478,7 +533,7 @@ export function PersonaStudio({
                 </button>
               )}
 
-              {!isBuiltin && detail && !confirmDelete && (
+              {detail && !confirmDelete && (
                 <button
                   type="button"
                   onClick={() => setConfirmDelete(true)}
@@ -489,9 +544,9 @@ export function PersonaStudio({
                 </button>
               )}
 
-              {!isBuiltin && detail && confirmDelete && (
+              {detail && confirmDelete && (
                 <span className="flex flex-wrap items-center gap-2 rounded-lg bg-danger-soft px-3 py-2 text-xs text-danger-text">
-                  删除后：会话与记忆会保留（本版不清理），仅角色卡消失。确定？
+                  删除后：该角色的全部会话、记忆与专属世界书条目都会一并清除，不可恢复。确定？
                   <button
                     type="button"
                     onClick={() => void remove()}

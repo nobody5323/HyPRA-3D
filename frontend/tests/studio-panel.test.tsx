@@ -4,7 +4,7 @@
  * fetch 全部 mock（按 URL + 方法路由成响应），不发真实请求，也不依赖后端。
  * 覆盖的关键行为：
  * - catalog 一次加载后列出角色与世界书条目；
- * - **内置资源只读**：表单置灰、只留「复制为我的角色」；
+ * - **内置资源不可编辑但可删除**：表单置灰，可复制或从当前工坊删除；
  * - 必填校验在**本地**拦住（不为一个空名字打后端）；
  * - 「试触发」把当前表单当草稿提交，并把逐通道结论显示出来。
  */
@@ -105,8 +105,13 @@ function makeCatalog(overrides: Partial<StudioCatalog> = {}): StudioCatalog {
   return {
     personas: [makePersonaSummary()],
     entries: [makeEntry()],
+    styles: [],
     warnings: [],
     limits: { persona_name: 50, persona_prompt: 8000, persona_background: 8000 },
+    sampling_spec: [
+      { key: "temperature", min: 0, max: 2 },
+      { key: "max_tokens", min: 1, max: 8192 },
+    ],
     scope_all: "*",
     state_vars: [
       { name: "user_name", description: "用户称呼", default: "朋友", example: "小林" },
@@ -164,7 +169,7 @@ describe("StudioPanel", () => {
     });
   });
 
-  it("内置角色只读：表单置灰，只提供「复制为我的角色」", async () => {
+  it("内置角色不可编辑，但可以复制或删除", async () => {
     stubRoutes((url, method) => {
       if (url.endsWith("/chat/studio/catalog") && method === "GET") {
         return jsonResponse(makeCatalog());
@@ -180,6 +185,7 @@ describe("StudioPanel", () => {
     const nameInput = await screen.findByDisplayValue("苏澄");
     expect((nameInput as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByRole("button", { name: "复制为我的角色" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "删除角色卡" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "保存修改" })).toBeNull();
   });
 
@@ -213,7 +219,7 @@ describe("StudioPanel", () => {
     renderPanel();
 
     fireEvent.click(await screen.findByRole("button", { name: "新建" }));
-    fireEvent.change(screen.getByPlaceholderText("例如：苏澄"), {
+    fireEvent.change(screen.getByPlaceholderText("例如：陆星野"), {
       target: { value: "小岸" },
     });
     fireEvent.change(screen.getByPlaceholderText(/你是\{\{user_name\}\}的朋友/), {
@@ -302,5 +308,76 @@ describe("StudioPanel", () => {
     renderPanel();
 
     expect(await screen.findByText(/user-broken\.yaml/)).toBeTruthy();
+  });
+});
+
+describe("PersonaStudio AI 补全（§9.12）", () => {
+  const DRAFT_BODY = {
+    draft: {
+      name: "苏澄",
+      title: "会听人说话的姐姐",
+      description: "话不多，但总能接住你的情绪。",
+      tags: ["温柔", "稳重"],
+      prompt: "你是苏澄，先接住情绪再谈事情。",
+      background: "你在海边长大。",
+      variables: ["user_name"],
+    },
+    model: "qwen-plus",
+  };
+
+  it("生成草稿：只填表单，不发保存请求", async () => {
+    const calls = stubRoutes((url, method) => {
+      if (url.endsWith("/chat/studio/catalog") && method === "GET") {
+        return jsonResponse(makeCatalog());
+      }
+      if (url.endsWith("/chat/studio/personas/ai-draft") && method === "POST") {
+        return jsonResponse(DRAFT_BODY);
+      }
+      if (url.endsWith("/chat/studio/personas/therapist-elder-sister")) {
+        return jsonResponse({ persona: makePersona() });
+      }
+      return undefined;
+    });
+
+    renderPanel();
+    await screen.findByDisplayValue("你是{{user_name}}的朋友。");
+
+    // 内置角色不可编辑（AI 补全也跟着锁住），所以先进入「新建」态
+    fireEvent.click(screen.getByRole("button", { name: "新建" }));
+    fireEvent.change(screen.getByLabelText(/你想要的角色/), {
+      target: { value: "想做一个话少的姐姐" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "AI 补全" }));
+
+    // 草稿被填进了表单（而不是直接成了一个新角色）
+    expect(await screen.findByDisplayValue("会听人说话的姐姐")).toBeTruthy();
+    expect(screen.getByDisplayValue(/你是苏澄/)).toBeTruthy();
+    expect(
+      calls.some((call) => call.method === "POST" && call.url.endsWith("/chat/studio/personas")),
+    ).toBe(false);
+  });
+
+  it("模型不可用时把原因显示在面板里", async () => {
+    stubRoutes((url, method) => {
+      if (url.endsWith("/chat/studio/catalog") && method === "GET") {
+        return jsonResponse(makeCatalog());
+      }
+      if (url.endsWith("/chat/studio/personas/ai-draft") && method === "POST") {
+        return jsonResponse({ detail: "当前用的是本地占位模型（mock）…" }, 400);
+      }
+      if (url.endsWith("/chat/studio/personas/therapist-elder-sister")) {
+        return jsonResponse({ persona: makePersona() });
+      }
+      return undefined;
+    });
+
+    renderPanel();
+    await screen.findByDisplayValue("你是{{user_name}}的朋友。");
+
+    fireEvent.click(screen.getByRole("button", { name: "新建" }));
+    fireEvent.change(screen.getByLabelText(/你想要的角色/), { target: { value: "随便" } });
+    fireEvent.click(screen.getByRole("button", { name: "AI 补全" }));
+
+    expect((await screen.findByRole("alert")).textContent).toContain("占位模型");
   });
 });

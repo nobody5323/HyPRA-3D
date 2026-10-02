@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * 个人记忆（知识库）面板：用户上传自己的语料，让「苏澄」在后续对话中引用。
+ * 个人记忆（知识库）面板：用户上传自己的语料，让当前角色在后续对话中引用。
  *
  * 对应后端三个接口（backend/app/api/knowledge.py）：
  *   POST   /knowledge/upload       解析 → 清洗 → 判重 → 分块 → 入库
@@ -25,6 +25,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, deleteKnowledge, listKnowledge, uploadKnowledge } from "@/lib/api/client";
 import type { KnowledgeDoc, KnowledgeDuplicateDetail } from "@/lib/api/types";
+import { PERSONA_NAME_FALLBACK } from "@/lib/chat/persona";
 
 /** 后端支持的扩展名（app/memory/knowledge/parser.py 的 SUPPORTED_SUFFIXES） */
 const ACCEPT = ".txt,.text,.log,.csv,.tsv,.md,.markdown,.pdf,.docx";
@@ -83,11 +84,14 @@ function formatDate(iso: string): string {
 
 export function KnowledgePanel({
   companionId,
+  companionName = PERSONA_NAME_FALLBACK,
   disabled = false,
   onUploaded,
 }: {
   /** 陪伴对象 id（= 对话的 persona_id），决定记忆命名空间 */
   companionId: string;
+  /** 当前角色名（用于「上传后 {角色} 会引用」这类文案）；缺省用中性兜底词 */
+  companionName?: string;
   /** 对话进行中时禁止改动（避免与对话争用向量库/embedding） */
   disabled?: boolean;
   /** 上传成功回调（页面据此提示「下一轮对话即可引用」） */
@@ -227,7 +231,7 @@ export function KnowledgePanel({
   return (
     <section
       aria-labelledby={titleId}
-      className="rounded-xl border border-line bg-surface-panel"
+      className="card"
     >
       <h2 id={titleId} className="sr-only">
         个人记忆
@@ -382,7 +386,7 @@ export function KnowledgePanel({
 
             {docs !== null && docs.length === 0 && !loading && (
               <p className="mt-2 text-xs leading-relaxed text-ink-faint">
-                还没有资料。上传后，苏澄会在相关话题的对话中引用它们。
+                还没有资料。上传后，{companionName}会在相关话题的对话中引用它们。
               </p>
             )}
 

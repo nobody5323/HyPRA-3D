@@ -9,11 +9,15 @@
  * 配置表单由 `SchemaForm` 按插件的 `settings_schema` 渲染，插件不自带前端代码。
  * 权限声明同时摊给用户看：§9.3 说「权限是架构约束，不是口头承诺」，
  * 那它就不该只写在 manifest 里——界面必须让人看得见边界。
+ *
+ * 插件的 `description` 也在这里显示：能力中心列表只有展示名与状态，
+ * 而「这个能力能配什么、开关在哪」（如语音合成的开关是 `DIGITAL_HUMAN_PROVIDER`）
+ * 只有描述里说得清。
  */
 
 import { useEffect, useState } from "react";
 
-import { SchemaForm, missingRequired } from "@/components/settings/SchemaForm";
+import { SchemaForm, missingRequired, outOfRange } from "@/components/settings/SchemaForm";
 import {
   ApiError,
   getPluginSettings,
@@ -40,6 +44,9 @@ function errorText(err: unknown, fallback: string): string {
  *
  * 界面显示什么，保存时写进去的就该是什么——否则用户看到一个"已经填好"的目录，
  * 不动它直接保存，后端却拿到空配置。
+ *
+ * 密钥字段跳过：`default` 是写死在 schema 里的**非密钥**默认值，
+ * 若给密钥字段写了默认值，保存时会把一个假 key 写进配置。
  */
 function withDefaults(
   values: Record<string, unknown>,
@@ -47,6 +54,7 @@ function withDefaults(
 ): Record<string, unknown> {
   const next = { ...values };
   for (const [key, field] of Object.entries(schema.properties ?? {})) {
+    if (field.format === "password") continue;
     if (!(key in next) && field.default !== undefined) next[key] = field.default;
   }
   return next;
@@ -118,6 +126,13 @@ export function PluginDetail({
       setError(`还有必填项未填：${missing.join("、")}`);
       return;
     }
+    // 数值范围同理：这些控件不在 <form> 里，min/max 属性不会触发原生拦截
+    const invalid = outOfRange(settings.schema, values);
+    if (invalid.length > 0) {
+      setStatus(null);
+      setError(`数值超出允许范围：${invalid.join("、")}`);
+      return;
+    }
 
     setBusy(true);
     setError(null);
@@ -125,7 +140,17 @@ export function PluginDetail({
     try {
       const result = await putPluginSettings(plugin.id, values);
       onPluginsChanged?.(result.plugins);
-      setStatus("配置已保存并生效。");
+      // 用后端回传的**视图**刷新表单：密钥字段回显不上来（本来就不下发），
+      // 但「已保存」的标记要立刻变对——否则用户不知道刚才填的 key 到底存没存。
+      setSettings((prev) =>
+        prev ? { ...prev, values: result.values, secrets_set: result.secrets_set } : prev,
+      );
+      if (settings) setValues(withDefaults(result.values, settings.schema));
+      // 未启用的插件：配置收下了，但**不会**生效（覆盖层只收启用中的插件）——
+      // 这时候说「已生效」就是在骗人，用户会带着错误预期去调。
+      setStatus(
+        plugin.enabled ? "配置已保存并生效。" : "配置已保存；插件未启用，启用后生效。",
+      );
     } catch (err) {
       setError(errorText(err, "保存插件配置失败"));
     } finally {
@@ -140,6 +165,10 @@ export function PluginDetail({
 
   return (
     <div className="mt-1.5 flex flex-col gap-2 rounded-lg border border-line bg-surface-inset p-2.5">
+      {plugin.description && (
+        <p className="text-[11px] leading-relaxed text-ink-faint">{plugin.description}</p>
+      )}
+
       <label className="flex items-start gap-2">
         <input
           type="checkbox"
@@ -182,6 +211,7 @@ export function PluginDetail({
             onChange={setValues}
             disabled={busy}
             idPrefix={`plugin-${plugin.id}`}
+            secretsSet={settings.secrets_set}
           />
           <div>
             <button type="button" className={BUTTON_CLASS} disabled={busy} onClick={() => void handleSave()}>

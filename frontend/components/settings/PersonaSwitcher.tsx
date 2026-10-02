@@ -20,6 +20,8 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 
 import type { PersonaCatalog } from "@/lib/api/types";
 
+import { useAnchoredPopup } from "./useAnchoredPopup";
+
 const TRIGGER_ID = "persona-trigger";
 const LIST_ID = "persona-listbox";
 
@@ -46,9 +48,21 @@ export function PersonaSwitcher({
   const optionRefs = useRef<Array<HTMLLIElement | null>>([]);
   /** 仅当用键盘打开时才把焦点移入选项（鼠标点击时焦点留在触发器上更自然） */
   const focusOnOpenRef = useRef(false);
+  /**
+   * 浮层坐标。**必须是 `fixed`**：面板会被控制台的 `Card overflow-hidden` 包住，
+   * `absolute` 浮层会被裁成一条缝（详见 `useAnchoredPopup` 的文件头）。
+   */
+  const popupStyle = useAnchoredPopup(triggerRef, open);
 
   const personas = catalog?.personas ?? [];
-  const current = personas.find((persona) => persona.id === value) ?? personas[0] ?? null;
+  /**
+   * 当前选中的角色。**刻意不回落到 `personas[0]`**：回落的后果是触发器上写着
+   * 「苏澄」，而实际发出去的 persona_id 是另一个（已被删除的）角色——
+   * 界面看起来一切正常，对话却一直报「未知人设」。
+   */
+  const current = personas.find((persona) => persona.id === value) ?? null;
+  /** 清单已回来、但里面没有当前 id = 这个角色已经不存在了 */
+  const missing = Boolean(catalog) && value !== "" && current === null;
   const selectedIndex = Math.max(
     0,
     personas.findIndex((persona) => persona.id === value),
@@ -139,11 +153,15 @@ export function PersonaSwitcher({
     }
   }
 
-  // 只有一个人设时无切换价值（也不该用「只有一个选项的选择器」占位）
-  if (!current || personas.length < 2) return null;
+  // 没有可选角色 = 没有切换价值
+  if (personas.length === 0) return null;
+  // 只有一个可选角色时本来无切换价值；但当前角色**失效**时必须渲染——
+  // 否则用户没有任何入口把它换掉，只能一轮一轮地撞 404
+  if (personas.length < 2 && !missing) return null;
 
   return (
-    <section aria-labelledby="persona-title" className="relative">
+    /* 不需要 `relative`：浮层走 `fixed`（见 popupStyle），锚点由 hook 算 */
+    <section aria-labelledby="persona-title">
       <h2 id="persona-title" className="sr-only">
         陪伴对象
       </h2>
@@ -158,11 +176,11 @@ export function PersonaSwitcher({
         aria-controls={open ? LIST_ID : undefined}
         onClick={() => setOpen((prev) => !prev)}
         onKeyDown={handleTriggerKeyDown}
-        className="focus-ring flex w-full items-center justify-between rounded-xl border border-line bg-surface-panel px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50"
+        className="focus-ring flex w-full items-center justify-between card px-4 py-2.5 text-left text-sm text-ink transition-colors hover:border-accent/50 disabled:opacity-50"
       >
         <span>
           <span className="text-xs text-ink-soft">陪伴对象 · </span>
-          {current.name}
+          {current ? current.name : "（原角色已不存在）"}
         </span>
         <span className="text-xs text-ink-soft">{open ? "收起" : "切换"}</span>
       </button>
@@ -171,7 +189,8 @@ export function PersonaSwitcher({
         /* 说明行放在 listbox 之外：`role="listbox"` 的子元素只能是 option */
         <div
           ref={panelRef}
-          className="absolute z-20 mt-1 w-full overflow-hidden rounded-xl border border-line bg-surface-panel shadow-lg"
+          style={popupStyle}
+          className="z-20 overflow-y-auto rounded-2xl border border-line bg-surface-panel shadow-float"
         >
           <ul id={LIST_ID} role="listbox" aria-labelledby={TRIGGER_ID}>
             {personas.map((persona, index) => {
@@ -198,7 +217,9 @@ export function PersonaSwitcher({
             })}
           </ul>
           <p className="border-t border-line px-4 py-2 text-xs leading-relaxed text-ink-faint">
-            切换陪伴对象会开始一段新对话——记忆按对象独立存储，互不混用。
+            {missing
+              ? "当前角色已不存在（可能刚被删除）——请重新选一个，否则每轮对话都会被后端拒绝。"
+              : "切换陪伴对象会开始一段新对话——记忆按对象独立存储，互不混用。"}
           </p>
         </div>
       )}

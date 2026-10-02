@@ -28,11 +28,11 @@ npm run build       # Next.js 生产构建（standalone）
 | 文件 | 覆盖内容 |
 |---|---|
 | `tests/api.test.ts` | 后端用 `{}` 表示「无情绪/无播报」时的规范化、409 判重结构体、multipart 与 query 形状 |
-| `tests/useAvatar.browser.test.ts` | 分段播报：逐段播完 / **被打断后不再出声** / 卸载后停止 / 整段抢占分段 |
+| `tests/useAvatar.silent.test.ts` | 静默控制器（未接入 TTS）：**绝不碰 `speechSynthesis`**、`speak`/`speakChunks` 立即返回、分段仍推进字幕 |
 | `tests/useAvatar.xmov.test.ts` | 断线退避重连：1s→2s→4s、**init 期间报错但随后连上不得重建**、重连用尽后降级；**语音事件消费**（SDK 回的 `"start"`/`"end"` 必须被识别，不得退化成靠超时收尾） |
 | `tests/session-store.test.ts` | 本地会话指针与草稿：按陪伴对象分开、`null` = 新建对话、localStorage 不可用时静默降级 |
 
-> 用例设计说明：分段播报的两条路径都用**可控替身**（`speechSynthesis` / `window.XmovAvatar`）
+> 用例设计说明：分段播报的路径用**可控替身**（`window.XmovAvatar` 与音频元素）
 > 精确控制「一段念完」与「被取消」两种时序——真实环境里这两者都表现为「回到 idle」，
 > 用状态判断就会错，因此必须用测试锁住。
 
@@ -68,7 +68,7 @@ cd .. && docker compose up -d --build   # 拉起 qdrant + backend + frontend
 | 情绪视觉 | 情绪标签 + 强度条 + 数字人光效随情绪变化 |
 | 文风切换 | 清单来自后端 `GET /chat/styles`（预设与代码分离，新增 YAML 无需改前端） |
 | Agent 工具提示 | 展示「✓ 已记录这次心情」等办事结果 |
-| 播报 | 浏览器原生 TTS（零依赖，F1 占位实现） |
+| 播报 | 服务端 TTS（GPT-SoVITS）/ 魔珐 SDK 自带；**未接入 TTS 时静默**（只显示文字，不出声） |
 | 打断 | 客户端即时打断（中止请求 + 停止播报） |
 
 ### F2：魔珐具身驱动 SDK 集成
@@ -81,12 +81,9 @@ cd .. && docker compose up -d --build   # 拉起 qdrant + backend + frontend
 | **自动降级** | 未配置密钥 / 脚本加载失败 / init 失败 → 回退**浏览器 TTS + 占位形象**，演示不中断 |
 | 资源释放 | 卸载时调用 `avatar.destroy()`（释放 WebGL 资源） |
 
-**配置方式**：在 `frontend/.env.local` 填入魔珐**驱动应用**密钥（留空即使用浏览器 TTS）：
-
-```ini
-NEXT_PUBLIC_XMOV_APP_ID=你的AppID
-NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
-```
+**配置方式**：在页面右上角「数字人设置」里填魔珐**驱动应用**密钥（即时生效，无需重新构建）；
+也可在 `backend/.env` 里配 `XMOV_APP_ID` / `XMOV_SECRET` 作为部署默认值（写后端而不是
+`NEXT_PUBLIC_*`：后者是构建时内联的，且三个界面各自一份 localStorage 互不相通）。
 
 > 页面右上角显示当前渲染方式（「魔珐 SDK」/「浏览器 TTS」）。
 ### F3：视觉与可访问性（浅色主题改造）
@@ -114,7 +111,7 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 | **陪伴对象切换** | `PersonaSwitcher`：清单来自 `GET /chat/personas`；人设 id 即记忆命名空间（`companion_id`），切换时开新会话并清空界面记忆计数。仅 ≥2 项时渲染 |
 | **记忆与行动可见性** | `MemoryTrace`：本轮命中世界书条目 / 个人记忆条数 / 情景记忆 / 语义事实 / 是否已后台写入 / 提示词 token；`AgentBadge`：MCP 服务器连接数、工具数、工具清单与错误 |
 | **分段播报（流式分段）** | 对话区「分段播报」开关（**默认关闭**）：走 `POST /media/speak`（`streaming=true`）取 `chunks`（纯文本，字幕随段推进）与 `ssml_chunks`（逐段 SSML，由后端生成，前端不自拼标签），段间自动 `interactiveidle` 过渡 |
-| **断线退避重连** | `avatar.onError` → 指数退避重建 SDK（1s → 2s → 4s，最多 3 次），期间 `stage = "reconnecting"`；重连用尽才降级为浏览器语音 |
+| **断线退避重连** | `avatar.onError` → 指数退避重建 SDK（1s → 2s → 4s，最多 3 次），期间 `stage = "reconnecting"`；重连用尽则降级为静默（保留失败原因） |
 | **契约层** | `lib/api/types.ts` 与后端响应一一对应；`lib/api/client.ts` 统一 `ApiError(status, detail)`（知识库 409 需读结构体），并把后端的空对象 `{}` 规范化为 `null` |
 | **会话持久化** | 消息唯一来源是**后端**（会话落 SQLite）；前端只在 localStorage 记「当前会话 id」（`lib/chat/session-store.ts`），刷新后拉历史恢复。`SessionList` 提供历史列表 / 新建对话 / 打开历史会话；输入草稿也按角色本地保留 |
 
@@ -126,11 +123,17 @@ NEXT_PUBLIC_XMOV_APP_SECRET=你的AppSecret
 | 方式 | 操作 | 生效时机 | 适用 |
 |---|---|---|---|
 | **① 页面填写（推荐）** | 点击右上角**「配置数字人密钥」** → 填写 App ID / App Secret → 保存 | **即时生效**（SDK 自动重建） | 演示现场、临时切换 |
-| ② 环境变量 | 在 `frontend/.env.local` 填 `NEXT_PUBLIC_XMOV_APP_ID/SECRET` | 需重新 `npm run build` | 部署时固化 |
+| ② 后端 `.env` | 在 `backend/.env` 填 `XMOV_APP_ID` / `XMOV_SECRET` | 需重启后端 | 部署时固化 |
 
-- 优先级：**页面填写（localStorage）> 环境变量 > 降级浏览器语音**
-- 页面填写的凭证**仅存本机浏览器**，不上传服务器；点「清除」即可移除
-- 失败或未配置时**自动降级**为浏览器原生 TTS + 占位形象（对话/字幕/情绪不受影响）
+- 优先级：**页面填写 > 后端 `.env` > 静默（无 3D，也不出声）**
+- 页面填写的凭证存**后端**（`backend/data/avatar-credentials.json`，`data/` 已 gitignore），
+  控制台 / Web 端 / 桌宠窗共享同一份——三个界面的 origin 不同（控制台与桌宠窗是
+  `127.0.0.1:34567`，Web 端是 `localhost:3000`），localStorage 天然不共享；点「清除」即可移除
+- 凭证按**形态**存两套（`web` 横屏给 Web 端、`pet` 竖屏给桌宠窗）：魔珐的横屏 / 竖屏是
+  **控制台创建应用时**定的，容器比例必须与应用类型一致
+- ⚠️ 密钥最终会下发到浏览器（SDK 是客户端渲染，这是它的设计，不是「只存服务器」），
+  所以**不要**把后端 CORS 放开到公网（`CORS_ORIGINS` 别设 `"*"`）
+- 失败或未配置时**自动降级**为本地渲染器（Live2D / 立绘）+ 静默（对话/字幕/情绪不受影响）
 
 ## 目录
 
@@ -141,6 +144,6 @@ components/   AvatarStage（数字人舞台）/ ChatPanel / SubtitleBar / MoodIn
               PersonaSwitcher / StyleSwitcher / PresetSwitcher / AvatarSettings / StateBadge
 hooks/        useAvatar（具身状态机 + 播报 + 分段播报 + 退避重连）
               useChatSession（对话编排 + 人设切换）
-              useAvatarCredentials（凭证来源）
+              useAvatarCredentials（凭证，按形态读后端）
 lib/          api.ts（后端接口）/ types.ts（契约类型）/ persona.ts / avatar-config.ts
 ```

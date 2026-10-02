@@ -65,10 +65,31 @@ const config: Config = {
           '"Segoe UI"',
           "sans-serif",
         ],
+        mono: ['"Cascadia Code"', '"SFMono-Regular"', "Consolas", '"Liberation Mono"', "monospace"],
+      },
+      /**
+       * 阴影阶梯（浅色主题专用：暖灰投影而非纯黑）。
+       *
+       * 三层各司其职，**不要在组件里手写 shadow-[...]**：
+       * - `card`：普通卡片，几乎只是一层极淡的边影，靠描边立住；
+       * - `panel`：浮起的面板（弹出层 / 抽屉 / 舞台）；
+       * - `float`：最高层（模态、下拉）。
+       * 颜色带一点暖调（与 surface 的米白同族），纯黑投影在暖底上会显脏。
+       */
+      boxShadow: {
+        card: "0 1px 2px rgba(58, 48, 38, 0.04), 0 6px 20px -14px rgba(58, 48, 38, 0.18)",
+        panel: "0 2px 6px rgba(58, 48, 38, 0.05), 0 18px 44px -24px rgba(58, 48, 38, 0.24)",
+        float: "0 8px 20px rgba(58, 48, 38, 0.10), 0 32px 72px -32px rgba(58, 48, 38, 0.32)",
+        // 内高光：给实底按钮/深色画布加一道顶部提亮，避免「一片死色」
+        highlight: "inset 0 1px 0 rgba(255, 255, 255, 0.18)",
       },
       animation: {
         "breathe-in": "breathe 4s ease-in-out infinite",
         "sound-wave": "wave 1.2s ease-in-out infinite",
+        // 面板/列表项入场：轻微上浮，克制（120ms 级别的位移，不喧宾夺主）
+        "fade-up": "fade-up 260ms cubic-bezier(0.22, 1, 0.36, 1) both",
+        // 状态点呼吸：表示「活着」（后端在线、服务运行中）
+        "pulse-dot": "pulse-dot 2.4s ease-in-out infinite",
       },
       keyframes: {
         breathe: {
@@ -78,6 +99,14 @@ const config: Config = {
         wave: {
           "0%, 100%": { transform: "scaleY(0.4)" },
           "50%": { transform: "scaleY(1)" },
+        },
+        "fade-up": {
+          from: { opacity: "0", transform: "translateY(6px)" },
+          to: { opacity: "1", transform: "translateY(0)" },
+        },
+        "pulse-dot": {
+          "0%, 100%": { opacity: "1", transform: "scale(1)" },
+          "50%": { opacity: "0.45", transform: "scale(0.82)" },
         },
       },
     },

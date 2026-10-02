@@ -1,20 +1,21 @@
 "use client";
 
 /**
- * 创作工坊：用户自建「角色卡 + 背景故事 + 世界书设定」的编辑面板。
+ * 创作工坊：用户自建「角色卡 + 背景故事 + 世界书设定 + 文风」的编辑面板。
  *
- * 对应后端 `backend/app/api/studio.py`（`/chat/studio/*`）。三块数据由
- * `GET /chat/studio/catalog` 一次取回（角色清单 + 世界书条目 + 写作提示），
+ * 对应后端 `backend/app/api/studio.py`（`/chat/studio/*`）。四块数据由
+ * `GET /chat/studio/catalog` 一次取回（角色清单 + 世界书条目 + 文风 + 写作提示），
  * 每个写操作也会把**刷新后的 catalog** 带回来，因此界面不需要二次拉取。
  *
  * 设计要点：
- * - **内置只读**：内置角色 / 条目在列表里带「内置」徽标，表单置灰；要改就先
- *   「复制为我的角色」。内置**条目**的启用开关是例外——后端把它写成用户侧的
- *   停用偏好，内置 YAML 一字未改。
+ * - **内置不可直接编辑**：内置角色 / 条目 / 文风在列表里带「内置」徽标，表单置灰；
+ *   要改就先「复制为我的」。同时可以从当前工坊删除，删除写入用户侧隐藏清单，
+ *   内置文件不改；内置条目的启用开关仍写成用户侧停用偏好。
  * - **归属隔离**：世界书条目可归属到某个角色（`scope`）。给专属角色写设定时
  *   选它，就不会串味到别的角色；新建条目的默认归属是**当前对话角色**。
- * - **写完即生效**：后端在每个写操作后失效并重建对话图，所以新角色下一轮对话
- *   就能用，不需要重启服务。
+ *   文风刻意**没有**归属——它与人设正交，一份文风可以配任意角色。
+ * - **写完即生效**：后端在每个写操作后失效并重建对话图，所以新角色 / 新文风下一轮
+ *   对话就能用，不需要重启服务。
  *
  * 无障碍：模态对话框（`role="dialog"` + `aria-modal`），Esc / 「关闭」都会归还
  * 焦点；分区用 tablist / tab / tabpanel 语义；结果 `role="status"`、错误 `role="alert"`。
@@ -26,13 +27,15 @@ import { getStudioCatalog } from "@/lib/api/client";
 import type { StudioCatalog } from "@/lib/api/types";
 
 import { PersonaStudio } from "./PersonaStudio";
+import { StyleStudio } from "./StyleStudio";
 import { WorldBookStudio } from "./WorldBookStudio";
 
-type StudioTab = "persona" | "worldbook";
+type StudioTab = "persona" | "worldbook" | "style";
 
 const TABS: Array<{ id: StudioTab; label: string; hint: string }> = [
   { id: "persona", label: "我的角色", hint: "人设 · 背景故事" },
   { id: "worldbook", label: "世界书", hint: "按条件触发的设定" },
+  { id: "style", label: "文风", hint: "怎么说 · 语气节奏" },
 ];
 
 export function StudioPanel({
@@ -147,7 +150,7 @@ export function StudioPanel({
               创作工坊
             </h2>
             <p className="text-xs text-ink-soft">
-              自定义陪伴角色的性格、背景故事，以及按条件触发的世界设定
+              自定义陪伴角色的性格与背景、按条件触发的世界设定，以及它的说话方式
             </p>
           </div>
           {variant === "overlay" ? (
@@ -240,11 +243,17 @@ export function StudioPanel({
                     disabled={disabled}
                     onCatalog={applyCatalog}
                   />
-                ) : (
+                ) : tab === "worldbook" ? (
                   <WorldBookStudio
                     catalog={catalog}
                     disabled={disabled}
                     defaultScope={defaultScope}
+                    onCatalog={applyCatalog}
+                  />
+                ) : (
+                  <StyleStudio
+                    catalog={catalog}
+                    disabled={disabled}
                     onCatalog={applyCatalog}
                   />
                 )}

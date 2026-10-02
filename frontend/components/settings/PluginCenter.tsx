@@ -16,12 +16,16 @@
  * - `builtin`     内置，随项目分发，可禁用/替换；
  * - `third-party` 用户安装。
  *
+ * 插件由**用户自己写**（宿主不生成插件代码）：「添加插件」展开的是 `PluginDevPanel`，
+ * 里面讲清接口在哪、插件放哪、以及「零拷贝 / 导入」两条接入路径。
+ *
  * 降级：后端未就绪（无插件数据）时**不渲染**——不制造无意义的空面板。
  */
 
 import { useState } from "react";
 
 import { PluginDetail } from "@/components/settings/PluginDetail";
+import { PluginDevPanel } from "@/components/settings/PluginDevPanel";
 import { TavernImportPanel } from "@/components/settings/TavernImportPanel";
 import type { PluginStatus, PluginsSummary } from "@/lib/api/types";
 
@@ -70,16 +74,26 @@ export function PluginCenter({
   plugins,
   summary,
   companionId = "",
+  onCompanionChange,
   onPluginsChanged,
 }: {
   plugins: PluginStatus[];
   summary: PluginsSummary | null;
   /** 当前陪伴对象；酒馆记忆导入按它隔离（§8.2 的 `companion:{id}`） */
   companionId?: string;
+  /**
+   * 酒馆导入面板里改了导入目标时回调。
+   *
+   * 面板自带选择器（不能只靠宿主传对 id），所以宿主必须知道它变了——
+   * 否则页面上会同时出现两个不一致的「当前陪伴对象」。
+   */
+  onCompanionChange?: (id: string) => void;
   /** 启停 / 保存后回传最新快照，页面据此更新列表 */
   onPluginsChanged?: (plugins: PluginStatus[]) => void;
 }) {
   const [openId, setOpenId] = useState<string | null>(null);
+  /** 插件开发 / 接入面板（怎么写、怎么接进来、从哪扫描） */
+  const [devOpen, setDevOpen] = useState(false);
 
   if (plugins.length === 0) return null;
 
@@ -94,13 +108,25 @@ export function PluginCenter({
         <h3 id="plugin-center-title" className="text-xs font-medium text-ink-muted">
           能力中心
         </h3>
-        {summary && (
-          <span className="text-[11px] tabular-nums text-ink-faint">
-            {summary.started}/{summary.total} 运行中
-            {summary.failed > 0 && <span className="text-danger-text"> · {summary.failed} 失败</span>}
-          </span>
-        )}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            aria-expanded={devOpen}
+            className="focus-ring rounded px-1.5 py-0.5 text-[11px] text-accent-text hover:text-ink"
+            onClick={() => setDevOpen((open) => !open)}
+          >
+            {devOpen ? "收起" : "添加插件"}
+          </button>
+          {summary && (
+            <span className="text-[11px] tabular-nums text-ink-faint">
+              {summary.started}/{summary.total} 运行中
+              {summary.failed > 0 && <span className="text-danger-text"> · {summary.failed} 失败</span>}
+            </span>
+          )}
+        </div>
       </div>
+
+      {devOpen && <PluginDevPanel onPluginsChanged={onPluginsChanged} />}
 
       <div className="mt-2 flex flex-col gap-3">
         {LAYER_ORDER.map((layer) => {
@@ -158,7 +184,10 @@ export function PluginCenter({
 
       {hasTavernBridge && (
         <div className="mt-3">
-          <TavernImportPanel companionId={companionId} />
+          <TavernImportPanel
+            companionId={companionId}
+            onCompanionChange={onCompanionChange}
+          />
         </div>
       )}
     </section>

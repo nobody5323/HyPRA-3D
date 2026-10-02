@@ -5,6 +5,9 @@
  *
  * 职责只限「情绪」：召回条数等记忆证据已移到 MemoryTrace（见该组件说明），
  * 避免一张卡片混装两类信息、数字重复展示。
+ *
+ * 视觉上它是**整页唯一会「变色」的卡片**：左侧那颗点与强度条同色（取自 mood 色板），
+ * 换情绪时颜色与宽度一起过渡——演示时不用读文字也能看出情绪在动。
  */
 
 import type { EmotionInfo } from "@/lib/api/types";
@@ -21,6 +24,18 @@ const MOOD_BAR: Record<string, string> = {
   neutral: "bg-mood-neutral",
 };
 
+/** 情绪色 hex（与 tailwind.config.ts 的 mood.* 一致）：用于圆点与外环 */
+const MOOD_HEX: Record<string, string> = {
+  happy: "#E0A24E",
+  calm: "#6E9BB5",
+  sad: "#7E8FA8",
+  anxious: "#D08B5E",
+  tired: "#8B87A8",
+  angry: "#C4706A",
+  surprised: "#D4A94F",
+  neutral: "#9A948C",
+};
+
 export function MoodIndicator({
   emotion,
   tone,
@@ -30,6 +45,7 @@ export function MoodIndicator({
 }) {
   if (!emotion) return null;
   const barColor = MOOD_BAR[emotion.label] ?? MOOD_BAR.neutral;
+  const hex = MOOD_HEX[emotion.label] ?? MOOD_HEX.neutral;
   // 强度容错：字段缺失或非数值时按 0 处理（否则会渲染出 NaN%）
   const intensity = Number.isFinite(emotion.intensity) ? emotion.intensity : 0;
   const percent = Math.round(Math.max(0, Math.min(1, intensity)) * 100);
@@ -37,31 +53,51 @@ export function MoodIndicator({
   return (
     <section
       aria-labelledby="mood-title"
-      className="rounded-xl border border-line bg-surface-panel px-4 py-3"
+      className="card shrink-0 animate-fade-up px-4 py-3"
     >
-      <div className="flex items-center justify-between text-xs text-ink-soft">
+      <div className="flex items-center justify-between gap-3">
         {/* 用真实 h2 作区域标题：读屏可按标题/区域跳转（审计 A10） */}
-        <h2 id="mood-title" className="text-xs text-ink-soft">
+        <h2 id="mood-title" className="flex items-center gap-2 text-xs font-medium text-ink-muted">
+          <span
+            aria-hidden="true"
+            className="status-dot h-2 w-2 transition-colors duration-500"
+            style={{ backgroundColor: hex, boxShadow: `0 0 0 3px ${hex}22` }}
+          />
           当前情绪
         </h2>
-        <span>{emotion.source === "llm" ? "模型识别" : "规则兜底"}</span>
+        <span className="chip chip-neutral">
+          {emotion.source === "llm" ? "模型识别" : "规则兜底"}
+        </span>
       </div>
 
-      <div className="mt-2 flex items-center gap-3">
-        <span className="text-base text-ink">{emotion.label_zh}</span>
-        <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover">
+      <div className="mt-2.5 flex items-center gap-3">
+        <span
+          translate="no"
+          className="shrink-0 text-base font-semibold tracking-tight transition-colors duration-500"
+          style={{ color: hex }}
+        >
+          {emotion.label_zh}
+        </span>
+        <div className="h-2 flex-1 overflow-hidden rounded-full bg-surface-hover">
           <div
-            className={`h-full rounded-full transition-[width] duration-700 ${barColor}`}
+            className={`h-full rounded-full transition-[width] duration-700 ease-out ${barColor}`}
             style={{ width: `${percent}%` }}
           />
         </div>
-        <span className="text-xs tabular-nums text-ink-soft">{percent}%</span>
+        <span className="shrink-0 text-xs tabular-nums text-ink-muted">{percent}%</span>
       </div>
 
-      <div className="mt-2 flex flex-wrap gap-3 text-xs text-ink-soft">
-        {tone && <span>语气：{tone}</span>}
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-soft">
+        {tone && (
+          <span>
+            语气 <span className="text-ink-muted">{tone}</span>
+          </span>
+        )}
         <span>
-          表情键：<span translate="no">{emotion.facial_expression}</span>
+          表情键{" "}
+          <span translate="no" className="text-ink-muted">
+            {emotion.facial_expression}
+          </span>
         </span>
       </div>
     </section>

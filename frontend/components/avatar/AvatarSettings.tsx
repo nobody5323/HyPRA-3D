@@ -3,8 +3,9 @@
 /**
  * 数字人设置面板：**在页面上直接填写魔珐密钥**（无需改 .env 重新构建）。
  *
- * 凭证保存到 localStorage 并即时生效（SDK 会自动重建）；
- * 未配置时自动降级为「浏览器原生 TTS + 占位形象」。
+ * 凭证保存到**后端**（三个界面共享同一份）并即时生效（SDK 会自动重建）；
+ * 未配置时使用本地渲染器（Live2D / 静态立绘），且**不播报语音**——
+ * 只有接入 TTS（服务端 GPT-SoVITS 或魔珐 SDK）才出声。
  *
  * 组件是**受控的展示层**：凭证状态由页面统一持有（避免同一 store 被多处订阅）。
  *
@@ -31,7 +32,10 @@ import type { TtsVoicesStatus } from "@/lib/api/types";
 import { ModelLibraryPanel } from "./ModelLibraryPanel";
 
 const SOURCE_LABEL: Record<string, { text: string; className: string }> = {
-  local: { text: "密钥已填写（本机保存）", className: "bg-success-soft text-success-text" },
+  user: {
+    text: "密钥已填写（保存在后端，各界面共享）",
+    className: "bg-success-soft text-success-text",
+  },
   env: { text: "密钥来自部署配置", className: "bg-accent-soft text-accent-text" },
   none: { text: "未配置密钥 → 使用本地渲染器", className: "bg-warning-soft text-warning-text" },
 };
@@ -58,12 +62,12 @@ export function AvatarSettings({
   onClose: () => void;
   credentials: AvatarCredentials | null;
   source: CredentialSource;
-  save: (credentials: AvatarCredentials) => boolean;
-  clear: () => void;
+  save: (credentials: AvatarCredentials) => Promise<boolean>;
+  clear: () => Promise<boolean>;
   /** 当前渲染方式偏好 */
   renderer: AvatarRendererPreference;
   onRendererChange: (value: AvatarRendererPreference) => void;
-  /** 当前语音引擎偏好（自动 / 强制服务端 / 强制浏览器） */
+  /** 当前语音引擎偏好（自动 / 强制服务端） */
   ttsEngine: TtsEnginePreference;
   onTtsEngineChange: (value: TtsEnginePreference) => void;
   /** 选中的音色 id（空串 = 后端默认音色） */
@@ -132,7 +136,7 @@ export function AvatarSettings({
   const canSave = appId.trim().length > 0 && appSecret.trim().length > 0;
   const badge = SOURCE_LABEL[source] ?? SOURCE_LABEL.none;
 
-  /** 后端能出服务端音频吗（未探测到 / 未配好 → 只能用浏览器语音） */
+  /** 后端能出服务端音频吗（未探测到 / 未配好 → 整轮静音） */
   const serverTtsReady = Boolean(ttsStatus?.server_tts && ttsStatus.configured);
   /** 有音色可选时才展示音色区（只有 GPT-SoVITS 才有「音色」概念） */
   const voiceOptions = ttsStatus?.voices ?? [];
@@ -144,23 +148,27 @@ export function AvatarSettings({
       ? serverTtsReady
         ? "服务端 TTS 已就绪（GPT-SoVITS）"
         : "后端未启用服务端 TTS"
-      : "未探测到后端语音引擎（后端未就绪时会自动回落到浏览器语音）");
+      : "未探测到后端语音引擎（后端未就绪时不播报语音，只显示文字）");
 
-  function handleSave() {
+  async function handleSave() {
     if (!canSave) return;
-    const ok = save({ appId, appSecret });
+    const ok = await save({ appId, appSecret });
     setMessage(
       ok
         ? "已保存，数字人将自动重新初始化。"
-        : "保存失败：本机存储不可用（可能是隐私模式），请检查浏览器设置。",
+        : "保存失败：后端不可达或被拒绝，请确认后端已启动。",
     );
   }
 
-  function handleClear() {
-    clear();
+  async function handleClear() {
+    const ok = await clear();
+    if (!ok) {
+      setMessage("清除失败：后端不可达，请稍后重试。");
+      return;
+    }
     setAppId("");
     setAppSecret("");
-    setMessage("已清除本机配置。");
+    setMessage("已清除后端保存的密钥。");
   }
 
   /**
@@ -188,7 +196,7 @@ export function AvatarSettings({
       role="dialog"
       aria-modal="true"
       aria-labelledby={titleId}
-      className="absolute right-0 top-full z-30 mt-2 max-h-[min(70vh,520px)] w-[380px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-lg"
+      className="absolute right-0 top-full z-30 mt-2 max-h-[min(70vh,520px)] w-[380px] overflow-y-auto rounded-2xl border border-line bg-surface-panel p-4 shadow-float"
     >
       <div className="flex items-start justify-between">
         <div>
@@ -258,7 +266,8 @@ export function AvatarSettings({
 
       {/*
         语音引擎：Live2D / 静态立绘的「真声音」来自服务端 TTS（GPT-SoVITS）。
-        自动判断只在后端就绪那一刻取一次，现场可能想手动固定一路，所以给三档。
+        自动判断只在后端就绪那一刻取一次，现场可能想手动固定，所以给两档。
+        刻意没有「浏览器语音」：系统音色与角色对不上，没接入 TTS 时宁可不播报。
       */}
       <fieldset className="mt-4">
         <legend className="text-xs text-ink-muted">语音引擎</legend>
@@ -402,8 +411,13 @@ export function AvatarSettings({
           <span className="text-ink-muted">驱动应用</span> → 查看密钥 → 复制 App ID / App Secret。
         </p>
         <p>
-          密钥仅保存在本机浏览器，不会上传到服务器；「本地渲染器」用项目自带的 Live2D
-          模型（需已执行 scripts/setup-cubism.mjs），不消耗魔珐积分。
+          密钥保存在后端 <span className="text-ink-muted">backend/data/avatar-credentials.json</span>
+          ，控制台 / Web 端 / 桌宠窗共享同一份；魔珐 SDK 在浏览器里建会话，密钥因此会
+          下发到页面（客户端渲染所需，并非「只存服务器」），请勿把后端暴露到公网。
+        </p>
+        <p>
+          「本地渲染器」用项目自带的 Live2D 模型（需已执行 scripts/setup-cubism.mjs），
+          不消耗魔珐积分。
         </p>
       </div>
     </div>

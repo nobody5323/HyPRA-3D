@@ -4,7 +4,7 @@
  * 重点覆盖四类**真实故障**（每个用例都是对应缺陷的回归测试）：
  * 1. 音频与口型**必须同源**——同一次 `/media/avatar` 请求；
  * 2. 口型时钟必须对齐**音频真正开始播放**的时刻，否则是固定的音画偏移；
- * 3. 降级（无音频）/ 播放被拦 / 打断 / 卸载，每条收尾路径都不得让 `speak` 挂死；
+ * 3. 无音频（服务未部署）/ 播放被拦 / 打断 / 卸载，每条收尾路径都不得让 `speak` 挂死；
  * 4. 分段播报是**流水线**：逐段合成（首段先出声）+ 播放时预取下一段，字幕与语音同步出现。
  */
 
@@ -135,59 +135,10 @@ function stubAvatarFetch(body: unknown) {
   return fetchMock;
 }
 
-/** speechSynthesis 替身（降级路径用；只保留实现用到的成员） */
-class FakeUtterance {
-  text: string;
-  voice: unknown = null;
-  rate = 1;
-  onend: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(text: string) {
-    this.text = text;
-  }
-}
-
-class FakeSpeechSynthesis {
-  readonly spoken: string[] = [];
-  onvoiceschanged: (() => void) | null = null;
-  private current: FakeUtterance | null = null;
-
-  speak(utterance: FakeUtterance) {
-    this.spoken.push(utterance.text);
-    this.current = utterance;
-  }
-
-  cancel() {
-    const current = this.current;
-    this.current = null;
-    // 真实浏览器为被取消的语音触发 onend，这里同样收敛 Promise
-    current?.onend?.();
-  }
-
-  getVoices() {
-    return [{ lang: "zh-CN", name: "Fake Xiaoxiao" }];
-  }
-
-  /** 让当前这段"念完"（浏览器替身不自动结束，与真实浏览器一致） */
-  finishCurrent() {
-    const current = this.current;
-    this.current = null;
-    current?.onend?.();
-  }
-}
-
-let speech: FakeSpeechSynthesis;
-
 beforeEach(() => {
   FakeAudio.instances = [];
   FakeAudio.nextPlayError = null;
   vi.stubGlobal("Audio", FakeAudio);
-  speech = new FakeSpeechSynthesis();
-  vi.stubGlobal("SpeechSynthesisUtterance", FakeUtterance);
-  Object.defineProperty(window, "speechSynthesis", {
-    configurable: true,
-    value: speech,
-  });
 });
 
 afterEach(() => {
@@ -267,21 +218,22 @@ describe("useServerTtsAvatar：音频与口型同源", () => {
   });
 });
 
-describe("useServerTtsAvatar：降级路径", () => {
-  it("后端没给音频时逐句回落浏览器 TTS", async () => {
+describe("useServerTtsAvatar：无音频时静默（不回落浏览器语音）", () => {
+  it("后端没给音频时安静收尾，且不挂起", async () => {
     stubAvatarFetch({ ...avatarBody("我在。"), has_audio: false, audio_url: null });
     const { result } = renderHook(() => useServerTtsAvatar());
 
     const { pending } = await startSpeak(result, "我在。");
-    // 服务端没音频 → 已改走浏览器 TTS；替身不会自动念完，手动收尾
-    expect(speech.spoken).toEqual(["我在。"]);
     await act(async () => {
-      speech.finishCurrent();
-      await pending;
+      await pending; // 无音频也不该等到超时
     });
+
+    // 没有创建任何音频元素，也没有别的语音顶上（浏览器语音已移除）
+    expect(FakeAudio.instances).toHaveLength(0);
+    expect(result.current.timeline).toBeNull();
   });
 
-  it("请求失败（服务未部署）同样回落浏览器 TTS", async () => {
+  it("请求失败（服务未部署）同样静默收尾", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => {
@@ -291,30 +243,29 @@ describe("useServerTtsAvatar：降级路径", () => {
     const { result } = renderHook(() => useServerTtsAvatar());
 
     const { pending } = await startSpeak(result, "我在。");
-    expect(speech.spoken).toEqual(["我在。"]);
     await act(async () => {
-      speech.finishCurrent();
       await pending;
     });
+
+    expect(FakeAudio.instances).toHaveLength(0);
+    expect(result.current.timeline).toBeNull();
   });
 
-  it("enabled=false 时完全不调后端，直接浏览器 TTS", async () => {
+  it("enabled=false 时完全不调后端，也不出声", async () => {
     const fetchMock = stubAvatarFetch(avatarBody("我在。"));
     const { result } = renderHook(() => useServerTtsAvatar({ enabled: false }));
 
-    const { pending } = await startSpeak(result, "我在。");
+    await act(async () => {
+      await result.current.speak("我在。"); // 必须立即返回
+    });
 
     expect(fetchMock).not.toHaveBeenCalled();
-    expect(speech.spoken).toEqual(["我在。"]);
-    expect(result.current.detail).toContain("浏览器");
-
-    await act(async () => {
-      speech.finishCurrent();
-      await pending;
-    });
+    expect(FakeAudio.instances).toHaveLength(0);
+    expect(result.current.detail).toContain("不播报语音");
+    expect(result.current.stage).toBe("unconfigured");
   });
 
-  it("自动播放被拦：不折腾降级（浏览器 TTS 同样会被拦），立即收尾", async () => {
+  it("自动播放被拦：整轮静音收尾（不换别的语音，也不双重出声）", async () => {
     stubAvatarFetch(avatarBody("我在。"));
     FakeAudio.nextPlayError = new Error("NotAllowedError");
     const { result } = renderHook(() => useServerTtsAvatar());
@@ -323,7 +274,6 @@ describe("useServerTtsAvatar：降级路径", () => {
       await result.current.speak("我在。"); // 必须立即返回，不挂起
     });
 
-    expect(speech.spoken).toEqual([]); // 不双重出声
     expect(result.current.timeline).toBeNull();
   });
 
@@ -436,7 +386,7 @@ describe("useServerTtsAvatar：分段播报（流水线：逐段合成 + 预取 
   });
 
 
-  it("某一段拿不到音频时只降级那一段，前后段仍走服务端", async () => {
+  it("某一段拿不到音频时只有那一段静音，前后段仍走服务端", async () => {
     const fetchMock = stubAvatarFetchSeq([
       avatarBody("我在。", 4_000, "/media/audio/seg1.wav"),
       { ...avatarBody("慢慢说。"), has_audio: false, audio_url: null },
@@ -457,20 +407,17 @@ describe("useServerTtsAvatar：分段播报（流水线：逐段合成 + 预取 
       FakeAudio.instances[0].finish();
     });
 
-    // 中间那段用浏览器 TTS 顶上（此刻它已"在说"），字幕照常推进
-    expect(speech.spoken).toEqual(["慢慢说。"]);
-    expect(seen).toEqual([0, 1]);
+    // 第 2 段静音（不出声、也不换系统语音）：循环不等待，直接推进到第 3 段并开始播它
+    expect(seen).toEqual([0, 1, 2]);
+    expect(FakeAudio.instances).toHaveLength(2); // 只造了第 1、3 段的音频元素
 
-    await act(async () => {
-      speech.finishCurrent(); // 浏览器那段念完 → 循环继续到第 3 段
-    });
     await act(async () => {
       FakeAudio.instances[1].emitPlaying();
       FakeAudio.instances[1].finish();
       await pending;
     });
 
-    // 三段都请求过后端；但只有 2 段拿到了音频（第 1、3 段），第 2 段由浏览器语音顶上。
+    // 三段都请求过后端；但只有 2 段拿到了音频（第 1、3 段），第 2 段静音。
     // 注：不能用 audio.src 断言——播完会调 stopAudio() 释放（removeAttribute("src")）。
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect(FakeAudio.instances).toHaveLength(2);

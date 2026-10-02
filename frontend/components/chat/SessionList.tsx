@@ -41,6 +41,7 @@ export function SessionList({
   onSelect,
   onNew,
   onRemove,
+  onClearAll,
 }: {
   personaId: string;
   activeSessionId: string | null;
@@ -49,8 +50,18 @@ export function SessionList({
   disabled?: boolean;
   onSelect: (sessionId: string) => void;
   onNew: () => void;
-  /** 删除一段对话（不可恢复；父层会在删到当前会话时回到新对话） */
+  /** 删除一段对话（不可恢复）。**请求由调用方发**：本组件只做列表视图与二次确认 UI，
+   * 自己不碰 API（Web / 桌宠由 `useChatSession` 调，控制台由 `MemoryPanel` 调）；
+   * 删到当前会话时需要调用方把界面切回新对话，本组件不持有会话指针。
+   */
   onRemove: (sessionId: string) => Promise<void>;
+  /**
+   * 清空该陪伴对象的**全部**会话（不可恢复）。同样由调用方发请求。
+   *
+   * 存在的理由：试聊/超时/空回复会留下几十个同名会话（标题就是首条用户消息），
+   * 逐条删不现实。
+   */
+  onClearAll: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
   /** null = 尚未加载 */
@@ -62,6 +73,9 @@ export function SessionList({
   /** 正在删除的会话 id（防重复点击） */
   const [deleting, setDeleting] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  /** 正在二次确认「清空全部」 */
+  const [pendingClear, setPendingClear] = useState(false);
+  const [clearing, setClearing] = useState(false);
   /** 请求序号：切换陪伴对象后丢弃在途的旧响应 */
   const seqRef = useRef(0);
 
@@ -69,7 +83,8 @@ export function SessionList({
     const seq = ++seqRef.current;
     setLoading(true);
     try {
-      const items = await getSessions(personaId);
+      // 一次取够：后端默认只回 20 条，删掉一条会「冒」出第 21 条，看着像删不完
+      const items = await getSessions(personaId, { limit: 100 });
       if (seq !== seqRef.current) return;
       setSessions(items);
       setError(null);
@@ -115,8 +130,22 @@ export function SessionList({
     }
   }
 
+  /** 清空该角色的全部会话（已在界面上过了二次确认） */
+  async function confirmClear() {
+    setPendingClear(false);
+    setClearing(true);
+    setDeleteError(null);
+    try {
+      await onClearAll();
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "清空失败");
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
-    <section aria-labelledby={titleId} className="rounded-xl border border-line bg-surface-panel">
+    <section aria-labelledby={titleId} className="card">
       <h2 id={titleId} className="sr-only">
         历史记录
       </h2>
@@ -162,6 +191,50 @@ export function SessionList({
               {loading ? "刷新中…" : "刷新"}
             </button>
           </div>
+
+          {/*
+            清空该角色的全部对话。单独一行且默认不展开确认：它是**不可恢复**的
+            批量操作，不该和「新建对话」抢同样醒目的位置。
+          */}
+          {sessions !== null && sessions.length > 0 ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {pendingClear ? (
+                <>
+                  <span className="text-xs text-ink-soft">
+                    清空该角色全部 {sessions.length} 段对话？
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void confirmClear()}
+                    disabled={disabled || clearing}
+                    className="focus-ring rounded-md bg-danger px-2 py-1 text-xs font-medium text-ink-on transition-colors hover:brightness-95 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {clearing ? "清空中…" : "确认清空"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setPendingClear(false)}
+                    disabled={clearing}
+                    className="focus-ring rounded-md border border-line px-2 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-hover disabled:cursor-not-allowed"
+                  >
+                    取消
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingClear(true);
+                    setDeleteError(null);
+                  }}
+                  disabled={disabled || clearing || deleting !== null}
+                  className="focus-ring rounded-md border border-line px-2 py-1 text-xs text-ink-faint transition-colors hover:bg-surface-hover disabled:cursor-not-allowed"
+                >
+                  清空全部
+                </button>
+              )}
+            </div>
+          ) : null}
           <p className="text-xs leading-relaxed text-ink-faint">
             新建对话不会删除任何记录：旧对话仍在这里，随时可以点回来。
           </p>

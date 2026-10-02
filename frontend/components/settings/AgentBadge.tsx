@@ -73,7 +73,7 @@ export function AgentBadge({ servers }: { servers: McpServerStatus[] }) {
       {open && (
         <div
           id="agent-badge-panel"
-          className="absolute right-0 top-full z-20 mt-2 w-[300px] rounded-2xl border border-line bg-surface-panel p-3 shadow-lg"
+          className="absolute right-0 top-full z-20 mt-2 w-[300px] rounded-2xl border border-line bg-surface-panel p-3 shadow-float"
         >
           <h3 className="text-xs font-medium text-ink">MCP 外部服务</h3>
           <ul className="mt-2 space-y-2">

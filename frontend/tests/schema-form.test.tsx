@@ -12,7 +12,7 @@ import { useState } from "react";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { SchemaForm, missingRequired } from "@/components/settings/SchemaForm";
+import { SchemaForm, missingRequired, outOfRange } from "@/components/settings/SchemaForm";
 import type { PluginSettingsSchema } from "@/lib/api/types";
 
 afterEach(cleanup);
@@ -21,14 +21,16 @@ afterEach(cleanup);
 function Controlled({
   schema,
   initial = {},
+  secretsSet,
 }: {
   schema: PluginSettingsSchema;
   initial?: Record<string, unknown>;
+  secretsSet?: string[];
 }) {
   const [values, setValues] = useState<Record<string, unknown>>(initial);
   return (
     <>
-      <SchemaForm schema={schema} values={values} onChange={setValues} />
+      <SchemaForm schema={schema} values={values} onChange={setValues} secretsSet={secretsSet} />
       <output data-testid="values">{JSON.stringify(values)}</output>
     </>
   );
@@ -116,6 +118,68 @@ describe("SchemaForm 渲染", () => {
 
     const input = screen.getByLabelText("令牌") as HTMLInputElement;
     expect(input.type).toBe("password");
+  });
+
+  it("已配置的密钥字段提示「已保存，留空则沿用」", () => {
+    render(
+      <SchemaForm
+        schema={schemaOf({ token: { type: "string", title: "令牌", format: "password" } })}
+        values={{}}
+        onChange={vi.fn()}
+        secretsSet={["token"]}
+      />,
+    );
+
+    const input = screen.getByLabelText("令牌") as HTMLInputElement;
+    expect(input.value).toBe(""); // 后端不下发明文，表单不回填
+    expect(input.placeholder).toBe("已保存，留空则沿用");
+  });
+
+  it("未配置的密钥字段不显示「已保存」与清除按钮", () => {
+    render(
+      <SchemaForm
+        schema={schemaOf({ token: { type: "string", title: "令牌", format: "password" } })}
+        values={{}}
+        onChange={vi.fn()}
+        secretsSet={[]}
+      />,
+    );
+
+    const input = screen.getByLabelText("令牌") as HTMLInputElement;
+    expect(input.placeholder).toBe("");
+    expect(screen.queryByRole("button", { name: "清除已保存" })).toBeNull();
+  });
+
+  it("非密钥字段不给清除按钮（留着会是死按钮）", () => {
+    render(
+      <SchemaForm
+        schema={schemaOf({ tavern_dir: { type: "string", title: "酒馆数据目录" } })}
+        values={{ tavern_dir: "D:/ST" }}
+        onChange={vi.fn()}
+        secretsSet={["tavern_dir"]}
+      />,
+    );
+
+    expect(screen.queryByRole("button", { name: "清除已保存" })).toBeNull();
+  });
+
+  it("「清除已保存」把该字段标成 null，其它字段不受影响", () => {
+    render(
+      <Controlled
+        schema={schemaOf({
+          token: { type: "string", title: "令牌", format: "password" },
+          keep: { type: "string", title: "保留" },
+        })}
+        initial={{ keep: "x" }}
+        secretsSet={["token"]}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "清除已保存" }));
+
+    expect(valuesOf()).toEqual({ keep: "x", token: null });
+    // 点完按钮后不再提示「已保存」（用户已表达了清除意图）
+    expect(screen.queryByRole("button", { name: "清除已保存" })).toBeNull();
   });
 
   it("string[] 用「每行一项」的文本域，输入转成数组", () => {
@@ -276,5 +340,40 @@ describe("必填校验", () => {
   it("数字字段的 0 与布尔 false 不算缺失", () => {
     const schema = schemaOf({ n: { type: "integer" }, f: { type: "boolean" } }, ["n", "f"]);
     expect(missingRequired(schema, { n: 0, f: false })).toEqual([]);
+  });
+
+  it("密钥字段的显式 null 不算缺失（那是「清除」，不是「没填」）", () => {
+    // 否则会卡成「点清除 → 保存被拦 → 清除按钮已消失」的死路
+    const schema = schemaOf(
+      { token: { type: "string", format: "password" }, other: { type: "string" } },
+      ["token", "other"],
+    );
+
+    expect(missingRequired(schema, { token: null, other: "x" })).toEqual([]);
+    // 非密钥字段的 null 仍算缺失（那是真的没值）
+    expect(missingRequired(schema, { token: "t", other: null })).toEqual(["other"]);
+  });
+});
+
+describe("数值范围校验", () => {
+  const numericSchema = schemaOf({
+    dim: { type: "integer", title: "维度", minimum: 1 },
+    speed: { type: "number", title: "语速", minimum: 0.1, maximum: 3 },
+    model: { type: "string", title: "模型" },
+  });
+
+  it("最小/最大值越界会被拦下", () => {
+    expect(outOfRange(numericSchema, { dim: 0 })).toEqual(["dim"]);
+    expect(outOfRange(numericSchema, { speed: "9" })).toEqual(["speed"]);
+    expect(outOfRange(numericSchema, { dim: 1024, speed: 0.1 })).toEqual([]);
+  });
+
+  it("非数值也拦（后端会静默忽略，界面却不能装作填上了）", () => {
+    expect(outOfRange(numericSchema, { dim: "很大" })).toEqual(["dim"]);
+  });
+
+  it("未填的数值字段不参与校验，非数值字段不看范围", () => {
+    expect(outOfRange(numericSchema, { dim: "", model: "随便写的" })).toEqual([]);
+    expect(outOfRange(numericSchema, {})).toEqual([]);
   });
 });
