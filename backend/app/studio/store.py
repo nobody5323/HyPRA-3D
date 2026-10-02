@@ -1,20 +1,24 @@
-"""用户创作内容（角色卡 / 世界书条目）的本地存储门面。
+"""用户创作内容（角色卡 / 世界书条目 / 文风）的本地存储门面。
 
 ## 目录约定
 
     <root>/                              # 默认 backend/data/studio（backend/data/ 已被 .gitignore 覆盖）
         personas/<id>.yaml               # 我创建的角色卡（与内置角色同构）
+        personas/deleted_builtin.json    # 我从当前工坊隐藏的内置角色 id（不改动内置文件）
         worldbook/<id>.yaml              # 我创建的世界书条目（与内置条目同构）
         worldbook/disabled_builtin.json  # 我停用掉的内置条目 id（不改动内置文件）
+        worldbook/deleted_builtin.json   # 我从当前工坊隐藏的内置条目 id（不改动内置文件）
+        styles/<id>.yaml                 # 我创建的文风预设（与内置文风同构）
+        styles/deleted_builtin.json      # 我从当前工坊隐藏的内置文风 id（不改动内置文件）
 
 ## 四条关键约定
 
 1. **与内置同构**：用户内容与内置资源共用同一套模型（PersonaPreset /
-   WorldBookEntry），因此自建角色在对话链路里与内置角色零差异——加载器只是多扫
-   一个目录。这样「用户能做的」与「内置能做的」不会分叉成两套逻辑。
-2. **内置只读**：内置资源在包目录里（docker 镜像中可能只读），且属项目原创内容，
-   一律不可改；要改就先「复制为我的角色 / 条目」。唯一的例外是**停用偏好**——
-   它写在用户目录的 `disabled_builtin.json` 里，内置文件一字未改。
+   WorldBookEntry / StylePreset），因此自建角色在对话链路里与内置角色零差异——
+   加载器只是多扫一个目录。这样「用户能做的」与「内置能做的」不会分叉成两套逻辑。
+2. **内置资源不改包文件**：内置资源在包目录里（docker 镜像中可能只读），且属项目原创内容。
+   用户可以在工坊删除它；删除的语义是写入用户侧隐藏清单，内置文件一字未改，之后不再出现在工坊
+   与对话链路中。用户也可以用同样的用户侧机制停用内置世界书条目。
 3. **id 不可改**：角色 id 同时是记忆隔离命名空间（温层 collection 名
    `memory_{id}`、冷层 companion 字段、个人记忆分库），改 id 等于换一整套记忆，
    所以创建后不允许修改；id 由系统自动生成（`user-` 前缀）。
@@ -36,23 +40,29 @@ import logging
 import os
 import re
 import secrets
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
 import yaml
 
+from app.paths import data_path
 from app.prompts.persona.loader import (
     PersonaPreset,
     load_builtin_presets,
     load_preset_file,
 )
+from app.prompts.style.loader import load_builtin_styles, load_style_file
+from app.prompts.style.models import StyleExample, StylePreset
 from app.worldbook.loader import load_builtin_entries, load_entry_file
 from app.worldbook.models import SCOPE_ALL, WorldBookEntry
 
 logger = logging.getLogger(__name__)
 
-#: 用户内容目录默认位置（本文件位于 backend/app/studio/store.py）
-DEFAULT_ROOT = Path(__file__).resolve().parents[2] / "data" / "studio"
+
+def default_root() -> Path:
+    """用户内容目录的默认位置（可写数据目录）。"""
+    return data_path("data", "studio")
 
 #: 用户内容 id 允许的字符集：小写字母或数字开头，其后允许 - _。
 #: 与角色 id、Qdrant collection 名（`memory_{companion_id}`）的约束保持一致。
@@ -64,12 +74,22 @@ _ID_PREFIX = "user-"
 #: 从标题里提取 ascii slug 用的片段匹配（中文标题会得到空串）
 _SLUG_PATTERN = re.compile(r"[a-z0-9]+")
 
-#: 内置条目停用清单文件名（放在 worldbook/ 下）
+#: 外部只读角色来源：返回一批 `PersonaPreset`。
+#: 传可调用对象而不是现成列表——数据源内容会随插件启停 / 配置变更而变。
+ExternalPersonaSource = Callable[[], Iterable[PersonaPreset]]
+
+#: 内置资源的用户侧状态文件（包内 YAML 一律不修改）
 _DISABLED_FILE = "disabled_builtin.json"
+_DELETED_PERSONAS_FILE = "deleted_builtin.json"
+_DELETED_ENTRIES_FILE = "deleted_builtin.json"
+#: 文风与角色、条目各在自己的目录下，因此可以复用同一个文件名
+_DELETED_STYLES_FILE = "deleted_builtin.json"
 
 # ---- 字段长度上限 ----
 # 为什么要限：人设层在 PromptManager 里是**必留层**（不参与裁剪），用户把一篇小说
 # 粘进人设正文会直接把上下文撑爆；报错比让对话悄悄失控好。
+# 文风同理：风格指令块排在 system 末尾、示例对话还会以 few-shot 形式进消息列表，
+# 不限长的话「自定义文风」就成了把上下文塞满的快捷方式。
 _MAX_PERSONA_NAME = 50
 _MAX_PERSONA_TITLE = 100
 _MAX_PERSONA_DESCRIPTION = 500
@@ -84,6 +104,35 @@ _MAX_ENTRY_CONTENT = 4000
 _MAX_ENTRY_VECTOR_TEXT = 500
 _MAX_TRIGGER_ITEMS = 50
 _MAX_TRIGGER_ITEM_CHARS = 100
+_MAX_STYLE_NAME = 40
+_MAX_STYLE_DESCRIPTION = 200
+_MAX_STYLE_PROMPT = 4000
+_MAX_STYLE_AVOID_ITEMS = 20
+_MAX_STYLE_AVOID_CHARS = 60
+_MAX_STYLE_EXAMPLES = 6
+_MAX_STYLE_EXAMPLE_CHARS = 500
+_MAX_STYLE_CONFLICT_ITEMS = 20
+_MAX_STYLE_CONFLICT_CHARS = 30
+
+#: 采样参数白名单与取值范围。
+#:
+#: 为什么要白名单而不是照抄用户给的 dict：`StylePreset.sampling` 的优先级**最高**
+#: （盖过模型预设档），写错一个键不会报错、只会静默无效；写错一个量级（如
+#: temperature: 80）则会让每一轮对话都退化。取值区间对齐 `resolve_sampling`
+#: 真正消费的那几个键（见 app/llm/profiles.py）。
+_SAMPLING_KEYS: dict[str, tuple[float, float]] = {
+    "temperature": (0.0, 2.0),
+    "max_tokens": (1.0, 8192.0),
+    "top_p": (0.0, 1.0),
+    "frequency_penalty": (-2.0, 2.0),
+    "presence_penalty": (-2.0, 2.0),
+}
+
+#: 采样参数白名单的**对外出口**：界面据此渲染输入框与即时校验，
+#: 免得前端把键名与区间硬编码一份（两边漂移了用户看到的就是假提示）
+SAMPLING_SPEC: list[dict[str, object]] = [
+    {"key": key, "min": low, "max": high} for key, (low, high) in _SAMPLING_KEYS.items()
+]
 
 #: 字段长度上限的**对外出口**：接口 /chat/studio/meta 用它给界面做即时校验提示，
 #: 免得前端把同一批数字硬编码一份（两边漂移了用户看到的就是假提示）
@@ -102,6 +151,15 @@ LIMITS: dict[str, int] = {
     "entry_vector_text": _MAX_ENTRY_VECTOR_TEXT,
     "trigger_items": _MAX_TRIGGER_ITEMS,
     "trigger_chars": _MAX_TRIGGER_ITEM_CHARS,
+    "style_name": _MAX_STYLE_NAME,
+    "style_description": _MAX_STYLE_DESCRIPTION,
+    "style_prompt": _MAX_STYLE_PROMPT,
+    "style_avoid_items": _MAX_STYLE_AVOID_ITEMS,
+    "style_avoid_chars": _MAX_STYLE_AVOID_CHARS,
+    "style_examples": _MAX_STYLE_EXAMPLES,
+    "style_example_chars": _MAX_STYLE_EXAMPLE_CHARS,
+    "style_conflict_items": _MAX_STYLE_CONFLICT_ITEMS,
+    "style_conflict_chars": _MAX_STYLE_CONFLICT_CHARS,
 }
 
 
@@ -150,6 +208,34 @@ class EntrySummary:
         return {**self.entry.model_dump(), "builtin": self.builtin}
 
 
+@dataclass(frozen=True)
+class StyleSummary:
+    """文风预设清单项（**不含**风格指令与示例正文；要正文请取详情）。
+
+    与 `PersonaSummary` 同一取向：列表接口只回展示必需的信息。文风正文加上
+    示例对话动辄上千字，内置 + 用户的清单全量返回会让「打开工坊」这一下变重。
+    """
+
+    id: str
+    name: str
+    description: str
+    tags: list[str]
+    examples: int
+    builtin: bool
+
+    def as_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description,
+            "tags": list(self.tags),
+            # 叫 example_count 而不是 examples：详情接口的 `examples` 是示例对话**数组**，
+            # 同名不同型会让调用方（尤其前端）在两条接口之间错用而不报错。
+            "example_count": self.examples,
+            "builtin": self.builtin,
+        }
+
+
 # ---------- 落盘字段（顺序即 YAML 中的书写顺序，便于用户手改）----------
 
 
@@ -180,6 +266,24 @@ def _entry_payload(entry: WorldBookEntry) -> dict:
         "vector_text": entry.vector_text,
         "vector_threshold": entry.vector_threshold,
         "content": entry.content,
+    }
+
+
+def _style_payload(preset: StylePreset) -> dict:
+    """落盘字段（顺序即 YAML 书写顺序，与内置文风预设保持同一版式）。"""
+    return {
+        "id": preset.id,
+        "name": preset.name,
+        "description": preset.description,
+        "tags": list(preset.tags),
+        "style_prompt": preset.style_prompt,
+        "avoid": list(preset.avoid),
+        "examples": [
+            {"user": example.user, "assistant": example.assistant}
+            for example in preset.examples
+        ],
+        "sampling": dict(preset.sampling),
+        "conflicts_with": list(preset.conflicts_with),
     }
 
 
@@ -246,8 +350,54 @@ def _slugify(text: str, *, limit: int = 24) -> str:
     return "-".join(_SLUG_PATTERN.findall((text or "").lower()))[:limit].strip("-")
 
 
+def _clean_sampling(values: dict[str, float] | None) -> dict[str, float]:
+    """校验文风预设的建议采样参数（键必须白名单内，值必须在合理区间）。
+
+    宁可报错也不写入可疑值：文风预设的 sampling 优先级最高，会盖过模型预设档，
+    一个 `temperatur`（拼错）或 `temperature: 80` 不会被任何下游拦住，
+    只会让这个文风的每一轮对话都变得不可用，而用户完全看不出原因。
+    """
+    cleaned: dict[str, float] = {}
+    for key, value in (values or {}).items():
+        name = str(key).strip()
+        if name not in _SAMPLING_KEYS:
+            allowed = "、".join(_SAMPLING_KEYS)
+            raise StudioError(f"不支持的采样参数「{name}」；可用：{allowed}")
+        try:
+            number = float(value)
+        except (TypeError, ValueError) as exc:
+            raise StudioError(f"采样参数「{name}」必须是数字，当前是 {value!r}") from exc
+        low, high = _SAMPLING_KEYS[name]
+        if not low <= number <= high:
+            raise StudioError(f"采样参数「{name}」应在 {low} ~ {high} 之间，当前是 {number}")
+        cleaned[name] = number
+    return cleaned
+
+
+def _clean_examples(values: list[dict] | None) -> list[StyleExample]:
+    """校验示例对话：每组都必须同时有 user 与 assistant（空组毫无示范价值）。"""
+    examples: list[StyleExample] = []
+    for index, item in enumerate(values or [], start=1):
+        if not isinstance(item, dict):
+            raise StudioError(f"第 {index} 组示例对话格式不对（应为 user / assistant 两个字段）")
+        user = _require_text(
+            str(item.get("user") or ""),
+            f"第 {index} 组示例的「用户发言」",
+            max_chars=_MAX_STYLE_EXAMPLE_CHARS,
+        )
+        assistant = _require_text(
+            str(item.get("assistant") or ""),
+            f"第 {index} 组示例的「目标回应」",
+            max_chars=_MAX_STYLE_EXAMPLE_CHARS,
+        )
+        examples.append(StyleExample(user=user, assistant=assistant))
+    if len(examples) > _MAX_STYLE_EXAMPLES:
+        raise StudioError(f"示例对话最多 {_MAX_STYLE_EXAMPLES} 组，当前 {len(examples)} 组")
+    return examples
+
+
 class StudioStore:
-    """用户创作内容的存储门面（内置只读 + 用户目录可写）。"""
+    """用户创作内容的存储门面（内置不可直接改 + 用户目录可写）。"""
 
     def __init__(
         self,
@@ -255,19 +405,30 @@ class StudioStore:
         *,
         builtin_personas: dict[str, PersonaPreset] | None = None,
         builtin_entries: list[WorldBookEntry] | None = None,
+        builtin_styles: dict[str, StylePreset] | None = None,
+        external_personas: ExternalPersonaSource | None = None,
     ) -> None:
         """构造门面。
 
         参数:
-            root: 用户内容目录；缺省用 DEFAULT_ROOT（backend/data/studio）；
-            builtin_personas / builtin_entries: 内置资源；缺省时从包目录加载
-                （注入是为了测试可控——测试用假的「内置」，绝不读真实包目录）。
+            root: 用户内容目录；缺省用 default_root()（开发形态下是 backend/data/studio）；
+            builtin_personas / builtin_entries / builtin_styles: 内置资源；缺省时从包目录
+                加载（注入是为了测试可控——测试用假的「内置」，绝不读真实包目录）；
+            external_personas: **外部只读角色来源**（插件数据源 → persona）。
+                传可调用对象而不是现成列表：数据源内容会随插件启停 / 配置变更而变，
+                每次都重取，存储层不必知道什么时候该失效。
+                这个缝开在这里而不是各调用点：`list_personas` / `all_personas` /
+                `get_persona` / 世界书 scope 校验**必须看到同一份清单**，
+                在两个地方各合并一次，迟早变成两个不一样的世界。
         """
-        self._root = Path(root) if root is not None else DEFAULT_ROOT
+        self._root = Path(root) if root is not None else default_root()
         self._injected_personas = builtin_personas
         self._injected_entries = builtin_entries
+        self._injected_styles = builtin_styles
+        self._external_personas = external_personas
         self._personas_cache: dict[str, PersonaPreset] | None = None
         self._entries_cache: list[WorldBookEntry] | None = None
+        self._styles_cache: dict[str, StylePreset] | None = None
 
     # ---------- 路径 ----------
 
@@ -285,6 +446,11 @@ class StudioStore:
         """我的世界书条目目录。"""
         return self._root / "worldbook"
 
+    @property
+    def style_dir(self) -> Path:
+        """我的文风预设目录。"""
+        return self._root / "styles"
+
     def _validate_id(self, value: str, *, label: str) -> str:
         """校验 id 并防目录穿越（拒绝 `..` 与非法字符）。"""
         if not isinstance(value, str) or not _ID_PATTERN.match(value) or ".." in value:
@@ -300,8 +466,20 @@ class StudioStore:
     def _entry_path(self, entry_id: str) -> Path:
         return self.entry_dir / f"{self._validate_id(entry_id, label='世界书条目')}.yaml"
 
+    def _style_path(self, style_id: str) -> Path:
+        return self.style_dir / f"{self._validate_id(style_id, label='文风')}.yaml"
+
     def _disabled_path(self) -> Path:
         return self.entry_dir / _DISABLED_FILE
+
+    def _deleted_personas_path(self) -> Path:
+        return self.persona_dir / _DELETED_PERSONAS_FILE
+
+    def _deleted_entries_path(self) -> Path:
+        return self.entry_dir / _DELETED_ENTRIES_FILE
+
+    def _deleted_styles_path(self) -> Path:
+        return self.style_dir / _DELETED_STYLES_FILE
 
     # ---------- 内置资源（进程内缓存：包目录内容不会在运行期变）----------
 
@@ -322,6 +500,15 @@ class StudioStore:
                 else load_builtin_entries()
             )
         return self._entries_cache
+
+    def _builtin_styles(self) -> dict[str, StylePreset]:
+        if self._styles_cache is None:
+            self._styles_cache = (
+                dict(self._injected_styles)
+                if self._injected_styles is not None
+                else load_builtin_styles()
+            )
+        return self._styles_cache
 
     # ---------- 用户文件读取（宽松：坏文件跳过 + 记警告）----------
 
@@ -361,27 +548,110 @@ class StudioStore:
             items.append(entry)
         return items, warnings
 
+    def _load_user_styles(self) -> tuple[list[StylePreset], list[str]]:
+        items: list[StylePreset] = []
+        warnings: list[str] = []
+        for path in sorted(self.style_dir.glob("*.yaml")):
+            try:
+                preset = load_style_file(path)
+            except Exception as exc:  # noqa: BLE001 - 单个坏文件不该拖垮整份清单
+                warnings.append(f"文风文件 {path.name} 解析失败，已跳过：{exc}")
+                continue
+            if preset.id != path.stem:
+                warnings.append(
+                    f"文风文件 {path.name} 里的 id（{preset.id}）与文件名不一致，已跳过"
+                )
+                continue
+            items.append(preset)
+        return items, warnings
+
+    # ---------- 用户侧内置资源状态 ----------
+
+    def _read_id_set(self, path: Path) -> set[str]:
+        """读取用户侧内置资源状态；缺失/损坏按空集处理。"""
+        if not path.is_file():
+            return set()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            logger.warning("内置资源状态读取失败，按空集处理：%s", path)
+            return set()
+        ids = raw.get("ids") if isinstance(raw, dict) else None
+        return {str(item) for item in ids if str(item).strip()} if isinstance(ids, list) else set()
+
+    def _write_id_set(self, path: Path, ids: set[str]) -> None:
+        if ids:
+            self._write_json(path, {"ids": sorted(ids)})
+        else:
+            path.unlink(missing_ok=True)
+
+    def deleted_builtin_persona_ids(self) -> set[str]:
+        """我从当前工坊隐藏的内置角色 id。"""
+        return self._read_id_set(self._deleted_personas_path())
+
+    def deleted_builtin_entry_ids(self) -> set[str]:
+        """我从当前工坊隐藏的内置条目 id。"""
+        return self._read_id_set(self._deleted_entries_path())
+
+    def deleted_builtin_style_ids(self) -> set[str]:
+        """我从当前工坊隐藏的内置文风 id。"""
+        return self._read_id_set(self._deleted_styles_path())
+
+    def _delete_builtin_persona(self, persona_id: str) -> None:
+        ids = self.deleted_builtin_persona_ids()
+        ids.add(persona_id)
+        self._write_id_set(self._deleted_personas_path(), ids)
+
+    def _delete_builtin_entry(self, entry_id: str) -> None:
+        ids = self.deleted_builtin_entry_ids()
+        ids.add(entry_id)
+        self._write_id_set(self._deleted_entries_path(), ids)
+
+    def _delete_builtin_style(self, style_id: str) -> None:
+        ids = self.deleted_builtin_style_ids()
+        ids.add(style_id)
+        self._write_id_set(self._deleted_styles_path(), ids)
+
     # ---------- 合并视图 ----------
 
     def _merged_personas(self) -> tuple[list[tuple[PersonaPreset, bool]], list[str]]:
-        """内置在前、我的在后；同名时内置优先（并记警告）。"""
+        """内置在前、我的在中、**外部来源在最后**；同名时先到的优先（并记警告）。
+
+        外部来源（插件数据源 → persona）以「内置」身份并入：它本来就不是用户的文件，
+        因此工作台里**不可原地编辑**，要改只能「复制到我的」；但可以**删除**——
+        删除只是写进用户侧隐藏清单（`deleted_builtin.json`），不触碰来源文件。
+        """
         builtin = self._builtin_personas()
+        deleted = self.deleted_builtin_persona_ids()
         items: list[tuple[PersonaPreset, bool]] = [
-            (preset, True) for preset in builtin.values()
+            (preset, True) for preset in builtin.values() if preset.id not in deleted
         ]
+        seen = set(builtin)
         user, warnings = self._load_user_personas()
         for preset in user:
-            if preset.id in builtin:
+            if preset.id in seen:
                 warnings.append(f"角色 {preset.id} 与内置角色同名，已忽略用户文件")
                 continue
+            seen.add(preset.id)
             items.append((preset, False))
+        for preset in self._external_personas() if self._external_personas else ():
+            if preset.id in seen:
+                warnings.append(f"角色 {preset.id} 与已有角色 id 冲突，已忽略外部来源")
+                continue
+            seen.add(preset.id)
+            if preset.id in deleted:
+                continue
+            items.append((preset, True))
         return items, warnings
 
     def _merged_entries(self) -> tuple[list[tuple[WorldBookEntry, bool]], list[str]]:
         """内置在前、我的在后；同名时内置优先（并记警告）。"""
         disabled = self.disabled_builtin_ids()
+        deleted = self.deleted_builtin_entry_ids()
         items: list[tuple[WorldBookEntry, bool]] = []
         for entry in self._builtin_entries():
+            if entry.id in deleted:
+                continue
             # 停用偏好只改「合并视图」里的 enabled，内置对象本身不动
             shown = (
                 entry.model_copy(update={"enabled": False})
@@ -396,6 +666,27 @@ class StudioStore:
                 warnings.append(f"世界书条目 {entry.id} 与内置条目同名，已忽略用户文件")
                 continue
             items.append((entry, False))
+        return items, warnings
+
+    def _merged_styles(self) -> tuple[list[tuple[StylePreset, bool]], list[str]]:
+        """内置在前、我的在后；同名时内置优先（并记警告）。
+
+        与角色 / 条目同一套语义：内置文风不可原地改（要改先「复制为我的」），
+        但可以从当前工坊删除——删除只写用户侧隐藏清单，包内 YAML 一字未改。
+        """
+        deleted = self.deleted_builtin_style_ids()
+        items: list[tuple[StylePreset, bool]] = [
+            (preset, True)
+            for preset in self._builtin_styles().values()
+            if preset.id not in deleted
+        ]
+        builtin_ids = {preset.id for preset, _ in items}
+        user, warnings = self._load_user_styles()
+        for preset in user:
+            if preset.id in builtin_ids:
+                warnings.append(f"文风 {preset.id} 与内置文风同名，已忽略用户文件")
+                continue
+            items.append((preset, False))
         return items, warnings
 
     def list_personas(self) -> tuple[list[PersonaSummary], list[str]]:
@@ -429,17 +720,44 @@ class StudioStore:
         merged, warnings = self._merged_entries()
         return [entry for entry, _ in merged], warnings
 
+    def list_styles(self) -> tuple[list[StyleSummary], list[str]]:
+        """文风预设清单（内置 + 我的），以及读取过程中的警告。"""
+        merged, warnings = self._merged_styles()
+        summaries = [
+            StyleSummary(
+                id=preset.id,
+                name=preset.name,
+                description=preset.description,
+                tags=list(preset.tags),
+                examples=preset.example_count,
+                builtin=builtin,
+            )
+            for preset, builtin in merged
+        ]
+        return summaries, warnings
+
+    def all_styles(self) -> tuple[dict[str, StylePreset], list[str]]:
+        """文风预设全集的 id 索引（对话链路用），以及读取过程中的警告。"""
+        merged, warnings = self._merged_styles()
+        return {preset.id: preset for preset, _ in merged}, warnings
+
     # ---------- 角色：详情与写入 ----------
 
     def get_persona(self, persona_id: str) -> tuple[PersonaPreset, bool]:
-        """取单个角色 → (角色, 是否内置)；不存在抛 FileNotFoundError。"""
-        builtin = self._builtin_personas()
-        if persona_id in builtin:
-            return builtin[persona_id], True
-        path = self._persona_path(persona_id)
-        if not path.is_file():
-            raise FileNotFoundError(f"角色不存在：{persona_id}")
-        return load_preset_file(path), False
+        """取单个角色 → (角色, 是否内置)；不存在抛 FileNotFoundError。
+
+        查的是**合并视图**而不是「内置字典 + 用户文件」两处：外部来源（插件数据源
+        的角色）既不在包目录、也没有用户文件，少看它就会让详情页 / 只读保护 /
+        复制全部失效——而 `list_personas` 里又确实看得到它。
+
+        先校验 id：非法 id（含 `..` 目录穿越）仍然报 `StudioError`，不因为
+        「反正只是查表」就把守卫省掉——调用方靠这两个异常区分「非法输入」与「不存在」。
+        """
+        self._validate_id(persona_id, label="角色")
+        for preset, builtin in self._merged_personas()[0]:
+            if preset.id == persona_id:
+                return preset, builtin
+        raise FileNotFoundError(f"角色不存在：{persona_id}")
 
     def create_persona(
         self,
@@ -551,18 +869,17 @@ class StudioStore:
         )
 
     def delete_persona(self, persona_id: str) -> PersonaPreset:
-        """删除我的角色卡（内置角色 → BuiltinReadOnlyError）。
+        """从当前工坊删除角色卡。
 
-        只删**角色卡文件**：该角色名下的会话与记忆（温层 / 事实 / 个人语料）
-        不在此处清理——它们是另外几套存储，是否连带删除应由用户显式决定
-        （接口层负责把影响面告知用户）。
+        用户角色删除对应的 YAML 文件；内置角色写入用户侧隐藏清单，不修改包内资源。
+        本方法**只碰角色卡本身**：会话与记忆属于另外几套存储，由 API 层级联清理
+        （见 `delete_bound_entries` 与 `DELETE /chat/studio/personas/{id}`）。
         """
         preset, builtin = self.get_persona(persona_id)
         if builtin:
-            raise BuiltinReadOnlyError(
-                f"「{preset.name}」是内置角色，不能删除"
-            )
-        self._persona_path(persona_id).unlink(missing_ok=True)
+            self._delete_builtin_persona(persona_id)
+        else:
+            self._persona_path(persona_id).unlink(missing_ok=True)
         return preset
 
     # ---------- 世界书条目：详情与写入 ----------
@@ -571,6 +888,8 @@ class StudioStore:
         """取单个条目 → (条目, 是否内置)；不存在抛 FileNotFoundError。"""
         for entry in self._builtin_entries():
             if entry.id == entry_id:
+                if entry.id in self.deleted_builtin_entry_ids():
+                    raise FileNotFoundError(f"世界书条目不存在：{entry_id}")
                 disabled = entry.id in self.disabled_builtin_ids()
                 shown = (
                     entry.model_copy(update={"enabled": False})
@@ -691,17 +1010,43 @@ class StudioStore:
         return self._write_entry(updated)
 
     def delete_entry(self, entry_id: str) -> WorldBookEntry:
-        """删除我的世界书条目（内置条目 → BuiltinReadOnlyError）。"""
+        """从当前工坊删除世界书条目。
+
+        用户条目删除对应的 YAML 文件；内置条目写入用户侧隐藏清单，不修改包内资源。
+        """
         entry, builtin = self.get_entry(entry_id)
         if builtin:
-            raise BuiltinReadOnlyError(f"「{entry.title}」是内置条目，不能删除")
-        self._entry_path(entry_id).unlink(missing_ok=True)
+            self._delete_builtin_entry(entry_id)
+        else:
+            self._entry_path(entry_id).unlink(missing_ok=True)
         return entry
 
-    def count_bound_entries(self, persona_id: str) -> int:
-        """有多少世界书条目**只**对该角色生效（删除角色前的影响面提示）。"""
+    def bound_entry_ids(self, persona_id: str) -> list[str]:
+        """归属该角色（`scope == persona_id`）的世界书条目 id。
+
+        删除角色时的级联清理与影响面提示共用这一份口径：两处各查一遍，
+        迟早出现「提示说 1 条、实际删了 2 条」这类对不上的账。
+        """
         entries, _ = self.all_entries()
-        return sum(1 for entry in entries if entry.scope == persona_id)
+        return [entry.id for entry in entries if entry.scope == persona_id]
+
+    def count_bound_entries(self, persona_id: str) -> int:
+        """有多少世界书条目**只**对该角色生效。"""
+        return len(self.bound_entry_ids(persona_id))
+
+    def delete_bound_entries(self, persona_id: str) -> list[str]:
+        """删除归属该角色的**全部**世界书条目，返回被删除的 id。
+
+        删除角色卡的级联动作：专属设定只对这个角色有意义，角色没了它们就是
+        永不触发的死条目（§4.2 的「指向幽灵角色的条目永远不会触发」）。
+        复用 `delete_entry`：我的条目删 YAML，内置条目写用户侧隐藏清单，
+        与逐个删除的行为完全一致，不另起一套。
+        """
+        deleted: list[str] = []
+        for entry_id in self.bound_entry_ids(persona_id):
+            self.delete_entry(entry_id)
+            deleted.append(entry_id)
+        return deleted
 
     def build_draft_entry(
         self,
@@ -783,6 +1128,156 @@ class StudioStore:
             self._disabled_path().unlink(missing_ok=True)
         return disabled
 
+    # ---------- 文风预设：详情与写入 ----------
+
+    def get_style(self, style_id: str) -> tuple[StylePreset, bool]:
+        """取单个文风预设 → (预设, 是否内置)；不存在抛 FileNotFoundError。"""
+        self._validate_id(style_id, label="文风")
+        for preset, builtin in self._merged_styles()[0]:
+            if preset.id == style_id:
+                return preset, builtin
+        raise FileNotFoundError(f"文风预设不存在：{style_id}")
+
+    def create_style(
+        self,
+        *,
+        name: str,
+        style_prompt: str,
+        description: str = "",
+        tags: list[str] | None = None,
+        avoid: list[str] | None = None,
+        examples: list[dict] | None = None,
+        sampling: dict[str, float] | None = None,
+        conflicts_with: list[str] | None = None,
+    ) -> StylePreset:
+        """创建我的文风预设（id 自动生成，`user-` 前缀）。
+
+        与角色不同，文风 id **不承载任何持久语义**（记忆隔离用的是人设 id），
+        所以这里允许后续「复制」而不必担心换记忆——但仍然不允许改 id，
+        否则文件名与内容里的 id 会分叉。
+        """
+        preset = StylePreset(
+            id=self._allocate_id(_slugify(name)),
+            name=_require_text(name, "文风名称", max_chars=_MAX_STYLE_NAME),
+            description=_optional_text(
+                description, "文风说明", max_chars=_MAX_STYLE_DESCRIPTION
+            ),
+            tags=_clean_list(
+                tags, label="标签", max_items=_MAX_TAG_ITEMS, max_chars=_MAX_TAG_CHARS
+            ),
+            style_prompt=_require_text(
+                style_prompt, "风格指令", max_chars=_MAX_STYLE_PROMPT
+            ),
+            avoid=_clean_list(
+                avoid,
+                label="避免表达",
+                max_items=_MAX_STYLE_AVOID_ITEMS,
+                max_chars=_MAX_STYLE_AVOID_CHARS,
+            ),
+            examples=_clean_examples(examples),
+            sampling=_clean_sampling(sampling),
+            conflicts_with=_clean_list(
+                conflicts_with,
+                label="冲突特质",
+                max_items=_MAX_STYLE_CONFLICT_ITEMS,
+                max_chars=_MAX_STYLE_CONFLICT_CHARS,
+            ),
+        )
+        return self._write_style(preset)
+
+    def update_style(
+        self,
+        style_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+        style_prompt: str | None = None,
+        tags: list[str] | None = None,
+        avoid: list[str] | None = None,
+        examples: list[dict] | None = None,
+        sampling: dict[str, float] | None = None,
+        conflicts_with: list[str] | None = None,
+    ) -> StylePreset:
+        """更新我的文风预设（内置 → BuiltinReadOnlyError）。
+
+        `None` = 不修改该字段；要清空请传空列表 / 空 dict（`name` 与
+        `style_prompt` 不接受清空——没有风格指令的文风预设等于没写）。
+        """
+        current, builtin = self.get_style(style_id)
+        if builtin:
+            raise BuiltinReadOnlyError(
+                f"「{current.name}」是内置文风，不能直接修改；"
+                "请用「复制为我的文风」得到一份可编辑的副本"
+            )
+        changes: dict[str, object] = {}
+        if name is not None:
+            changes["name"] = _require_text(name, "文风名称", max_chars=_MAX_STYLE_NAME)
+        if description is not None:
+            changes["description"] = _optional_text(
+                description, "文风说明", max_chars=_MAX_STYLE_DESCRIPTION
+            )
+        if style_prompt is not None:
+            changes["style_prompt"] = _require_text(
+                style_prompt, "风格指令", max_chars=_MAX_STYLE_PROMPT
+            )
+        if tags is not None:
+            changes["tags"] = _clean_list(
+                tags, label="标签", max_items=_MAX_TAG_ITEMS, max_chars=_MAX_TAG_CHARS
+            )
+        if avoid is not None:
+            changes["avoid"] = _clean_list(
+                avoid,
+                label="避免表达",
+                max_items=_MAX_STYLE_AVOID_ITEMS,
+                max_chars=_MAX_STYLE_AVOID_CHARS,
+            )
+        if examples is not None:
+            changes["examples"] = _clean_examples(examples)
+        if sampling is not None:
+            changes["sampling"] = _clean_sampling(sampling)
+        if conflicts_with is not None:
+            changes["conflicts_with"] = _clean_list(
+                conflicts_with,
+                label="冲突特质",
+                max_items=_MAX_STYLE_CONFLICT_ITEMS,
+                max_chars=_MAX_STYLE_CONFLICT_CHARS,
+            )
+
+        # 走 model_validate 而不是 model_copy：后者绕过 pydantic 校验
+        updated = StylePreset.model_validate({**current.model_dump(), **changes})
+        return self._write_style(updated)
+
+    def duplicate_style(self, style_id: str, *, name: str | None = None) -> StylePreset:
+        """复制一份文风预设（内置文风借此变成可编辑的「我的文风」）。"""
+        source, _ = self.get_style(style_id)
+        return self.create_style(
+            name=(name.strip() if name else f"{source.name}（副本）"),
+            description=source.description,
+            style_prompt=source.style_prompt,
+            tags=list(source.tags),
+            avoid=list(source.avoid),
+            examples=[
+                {"user": example.user, "assistant": example.assistant}
+                for example in source.examples
+            ],
+            sampling=dict(source.sampling),
+            conflicts_with=list(source.conflicts_with),
+        )
+
+    def delete_style(self, style_id: str) -> StylePreset:
+        """从当前工坊删除文风预设。
+
+        用户预设删 YAML；内置预设写入用户侧隐藏清单，不修改包内资源。
+        与角色不同，**没有级联**：文风不承载会话与记忆，偏好里残留一个已删除的
+        style_id 只会让那一轮回落默认（`_resolve_style` 会给出告警）。
+        """
+        preset, builtin = self.get_style(style_id)
+        if builtin:
+            self._delete_builtin_style(style_id)
+        else:
+            self._style_path(style_id).unlink(missing_ok=True)
+        return preset
+
     # ---------- 内部：校验、id 分配、落盘 ----------
 
     def _validate_scope(self, scope: str) -> str:
@@ -838,7 +1333,8 @@ class StudioStore:
     def _taken_ids(self) -> set[str]:
         personas, _ = self.all_personas()
         entries, _ = self.all_entries()
-        return set(personas) | {entry.id for entry in entries}
+        styles, _ = self.all_styles()
+        return set(personas) | {entry.id for entry in entries} | set(styles)
 
     def _write_persona(self, preset: PersonaPreset) -> PersonaPreset:
         """落盘并**重读**返回：等于顺带做了一次 round-trip 自检。"""
@@ -851,6 +1347,12 @@ class StudioStore:
         path = self._entry_path(entry.id)
         self._write_yaml(path, _entry_payload(entry))
         return load_entry_file(path)
+
+    def _write_style(self, preset: StylePreset) -> StylePreset:
+        """落盘并**重读**返回（同上）。"""
+        path = self._style_path(preset.id)
+        self._write_yaml(path, _style_payload(preset))
+        return load_style_file(path)
 
     @staticmethod
     def _write_yaml(path: Path, payload: dict) -> None:

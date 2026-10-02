@@ -158,11 +158,16 @@ def test_delete_user_persona_removes_file(tmp_path, store):
         store.get_persona(created.id)
 
 
-def test_builtin_persona_is_read_only(store):
+def test_builtin_persona_is_edit_locked_but_can_be_deleted(tmp_path, store):
     with pytest.raises(BuiltinReadOnlyError):
         store.update_persona("builtin-sister", name="改名")
-    with pytest.raises(BuiltinReadOnlyError):
-        store.delete_persona("builtin-sister")
+
+    deleted = store.delete_persona("builtin-sister")
+    assert deleted.name == "内置角色"
+    assert (tmp_path / "studio" / "personas" / "deleted_builtin.json").is_file()
+    with pytest.raises(FileNotFoundError):
+        store.get_persona("builtin-sister")
+    assert all(item.id != "builtin-sister" for item in store.list_personas()[0])
 
 
 def test_duplicate_builtin_persona_creates_editable_copy(store):
@@ -178,6 +183,121 @@ def test_duplicate_builtin_persona_creates_editable_copy(store):
     original, builtin = store.get_persona("builtin-sister")
     assert builtin is True
     assert original.name == "内置角色"
+
+
+# ---------- 外部只读角色来源（插件数据源 → persona）----------
+
+
+def _external_store(tmp_path, personas, *, builtin=None):
+    """带外部角色来源的门面；来源是**可调用对象**（每次重取，见 store 文档）。"""
+    calls = []
+
+    def _source():
+        calls.append(1)
+        return personas
+
+    store = StudioStore(
+        tmp_path / "studio",
+        builtin_personas=builtin or {},
+        builtin_entries=[],
+        external_personas=_source,
+    )
+    return store, calls
+
+
+def _external_persona(persona_id: str = "tbp-abc123", **overrides) -> PersonaPreset:
+    base = {
+        "id": persona_id,
+        "name": "外部角色",
+        "title": "来自插件的角色",
+        "description": "外部角色的简介",
+        "prompt": "你是{{char_name}}。",
+    }
+    base.update(overrides)
+    return PersonaPreset.model_validate(base)
+
+
+def test_external_persona_joins_every_view(tmp_path, builtin_persona):
+    """外部角色必须同时出现在**所有**视图里。
+
+    只在某一条路径上合并，世界书 scope 校验与对话链路就会看到两份不一样的清单。
+    """
+    store, _ = _external_store(
+        tmp_path, [_external_persona()], builtin={builtin_persona.id: builtin_persona}
+    )
+
+    assert [item.id for item in store.list_personas()[0]] == [
+        "builtin-sister",
+        "tbp-abc123",
+    ]
+    assert set(store.all_personas()[0]) == {"builtin-sister", "tbp-abc123"}
+    preset, builtin = store.get_persona("tbp-abc123")
+    assert preset.name == "外部角色"
+    assert builtin is True
+
+
+def test_external_persona_is_edit_locked_but_can_be_deleted(tmp_path):
+    """外部角色卡不可改，但可以从当前工坊隐藏；要改仍可复制到我的。"""
+    store, _ = _external_store(tmp_path, [_external_persona()])
+
+    with pytest.raises(BuiltinReadOnlyError):
+        store.update_persona("tbp-abc123", name="改名")
+
+    copy = store.duplicate_persona("tbp-abc123")
+    assert copy.id.startswith("user-")
+    assert copy.prompt == "你是{{char_name}}。"
+
+    deleted = store.delete_persona("tbp-abc123")
+    assert deleted.id == "tbp-abc123"
+    with pytest.raises(FileNotFoundError):
+        store.get_persona("tbp-abc123")
+    assert (tmp_path / "studio" / "personas" / "deleted_builtin.json").is_file()
+
+
+def test_external_persona_can_own_worldbook_entries(tmp_path):
+    """外部角色是合法归属：它名下的专属世界书条目应当能写入（scope 校验看同一份清单）。"""
+    store, _ = _external_store(tmp_path, [_external_persona()])
+
+    entry = store.create_entry(
+        title="专属设定",
+        content="只对这个小家伙生效。",
+        keys=["茶馆"],
+        scope="tbp-abc123",
+    )
+    assert entry.scope == "tbp-abc123"
+
+
+def test_external_persona_conflict_is_reported(tmp_path, builtin_persona):
+    """外部来源不得默默顶掉同名角色：跳过并记警告。"""
+    store, _ = _external_store(
+        tmp_path,
+        [_external_persona(builtin_persona.id, name="冒名者")],
+        builtin={builtin_persona.id: builtin_persona},
+    )
+
+    summaries, warnings = store.list_personas()
+
+    assert [item.name for item in summaries] == ["内置角色"]
+    assert any("已忽略外部来源" in warning for warning in warnings)
+
+
+def test_external_source_is_asked_every_time(tmp_path):
+    """来源是可调用对象：每次取清单都重问，不把上一次的结果当成事实。
+
+    插件启停 / 换数据目录后，存储层不该还拿着旧清单。
+    """
+    store, calls = _external_store(tmp_path, [_external_persona()])
+
+    store.list_personas()
+    store.all_personas()
+    store.get_persona("tbp-abc123")
+
+    assert len(calls) == 3
+
+
+def test_store_without_external_source_is_unchanged(store):
+    """不接外部来源时行为与从前一致（默认 `None` = 没有外部角色）。"""
+    assert [item.id for item in store.list_personas()[0]] == ["builtin-sister"]
 
 
 # ---------- 角色：坏文件容错与 id 安全 ----------
@@ -321,14 +441,67 @@ def test_update_entry_can_change_scope(store):
     assert store.count_bound_entries(persona.id) == 1
 
 
+def test_delete_bound_entries_removes_only_that_personas(store):
+    """级联删除专属条目：只删 scope 指向该角色的，别人的与全局的都不动。"""
+    mine = store.create_persona(name="我的角色", title="Mine", prompt="正文")
+    other = store.create_persona(name="别人的角色", title="Other", prompt="正文")
+
+    mine_entry = store.create_entry(
+        title="我的专属", content="只有我知道", keys=["甲"], scope=mine.id
+    )
+    other_entry = store.create_entry(
+        title="别人的专属", content="别人知道", keys=["乙"], scope=other.id
+    )
+    global_entry = store.create_entry(title="全局", content="大家都知道", keys=["丙"])
+
+    assert store.bound_entry_ids(mine.id) == [mine_entry.id]
+    assert store.delete_bound_entries(mine.id) == [mine_entry.id]
+
+    with pytest.raises(FileNotFoundError):
+        store.get_entry(mine_entry.id)
+    # 别人的与全局的条目都还在
+    assert store.get_entry(other_entry.id)[0].id == other_entry.id
+    assert store.get_entry(global_entry.id)[0].id == global_entry.id
+
+
+def test_delete_bound_entries_hides_builtin_entry(tmp_path, builtin_persona):
+    """归属某个内置角色的**内置**条目：级联删除只写用户侧隐藏清单，不改包内资源。"""
+    scoped_builtin = WorldBookEntry(
+        id="builtin-cat",
+        title="内置条目·团子",
+        content="她养着一只猫。",
+        keys=["猫"],
+        scope=builtin_persona.id,
+    )
+    store = StudioStore(
+        tmp_path / "studio",
+        builtin_personas={builtin_persona.id: builtin_persona},
+        builtin_entries=[scoped_builtin],
+    )
+
+    assert store.bound_entry_ids(builtin_persona.id) == ["builtin-cat"]
+    assert store.delete_bound_entries(builtin_persona.id) == ["builtin-cat"]
+
+    assert (tmp_path / "studio" / "worldbook" / "deleted_builtin.json").is_file()
+    with pytest.raises(FileNotFoundError):
+        store.get_entry("builtin-cat")
+    # 内置对象本身一字未改
+    assert scoped_builtin.content == "她养着一只猫。"
+
+
 # ---------- 内置条目：只读 + 可停用（停用偏好只写用户侧文件）----------
 
 
-def test_builtin_entry_is_read_only_except_enable_switch(store, builtin_entry):
+def test_builtin_entry_is_edit_locked_but_can_be_deleted(tmp_path, store, builtin_entry):
     with pytest.raises(BuiltinReadOnlyError):
         store.update_entry(builtin_entry.id, content="改内容")
-    with pytest.raises(BuiltinReadOnlyError):
-        store.delete_entry(builtin_entry.id)
+
+    deleted = store.delete_entry(builtin_entry.id)
+    assert deleted.id == builtin_entry.id
+    assert (tmp_path / "studio" / "worldbook" / "deleted_builtin.json").is_file()
+    with pytest.raises(FileNotFoundError):
+        store.get_entry(builtin_entry.id)
+    assert all(item.id != builtin_entry.id for item in store.all_entries()[0])
 
 
 def test_enable_switch_rejects_user_entry(store):

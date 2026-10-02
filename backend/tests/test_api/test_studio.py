@@ -55,12 +55,68 @@ def test_entry_detail_includes_trigger_fields() -> None:
     entry = resp.json()["entry"]
     assert entry["builtin"] is True
     assert entry["keys"] and entry["content"]
-    assert entry["scope"] == "*"
+    # 归属跟进内容：写苏澄设定的条目只对苏澄生效（换别的人设不会串味）
+    assert entry["scope"] == BUILTIN_PERSONA
 
 
 def test_persona_and_entry_detail_404() -> None:
     assert client.get("/chat/studio/personas/user-nope").status_code == 404
     assert client.get("/chat/studio/worldbook/user-nope").status_code == 404
+
+
+# ---------- 角色：AI 补全（AGENTS.md §9.12）----------
+
+
+def _persona_draft_json(name: str = "苏澄") -> str:
+    """模拟模型返回的人设草稿（正文够长，过得了「太短 = 偷懒」那道关）。"""
+    import json
+
+    return json.dumps(
+        {
+            "name": name,
+            "title": "会听人说话的姐姐",
+            "description": "比你大几岁的邻居姐姐，话不多，但总能接住你的情绪。",
+            "tags": ["温柔", "稳重"],
+            "prompt": (
+                "你是苏澄，比{{user_name}}大几岁的邻居姐姐。"
+                "你说话很轻，句子短，先接住情绪再谈事情。"
+                "你不说教、不列一二三四，也不追问到底怎么了。"
+                "{{user_name}}沉默时你可以就安静陪着。"
+            ),
+            "background": "你在海边长大，做过几年护理，习惯了先看人的呼吸快不快。",
+            "variables": ["user_name", "not_a_var"],
+        },
+        ensure_ascii=False,
+    )
+
+
+def test_persona_ai_draft_returns_fields_without_saving(scripted_llm) -> None:
+    """AI 补全只给草稿：**不建角色**，变量里的未知名字会被剔除。"""
+    before = len(client.get("/chat/studio/catalog").json()["personas"])
+    scripted_llm([_persona_draft_json()])
+
+    resp = client.post("/chat/studio/personas/ai-draft", json={"brief": "想做个话少的姐姐"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["draft"]["name"] == "苏澄"
+    assert "{{user_name}}" in body["draft"]["prompt"]
+    assert body["draft"]["variables"] == ["user_name"]
+    assert body["model"] == "scripted-model"
+    # 草稿阶段磁盘上不该多出一个角色
+    assert len(client.get("/chat/studio/catalog").json()["personas"]) == before
+
+
+def test_persona_ai_draft_rejects_mock_model() -> None:
+    """本地占位模型（mock）直接拒给 400，并把下一步说清楚。"""
+    resp = client.post("/chat/studio/personas/ai-draft", json={"brief": "随便写一个"})
+
+    assert resp.status_code == 400
+    assert "占位模型" in resp.json()["detail"]
+
+
+def test_persona_ai_draft_rejects_empty_brief() -> None:
+    assert client.post("/chat/studio/personas/ai-draft", json={"brief": " "}).status_code == 422
 
 
 # ---------- 角色：写入 ----------
@@ -130,14 +186,19 @@ def test_update_persona_only_changes_given_fields() -> None:
     assert persona["id"] == created["id"]  # id 是记忆命名空间，始终不变
 
 
-def test_builtin_persona_is_read_only_over_http() -> None:
+def test_builtin_persona_is_edit_locked_but_can_be_deleted_over_http() -> None:
+    deletable = "energetic-roommate"
     assert (
         client.put(
-            f"/chat/studio/personas/{BUILTIN_PERSONA}", json={"name": "改名"}
+            f"/chat/studio/personas/{deletable}", json={"name": "改名"}
         ).status_code
         == 403
     )
-    assert client.delete(f"/chat/studio/personas/{BUILTIN_PERSONA}").status_code == 403
+
+    resp = client.delete(f"/chat/studio/personas/{deletable}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == deletable
+    assert client.get(f"/chat/studio/personas/{deletable}").status_code == 404
 
 
 def test_duplicate_builtin_persona_creates_editable_copy() -> None:
@@ -160,22 +221,22 @@ def test_duplicate_builtin_persona_creates_editable_copy() -> None:
     )
 
 
-def test_delete_persona_reports_impact() -> None:
-    """删除角色只删角色卡，并在响应里说明留下了什么。"""
+def test_delete_persona_cascades_to_sessions_memory_and_entries() -> None:
+    """删除角色卡会**级联清掉**它的会话、记忆与专属世界书条目。"""
     persona = client.post(
         "/chat/studio/personas",
         json={"name": "小岸", "title": "Seaside", "prompt": "正文"},
     ).json()["persona"]
 
-    # ① 该角色名下先有一段对话
+    # ① 该角色名下先有一段对话（TestClient 会等后台写记忆跑完）
     assert (
         client.post(
             "/chat", json={"text": "你好", "persona_id": persona["id"]}
         ).status_code
         == 200
     )
-    # ② 再挂一条专属世界书条目
-    client.post(
+    # ② 挂一条**专属**条目（应被级联删除）与一条**全局**条目（不该被误删）
+    bound = client.post(
         "/chat/studio/worldbook",
         json={
             "title": "专属设定",
@@ -183,21 +244,35 @@ def test_delete_persona_reports_impact() -> None:
             "keys": ["秘密"],
             "scope": persona["id"],
         },
-    )
+    ).json()["entry"]
+    global_entry = client.post(
+        "/chat/studio/worldbook",
+        json={"title": "全局设定", "content": "对所有人生效", "keys": ["世界"]},
+    ).json()["entry"]
 
     resp = client.delete(f"/chat/studio/personas/{persona['id']}")
     assert resp.status_code == 200
     body = resp.json()
     assert body["deleted"] == persona["id"]
-    assert body["sessions"] >= 1
-    assert body["bound_entries"] == 1
-    assert "保留" in body["kept"]
+    assert body["name"] == "小岸"
+    assert body["removed_sessions"] >= 1
+    assert body["removed_turns"] >= 2  # 一轮对话 = 用户 + 助手两条
+    assert body["removed_entries"] == 1
+    # 四层记忆各报一个计数（哪怕某层为 0）
+    assert set(body["removed_memory"]) == {"warm", "facts", "mood_log", "knowledge"}
+    assert body["removed_memory"]["warm"] >= 1  # 本轮用户话语已入情景记忆
 
-    # 角色卡没了，但会话与条目都还在
+    # 角色卡、专属条目、会话都没了
     assert client.get(f"/chat/studio/personas/{persona['id']}").status_code == 404
-    assert body["sessions"] == len(
-        client.get("/chat/sessions", params={"persona_id": persona["id"]}).json()
-    )
+    assert client.get(f"/chat/studio/worldbook/{bound['id']}").status_code == 404
+    assert client.get("/chat/sessions", params={"persona_id": persona["id"]}).json() == []
+    # 全局条目不受影响
+    assert client.get(f"/chat/studio/worldbook/{global_entry['id']}").status_code == 200
+
+
+def test_delete_persona_missing_404_and_leaves_entries_alone() -> None:
+    """角色不存在时 404，且不会先删掉归属它的条目（先校验、再动手）。"""
+    assert client.delete("/chat/studio/personas/user-nope").status_code == 404
 
 
 # ---------- 世界书：写入 ----------
@@ -253,14 +328,18 @@ def test_create_entry_rejects_invalid_input() -> None:
     )
 
 
-def test_update_and_delete_builtin_entry_are_rejected() -> None:
+def test_update_builtin_entry_is_locked_but_delete_is_allowed() -> None:
+    deletable = "night-mode"
     assert (
         client.put(
             f"/chat/studio/worldbook/{BUILTIN_ENTRY}", json={"content": "改内容"}
         ).status_code
         == 403
     )
-    assert client.delete(f"/chat/studio/worldbook/{BUILTIN_ENTRY}").status_code == 403
+    resp = client.delete(f"/chat/studio/worldbook/{deletable}")
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] == deletable
+    assert client.get(f"/chat/studio/worldbook/{deletable}").status_code == 404
     assert (
         client.put("/chat/studio/worldbook/user-nope", json={"content": "x"}).status_code
         == 404

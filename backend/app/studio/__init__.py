@@ -1,4 +1,4 @@
-"""创作工坊：用户自建角色卡与世界书条目的存储与接口。
+"""创作工坊：用户自建角色卡、世界书条目与文风预设的存储与接口。
 
 模块划分：
 - `store.py`  本地存储门面（内置只读 + 用户目录可写，同构合并）。
@@ -7,21 +7,25 @@
 """
 
 from app.studio.store import (
-    DEFAULT_ROOT,
+    default_root,
     LIMITS,
+    SAMPLING_SPEC,
     BuiltinReadOnlyError,
     EntrySummary,
     PersonaSummary,
     StudioError,
     StudioStore,
+    StyleSummary,
 )
 
 __all__ = [
-    "DEFAULT_ROOT",
+    "default_root",
     "LIMITS",
+    "SAMPLING_SPEC",
     "BuiltinReadOnlyError",
     "EntrySummary",
     "PersonaSummary",
     "StudioError",
     "StudioStore",
+    "StyleSummary",
 ]
