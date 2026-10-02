@@ -75,36 +75,37 @@ frontend/
 │   ├── layout.tsx                  # 根布局（魔珐域名 preconnect + 主题色）
 │   ├── page.tsx                    # 主页面：左侧数字人舞台 + 右侧状态/设置/对话
 │   └── globals.css                 # 语义色板 / 焦点环 / 减少动效适配
-├── components/
-│   ├── AvatarStage.tsx             # 数字人容器（含初始化/重连中的状态文本）+ 情绪光晕
-│   ├── AvatarSettings.tsx          # 魔珐密钥填写面板（localStorage + 即时生效）
-│   ├── ChatPanel.tsx               # 消息列表 + 输入框 + 打断按钮 + 分段播报开关
-│   ├── SubtitleBar.tsx             # 字幕（消费 speak.display_text）
-│   ├── MoodIndicator.tsx           # 情绪标签 + 强度条 + 语气
-│   ├── MemoryTrace.tsx             # ★本轮记忆与行动轨迹（世界书/个人记忆/情景/事实/写入）
-│   ├── KnowledgePanel.tsx          # ★个人记忆（知识库）上传 / 列表 / 判重覆盖 / 删除
-│   ├── AgentBadge.tsx              # ★行动层徽标（MCP 外部服务连接状态）
-│   ├── PersonaSwitcher.tsx         # ★陪伴对象切换（记忆命名空间切换）
-│   ├── SessionList.tsx              # ★历史记录（会话列表 + 新建对话）
-│   ├── StyleSwitcher.tsx           # 文风切换（清单来自后端）
-│   ├── PresetSwitcher.tsx          # 模型预设档切换（清单来自后端）
-│   └── StateBadge.tsx              # 具身状态显示（聆听中/思考中/说话中）
-├── hooks/
-│   ├── useAvatar.ts                # ★SDK 封装：初始化/播报/分段播报/打断/退避重连/销毁 + 浏览器 TTS 降级
-│   ├── useChatSession.ts           # ★对话 + 状态机编排 + 分段播报 + 人设切换重置
-│   └── useAvatarCredentials.ts     # 凭证来源（页面填写 > 构建时环境变量）
-├── lib/
-│   ├── api.ts                      # ★后端接口封装（统一 ApiError + 空对象规范化）
-│   ├── types.ts                    # ★与后端响应对齐的类型（唯一契约来源）
-│   ├── persona.ts                  # 缺省人设常量（接口未就绪时的占位）
-│   ├── session-store.ts            # ★本地会话指针与草稿（localStorage，仅存指针）
-│   └── avatar-config.ts            # 凭证读取/保存/变更事件
-├── tests/                          # ★vitest：接口契约 / 分段播报守卫 / 退避重连
-├── eslint.config.mjs               # ★ESLint 9 扁平配置（next/core-web-vitals）
-└── vitest.config.mts               # ★vitest 配置（jsdom + `@` 别名）
+├── components/                     # 按域分组
+│   ├── avatar/                     # AvatarStage / AvatarSettings / Live2DStage / LocalAvatarStage
+│   │                               #   / StaticPortraitStage / ModelLibraryPanel / ModelSourcePanel / StateBadge
+│   ├── chat/                       # ChatPanel / SubtitleBar / MoodIndicator / MemoryTrace / SessionList
+│   │                               #   / MicButton / ImageButton / CapabilityHint
+│   ├── settings/                   # PersonaSwitcher / StyleSwitcher / PresetSwitcher / JailbreakSwitcher
+│   │                               #   / ModeSwitcher / LlmSettings / AgentBadge / PluginCenter(+Detail/DevPanel)
+│   │                               #   / SkillPanel / SchemaForm / TavernImportPanel / useAnchoredPopup
+│   └── studio/                     # StudioPanel / PersonaStudio / WorldBookStudio / StyleStudio / KnowledgePanel
+│                                   #   / StPresetPanel(+Editor/AdaptPanel) / StudioBadge
+├── hooks/                          # 按域分组
+│   ├── avatar/                     # useAvatar（SDK 封装 + 三实现 + 逐句降级）/ useAvatarCredentials
+│   │                               #   / useAvatarModels / useTtsPreferences / useLipSyncTimeline
+│   ├── chat/                       # useChatSession（对话 + 状态机编排 + 分段播报 + 主动消息订阅）
+│   │                               #   / usePersonaCatalog
+│   └── perception/                 # useSpeechInput（语音）/ useImageShare（发图）/ usePerceptionCapabilities
+├── lib/                            # 按域分组
+│   ├── api/                        # client.ts（统一出口 + ApiError）/ types.ts（唯一契约来源）/ events.ts（SSE）
+│   ├── avatar/                     # avatar-config / avatar-renderer / static-portrait-renderer
+│   │                               #   / avatar-model-source / lipsync / portrait-assets
+│   ├── chat/                       # session-store / persona / user / mode / jailbreak / shortcut
+│   ├── live2d/                     # 三态桥（cubism-bridge / live2d-renderer / model-assets / config）—— 路径不可动
+│   └── studio/                     # st-preset.ts（预设字段元信息 / 顺序合并 / 补丁深合并）
+├── vendor/cubism/                  # Cubism SDK（脚本落位，不入库）
+├── tests/                          # vitest：接口契约 / 分段播报守卫 / 退避重连 / 各面板
+├── eslint.config.mjs               # ESLint 9 扁平配置（next/core-web-vitals，--max-warnings=0）
+├── tailwind.config.ts              # 语义色板（mood.* 为情绪色唯一来源）
+└── vitest.config.mts               # vitest 配置（jsdom + `@` 别名）
 ```
 
-（★ = 本轮「对接后端接口」新增或重写）
+> 目录按**域**分组（对齐 `AGENTS.md` §3）；`lib/live2d/` 为三态桥，路径不可动。
 
 ---
 
@@ -113,7 +114,7 @@ frontend/
 ### 4.1 SDK 封装（`hooks/avatar/useAvatar.ts`）
 
 对外只暴露一个与实现无关的控制器接口（`AvatarController`），
-魔珐 SDK 与浏览器原生 TTS 是它的两个实现——页面按凭证与降级状态**在渲染期直接选择**，
+魔珐 SDK / 服务端 TTS / 静默是它的三个实现——页面按凭证与探测结果**在渲染期直接选择**，
 因此不会先渲染一帧错误状态：
 
 ```ts
@@ -126,7 +127,7 @@ interface AvatarController {
   detail: string;                           // 阶段详情 / 失败原因（现场排查用）
 
   setState: (state: AvatarState) => void;
-  /** 整段播报：text 给浏览器 TTS，ssml 给魔珐 SDK */
+  /** 整段播报：text 给服务端 TTS，ssml 给魔珐 SDK */
   speak: (text: string, ssml?: string) => Promise<void>;
   /** 分段播报：逐段 { text, ssml }，段间自动做 interactive_idle 过渡 */
   speakChunks: (chunks: SpeechChunk[], onChunk?: (index: number) => void) => Promise<void>;
@@ -137,7 +138,7 @@ interface AvatarController {
 关键实现细节：
 
 - `speak()` **等待 `voice_end` 才 resolve**（带按文本长度估算的超时兜底），
-  与浏览器 TTS 实现保持同一语义；否则调用方会立刻把「说话中」打回 idle；
+  与另两个实现保持同一语义；否则调用方会立刻把「说话中」打回 idle；
 - ⚠️ **语音事件的坑**：`onVoiceStateChange(state, duration, client_speak_id)` 的 `state`
   **实际取值是 `"start"` / `"end"`**（文档用事件名 `voice_start` / `voice_end` 描述）。
   只认后者时事件永远匹配不上，每段播报都退化成靠超时收尾，而最后一段会被紧接着的
@@ -145,7 +146,7 @@ interface AvatarController {
   实现里两种写法都接受，并有回归用例锁住（`tests/useAvatar.xmov.test.ts`）；
   超时也相应放宽（每字 400ms / 最小 12s）并在收尾留 600ms 尾音缓冲；
 - 降级链路：未配置凭证 / SDK 脚本加载超时（20s）/ `init()` 超时（90s）/ `onError` 重连用尽
-  → 调用 `onUnavailable(reason)`，页面切到浏览器 TTS + 占位形象，并**保留失败原因**；
+  → 调用 `onUnavailable(reason)`，页面切到本地渲染 + 静默，并**保留失败原因**；
 - 断线自动重连：`onError` 按指数退避（1s → 2s → 4s，最多 3 次）重建 SDK，
   期间 `stage = "reconnecting"`；用尽后才降级。重新连上后重连计数归零。
 
@@ -203,7 +204,7 @@ setState("idle");
 | SDK 脚本加载失败 / `init()` 报错 | 显示占位形象 + 字幕照常工作（纯文本对话仍可用），顶部提示「数字人暂不可用」 | ✅ 已实现 |
 | 初始化卡住 | 脚本加载 20s / `init()` 90s 超时兜底，避免永久停在「初始化中」 | ✅ 已实现 |
 | WebSocket 断开 | `onError` → 指数退避重连（最多 3 次），期间降级为字幕 + 状态提示 | ✅ 已实现 |
-| 重连用尽 | 降级为浏览器原生 TTS，保留失败原因与排查建议 | ✅ 已实现 |
+| 重连用尽 | 降级为静默（不再出声），保留失败原因与排查建议 | ✅ 已实现 |
 | 后端不可用 | 顶部「后端未连接」徽标 + 每 5s 自动重试；错误条 `role="alert"` 提示，保留已有消息 | ✅ 已实现 |
 | 用户打断 | 立即 `interrupt()`，不等待服务端确认 | ✅ 已实现 |
 | 弱网 | 播报前无提示（当前未做「网络较慢」探测） | ⬜ 未实现（优先级低） |

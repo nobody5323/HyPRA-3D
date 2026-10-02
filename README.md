@@ -1,8 +1,8 @@
 # HyPRA-3D：打通提示词架构与混合记忆的情感陪伴 3D 交互系统
 
 [![CI](https://github.com/nobody5323/HyPRA-3D-/actions/workflows/ci.yml/badge.svg)](https://github.com/nobody5323/HyPRA-3D-/actions/workflows/ci.yml)
-![License](https://img.shields.io/badge/license-Apache%202.0-blue)
-![Tests](https://img.shields.io/badge/tests-802%20passed-brightgreen)
+![License](https://img.shields.io/badge/license-AGPL--3.0-blue)
+[![Tests](https://img.shields.io/badge/tests-CI%20verified-brightgreen)](https://github.com/nobody5323/HyPRA-3D-/actions/workflows/ci.yml)
 
 > 在高速发展的网络情感、日益破碎化的日常生活中，给现代人一个完全符合其幻想的 AI 陪聊助手，
 > 化解当代人各方面的压力。
@@ -39,7 +39,7 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
   魔珐星云具身驱动 SDK 实时渲染，提供**渲染无关的驱动时间轴**，可降级接入任意 3D/2D 模型。
 - **可插拔语音（TTS）与音画同步**：声音与渲染解耦——魔珐 SDK 走它自带 TTS；
   Live2D / 静态立绘可接**自部署 GPT-SoVITS**（零样本音色克隆、多音色可切）；
-  两者都不可用时自动回落到**浏览器原生 TTS**。服务端 TTS 路径下，音频与口型时间轴
+  两者都不可用时**保持静默**（只显示文字，不用系统语音顶替）。服务端 TTS 路径下，音频与口型时间轴
   **来自同一次请求**（音画同源），字幕按音频播放进度推进；任一句合成失败只降级那一句，
   对话不中断。切换入口在前端「数字人设置 → 语音引擎」。
 - **酒馆（SillyTavern）预设兼容**：可直接导入你在酒馆里用的 **Chat Completion 预设 JSON**，按它的
@@ -52,7 +52,7 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
   简介 / 标签 / **人设正文** / **背景故事**）与**按条件触发的世界设定**（关键词 / 正则 /
   语义向量三通道，归属可选「所有角色」或某个专属角色），并带 **「试触发」**——输入一句用户
   可能会说的话，逐通道显示会不会命中、为什么（命中了哪些关键词 / 哪个正则 / 语义相似度与阈值）；
-  内容写完后**下次对话即生效**（无需重启服务）。内置角色与条目一律只读（要改就「复制为我的」），
+  内容写完后**下次对话即生效**（无需重启服务）。内置角色与条目不可直接修改（可复制，也可从当前工坊删除；包内文件不改），
   唯一例外是内置条目的**启用开关**——它写用户侧偏好，内置文件一字未改。
   数据契约、接口与不变量见 [`docs/user-content-studio.md`](docs/user-content-studio.md)。
 - **两种形态：Web 端 + 桌面桌宠端**：同一套后端与渲染层，两种「在场」方式——
@@ -63,20 +63,74 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 
 ## 🧠 设计参照与文档
 
+完整文档地图见 [`docs/README.md`](docs/README.md)。核心几篇按主题列出：
+
+**架构与能力**
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/memory-architecture.md`](docs/memory-architecture.md) | **混合记忆引擎**（四层记忆 / 统一混合检索 / 生命周期 / 参数总表） |
+| [`docs/prompt-composition.md`](docs/prompt-composition.md) | **提示词逐节构成**（真实渲染样例、预算与裁剪、两条组装路径） |
+| [`docs/proactive-multimodal.md`](docs/proactive-multimodal.md) | **多模态感知与主动沟通**（ASR / 视觉 / 桌面情景 / 时间感 / 行踪画像 + 主动链路与七道节制闸门） |
+| [`docs/st-preset-compat.md`](docs/st-preset-compat.md) | **酒馆预设兼容契约**（字段映射 / 组装语义 / 宏 / 不支持清单 / 合规边界） |
+| [`docs/preset-ai-adaptation.md`](docs/preset-ai-adaptation.md) | **预设 AI 适配**（导入社区预设后一键改造为陪伴形态） |
+| [`docs/jailbreak-layer.md`](docs/jailbreak-layer.md) | **叙事框架层**（默认关闭的框架声明层：三段结构、注入位置与边界） |
+| [`docs/user-content-studio.md`](docs/user-content-studio.md) | **创作工坊**（用户自定义角色 / 背景故事 / 世界书 / 文风的数据契约与不变量） |
+
+**前端与形态**
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/frontend-plan.md`](docs/frontend-plan.md) | 前端方案（Next.js + 魔珐 SDK + 具身状态机） |
+| [`docs/frontend-avatar-integration.md`](docs/frontend-avatar-integration.md) | 前端 SDK 接入指南（含 speak 注意事项、外部 TTS 路径与 FAQ） |
+| [`docs/desktop-pet.md`](docs/desktop-pet.md) | **桌面桌宠端**（形态分工、进程结构、关键决策与合规边界） |
+
+**插件体系**
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/plugin-development.md`](docs/plugin-development.md) | **插件开发指南**（manifest / 能力面 / 权限 / 声明式配置，公开接口说明） |
+| [`docs/plugin-market.md`](docs/plugin-market.md) | 插件市场设计（索引 / 安装 / 回滚 / 安全边界；**设计稿，未实现**） |
+
+**参赛与合规**
+
 | 文档 | 内容 |
 |---|---|
 | [`docs/competition-gap-analysis.md`](docs/competition-gap-analysis.md) | **赛题差距分析**（评审维度对照与行动优先级） |
 | [`docs/why-embodied-avatar.md`](docs/why-embodied-avatar.md) | **不可替代性论证**（为何情感陪伴需要具身数字人） |
-| [`docs/frontend-plan.md`](docs/frontend-plan.md) | 前端方案（Next.js + 魔珐 SDK + 具身状态机） |
-| [`docs/frontend-avatar-integration.md`](docs/frontend-avatar-integration.md) | 前端 SDK 接入指南（含 speak 注意事项、外部 TTS 路径与 FAQ） |
-| [`docs/deployment.md`](docs/deployment.md) | 部署说明（Docker Compose 一键部署 / 开发模式） |
 | [`docs/sillytavern-memory-design-reference.md`](docs/sillytavern-memory-design-reference.md) | 记忆与提示词机制的设计参照调研 |
-| [`docs/st-preset-compat.md`](docs/st-preset-compat.md) | **酒馆预设兼容契约**（字段映射 / 组装语义 / 宏 / 不支持清单 / 合规边界） |
-| [`docs/user-content-studio.md`](docs/user-content-studio.md) | **创作工坊**（用户自定义角色 / 背景故事 / 世界书的数据契约、接口与不变量） |
-| [`docs/desktop-pet.md`](docs/desktop-pet.md) | **桌面桌宠端**（形态分工、进程结构、关键决策与合规边界） |
+| [`docs/license-compliance.md`](docs/license-compliance.md) | **许可与合规说明**（AGPL 义务 / §13 检查清单 / 来源纪律 / 依赖审计） |
+| [`docs/deployment.md`](docs/deployment.md) | 部署说明（Docker Compose 一键部署 / 开发模式） |
 | [`AGENTS.md`](AGENTS.md) | 项目开发约定（架构分层、红线、验证要求） |
 
 ## 🚀 快速开始
+
+### 一键启动（Windows）
+
+根目录双击 `start.bat`，或在命令行执行 `start.bat [参数]`——脚本会做环境自检、
+`.env` 兜底提醒、端口占用检测、后端就绪等待；若 `.env` 用本机 Qdrant，会先拉起
+`_local/qdrant/qdrant.exe`。每端各占一个独立窗口，日志分开可见，**关闭窗口即停止该端**。
+
+    start.bat                    # 后端 + 桌面端（默认：先开程序控制台）
+    start.bat web                # 后端 + Web 前端（改 Web 端的最短路径）
+    start.bat all                # 后端 + Web 前端 + 桌面端
+    start.bat backend            # 只启动后端
+    start.bat frontend           # 只启动 Web 前端
+    start.bat console            # 只启动桌面端（后端已在别处跑着）
+    start.bat docker             # docker compose 一键部署（评审模式）
+    start.bat check              # 只做环境自检，不启动服务
+
+    start.bat desktop -Release   # 桌面端用构建产物启动（演示 / 评审用）
+
+默认目标（后端 + 桌面端）的用意：**先开程序控制台**——模型库、构图调试、插件、技能、
+预设、会话、创作工坊都在里面，桌宠窗与 Web 端再由它的「模式启动」里选定；
+桌宠窗与 Web 端**不会自动弹出**。
+
+> 依赖（`.venv` / `node_modules`）缺失时只提示修复命令，不擅自安装。
+> 端口已有实例则跳过并复用；桌面端对自己没启的后端是「接管显示」，不会重复拉起、
+> 也不会把它停掉。
+
+### 手动分步启动
 
 开发模式（零云端依赖可跑通链路）：
 
@@ -95,7 +149,7 @@ cd frontend
 npm install
 npm run dev             # 访问 http://localhost:3000
 # 数字人密钥可在页面右上角「数字人设置」里直接填写（即时生效，无需重新构建）；
-# 未填 / 初始化失败 → 自动降级为浏览器原生语音，对话、字幕、情绪均不受影响
+# 未填 / 初始化失败 → 自动降级为本地渲染 + 静默，对话、字幕、情绪均不受影响
 # 想给 Live2D / 静态立绘配「真声音」→ 在 .env 配 DIGITAL_HUMAN_PROVIDER=gpt_sovits
 # （需另起 GPT-SoVITS 服务；未部署时自动降级，无需改任何配置），见 docs/deployment.md
 ```
@@ -107,7 +161,8 @@ npm run dev             # 访问 http://localhost:3000
 cd desktop
 npm install
 npm run dev             # 桌面右下角出现透明桌宠，托盘常驻
-# 打包安装包：npm run dist:win → release/ 下的 portable exe 与 NSIS 安装包
+# 打包安装包（自包含：内置后端与 Qdrant，目标机无需 Python / Node）
+# npm run dist:win → release/ 下的 portable exe 与 NSIS 安装包
 # 形象：未装 Cubism SDK 时用自研立绘；装好后 npm run install:model 启用 Live2D
 # 详见 desktop/README.md 与 docs/desktop-pet.md
 ```
@@ -126,7 +181,7 @@ npm run dev             # 桌面右下角出现透明桌宠，托盘常驻
     backend/     Python 后端（FastAPI + LangChain/LangGraph + Qdrant + 魔珐星云驱动）
     frontend/    Next.js 前端（对话 UI + 情绪/记忆可见性 + 个人记忆上传 + 魔珐具身数字人）
     desktop/     Electron 桌宠端（透明桌宠窗 + 托盘；复用 frontend 的渲染器与 hooks）
-    docs/        设计文档、部署说明、参赛说明、演示脚本
+    docs/        设计文档与部署说明（参赛说明 / 演示脚本待产出）
     _local/      本机私有资料（自备 SDK/模型包、开发留档、旧备份）——不入库
     AGENTS.md    项目开发约定
     LICENSE
@@ -176,7 +231,7 @@ npm run dev             # 桌面右下角出现透明桌宠，托盘常驻
 - [ ] M8 参赛文档与演示视频
 
 > M6/M6.5 完成的是**代码与接口对齐**：真实渲染效果依赖魔珐密钥与积分
-> （页面「数字人设置」或 `frontend/.env.local` 填写后即可验证，未填则走浏览器语音降级）。
+> （页面「数字人设置」或 `frontend/.env.local` 填写后即可验证，未填则不播报语音）。
 > 缺口清单与优先级见 [`docs/competition-gap-analysis.md`](docs/competition-gap-analysis.md)。
 
 ## 📄 许可

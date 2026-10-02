@@ -12,6 +12,10 @@
 
 两种模式共用同一份代码，全部差异收敛在 `backend/.env` 配置（provider/key/model/URL）。
 
+> **本地日常开发不用手敲命令**：根目录 `start.bat`（默认后端 + 桌面程序控制台）
+> 会做环境自检、起本机 Qdrant（若 `.env` 用 `WARM_BACKEND=qdrant` 且指向本机）、
+> 等后端就绪；`start.bat web` 则是后端 + Web 前端。参数见 [README](../README.md) 的「一键启动」。
+
 ## 2. 前置条件（评审机）
 
 - 已安装 **Docker**（含 docker compose 插件）
@@ -49,7 +53,7 @@ docker compose ps                            # 三个服务：qdrant / backend /
 
 | 服务 | 镜像/来源 | 端口 | 说明 |
 |---|---|---|---|
-| `qdrant` | `qdrant/qdrant:v1.12.4` | 6333 | 本地向量库（无 key，评审零配置） |
+| `qdrant` | `qdrant/qdrant:v1.19.1` | 6333 | 本地向量库（无 key，评审零配置） |
 | `backend` | 本地 Dockerfile 构建 | 8000 | FastAPI 应用（QDRANT_URL 指向 qdrant 服务） |
 | `frontend` | 本地 Dockerfile 构建 | 3000 | Next.js 对话 UI + 魔珐数字人舞台 |
 
@@ -72,7 +76,7 @@ docker compose ps                            # 三个服务：qdrant / backend /
 
 **魔珐星云数字人密钥无需在 compose 里配置**：打开页面右上角「数字人设置」
 填入 App ID / Secret 即可（存浏览器 localStorage，即时生效、不落盘、不入镜像）。
-不填也能演示：自动降级为**浏览器原生 TTS + 占位形象**，对话/字幕/情绪不受影响。
+不填也能演示：自动降级为**本地渲染器（Live2D / 立绘）+ 静默**，对话/字幕/情绪不受影响。
 
 ## 6. 零依赖兜底（无 key 也能演示）
 
@@ -82,13 +86,13 @@ WARM_BACKEND=memory            # 内存假向量库
 LLM_PROVIDER=mock              # 占位回复（无 key 可跑通链路）
 EMBEDDING_PROVIDER=deterministic
 ```
-此时链路完整可用（会话 / 世界书 / 渲染照常），前端也会自动降级为浏览器 TTS，
+此时链路完整可用（会话 / 世界书 / 渲染照常），前端只是**不播报语音**，
 仅模型回复为占位文本。
 
 ## 6.5 可选：自部署 GPT-SoVITS（给 Live2D / 静态立绘配真声音）
 
 **不部署也完全可用**：未配置时驱动自动降级（`has_audio=false`），
-前端逐句回落浏览器原生 TTS，对话不中断。本节只给想开这能力的人看。
+前端逐句静音（对话与字幕不中断）。本节只给想开这能力的人看。
 
 ```bash
 # ① 拉官方仓库并起服务（需要 NVIDIA GPU；默认端口 9880）
@@ -150,7 +154,7 @@ GPT_SOVITS_PROMPT_TEXT=参考音频里说的那一句话
 **排查**：
 | 现象 | 原因 |
 |---|---|
-| 听到的是浏览器语音 | 后端降级了：看 `/media/tts/voices` 的 `note`（多为未配参考音频 / 服务没启动） |
+| 完全没有声音 | 后端降级了：看 `/media/tts/voices` 的 `note`（多为未配参考音频 / 服务没启动）。浏览器语音已移除，不会再有「系统音色顶上」 |
 | `GET /media/tts/voices` 返回 `configured: false` | `GPT_SOVITS_REF_AUDIO` 与音色表都没配 |
 | 合成报 `参考音频需在3~10秒` | 参考音频太长/太短（实测 70 秒的示例会被拒） |
 | 音频能合成但取不到 | `GPT_SOVITS_MEDIA_TYPE` 别选 `raw`（裸 PCM，浏览器放不了） |

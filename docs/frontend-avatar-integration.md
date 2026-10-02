@@ -146,7 +146,7 @@ async function speakChunks(ssmlChunks) {
 
 `onError` 不应直接永久降级：网络抖动或服务重启后应能自恢复。
 本项目按**指数退避**重建 SDK（1s → 2s → 4s，最多 3 次），
-期间界面显示 `reconnecting` 状态；重连用尽才降级为浏览器原生 TTS。
+期间界面显示 `reconnecting` 状态；重连用尽则降级为**静默**（保留失败原因，语音不再兜底）。
 
 ---
 
@@ -160,7 +160,7 @@ async function speakChunks(ssmlChunks) {
 | `GET /chat/styles` | 文风清单 | 界面「文风」选择器数据源 |
 | `POST /media/speak` | 仅生成播报指令 | 参数：`text` / `emotion` / `intensity` / `voice` / `streaming` / `max_chars`；`streaming=true` 时额外返回 `chunks`（纯文本分段）与 `ssml_chunks`（逐段 SSML） |
 | `POST /media/avatar` | **扩展路径**：口型/表情/动作**时间轴** + 可选音频 | 供自研渲染使用（见下节） |
-| `GET /media/tts/voices` | 当前语音引擎与可选音色 | 前端据此决定用服务端音频还是浏览器 TTS（`server_tts` / `configured` / `voices` / `note`） |
+| `GET /media/tts/voices` | 当前语音引擎与可选音色 | 前端据此决定用服务端音频还是**静默**（`server_tts` / `configured` / `voices` / `note`） |
 | `GET /media/audio/{file}` | 音频文件 | 仅扩展路径产生音频时有值 |
 | `POST /knowledge/upload` | 上传个人记忆 | multipart：`file` 或 `text`；query `companion_id`；form `title` / `force`；判重命中返回 409 + 判重详情 |
 | `GET /knowledge/list` | 个人记忆文档列表 | query `companion_id` |
@@ -219,7 +219,7 @@ async function speakChunks(ssmlChunks) {
 |---|---|---|---|
 | 魔珐 SDK 自带 TTS | 魔珐 3D 形象 | 魔珐控制台配置的音色（`XMOV_VOICE`） | 字级时间戳，逐字对齐 |
 | 服务端 TTS（GPT-SoVITS） | Live2D / 静态立绘 | 自部署 GPT-SoVITS + 音色表 | 整段对齐（估算轨道按音频时长缩放） |
-| 浏览器原生 TTS | 任意本地渲染 | Web Speech API | 无（音频在浏览器侧，后端不知时长） |
+| 静默（`none`） | 任意本地渲染 | **无声音** | —（未接入 TTS 时不播报，只显示文字与字幕） |
 
 **为什么魔珐路径不能配外部 TTS**：SDK 的 `avatar.speak(ssml)` 只接受文本（SSML），
 不接受外部音频；即「魔珐形象 + GPT-SoVITS 声音」当前不可行，
@@ -229,18 +229,20 @@ async function speakChunks(ssmlChunks) {
 
 ```
 魔珐渲染中 ? xmov
-         : 偏好=browser → browser
          : 偏好=server  → server（探测失败也先试一次）
-         : 探测到服务端 TTS 就绪 ? server : browser
+         : 探测到服务端 TTS 就绪 ? server : none（静默）
 ```
 
-用户可在「数字人设置 → 语音引擎」选三档（自动 / 强制服务端 / 强制浏览器），音色另有下拉框。
+**浏览器原生 TTS（Web Speech API）已整体移除**：系统音色与角色对不上，
+默认开着只会让陪伴体验失真。规则简化为「**只有接入 TTS 才出声**」。
+
+用户可在「数字人设置 → 语音引擎」选两档（自动 / 强制服务端），音色另有下拉框。
 
 ### 前端契约：`timeline` 与 `useLipSyncTimeline`
 
 ```ts
 interface AvatarController {
-  provider: "browser" | "xmov" | "server";
+  provider: "none" | "xmov" | "server";   // none = 未接入 TTS，不出声
   /** 与**正在播放的音频同源**的口型时间轴（仅服务端 TTS 提供） */
   timeline?: readonly VisemeFrame[] | null;
   speak(text, ssml?, context?): Promise<void>;   // context = 本轮情绪
@@ -251,10 +253,10 @@ interface AvatarController {
   口型时钟对齐 `playing` 事件（真实出声那一刻），字幕用 `audio.currentTime` 推进；
   此路径下 `useLipSyncTimeline` **保持 inactive**，不再多打一次请求
   （否则就是「声音 A + 口型 B」）；
-- **浏览器 TTS 路径**：没有音频时长可用，只能另发一次请求让后端按文本估算，
+- **魔珐路径**：没有本地音频时长可用，只能另发一次请求让后端按文本估算，
   只求「嘴会动」；
-- **降级是逐句的**：某一轮拿不到 `audio_url`（服务挂了/没配）就那一句回落到浏览器 TTS，
-  不需要重启也不需要重新配置。
+- **降级是逐句的**：某一轮拿不到 `audio_url`（服务挂了/没配）就那一句**静音**，
+  不需要重启也不需要重新配置——但也不会换系统音色。
 
 ### 音色（服务端 TTS）
 
@@ -335,7 +337,7 @@ GPT-SoVITS 是零样本音色克隆，**音色 = 一段参考音频 + 该音频�
 **字幕与语音如何同步**：`useChatSession` 不再预先显示整段字幕，而由 `speakChunks` 的
 `onChunk` 在**每段音频就绪那一刻**（`play()` 之前）驱动——所以每句的字与声同时出现。
 
-**逐段降级**：某一段拿不到音频（超时 / 服务未部署）时只把**那一段**交给浏览器 TTS，
+**逐段降级**：某一段拿不到音频（超时 / 服务未部署）时只有**那一段**静音，
 前后段继续走服务端，字幕照常推进。
 
 **未采用的两条路（备查）**：
@@ -353,7 +355,7 @@ GPT-SoVITS 是零样本音色克隆，**音色 = 一段参考音频 + 该音频�
 | 数字人不说话 | 检查 `avatar.init()` 是否成功；确认 WebSocket 已连接（`ttsa/session`） |
 | 说完一句后第二句没反应 | `speak` 不能连续调用，需先 `interactive_idle`（见第五节） |
 | 字幕出现 `kacomfort` 之类乱码 | 前端应使用 `display_text` 字段渲染字幕，而不是自行去标签 |
-| 听到的仍是浏览器语音（选了服务端 TTS） | 每一句都是**独立降级**：看 `GET /media/tts/voices` 的 `note`；再看后端 `media/` 目录下有没有新音频；`POST /media/avatar` 的 `meta.degrade_reason` 会写清原因（连不上 / 超时 / 缺参考音频） |
+| 选了服务端 TTS 却完全没有声音 | 每一句都是**独立降级**（失败的那句静音，不会改用系统语音）：看 `GET /media/tts/voices` 的 `note`；再看后端 `media/` 目录下有没有新音频；`POST /media/avatar` 的 `meta.degrade_reason` 会写清原因（连不上 / 超时 / 缺参考音频） |
 | 声音出来了但嘴不太合 | GPT-SoVITS 无字级时间戳，对齐是**整段级**的（`meta.align=estimated-scaled`）：先看 `meta.duration_source` 是不是 `estimated`（非 WAV 拿不到时长），必要时改用 `GPT_SOVITS_MEDIA_TYPE=wav` |
 | 改了 `tts_voices.json` 但下拉框没变 | 音色表在**启动时**读一次（与 `.env` 一致）→ 重启后端 |
 | 声音没有随情绪变化 | 音色表里没配 `_emotion_map`（看 `/media/tts/voices` 的 `emotion_voices`），或本轮显式指定了 voice（看 `meta.voice_source`） |

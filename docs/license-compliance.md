@@ -92,8 +92,28 @@
 > 参照 tellev 的 `dependencyReport` Gradle 任务：把依赖报告作为**发布物的一部分**产出，
 > 便于评审核验。本项目计划以 npm script + Python 脚本各出一个报告。
 
+### 6.1 随包分发的第三方二进制
+
+桌面端发布包（`desktop/package.json` 的 `extraResources`）里包含两个**独立程序**。
+它们各自的许可证与 HyPRA 的 AGPL 无关，但再分发时必须履行对应义务：
+
+| 组件 | 版本 | 许可证 | 义务 | 许可证落位 |
+| --- | --- | --- | --- | --- |
+| Qdrant | 1.19.1 | **Apache-2.0** | 保留许可证与版权声明（§4(a)(c)） | `backend/THIRD_PARTY_LICENSES/qdrant-LICENSE.txt`，随包拷到 `resources/backend-res/THIRD_PARTY_LICENSES/` |
+| PyInstaller | 6.22.3 | GPL-2.0-or-later **+ bootloader 例外** | bootloader 的例外条款明确允许打包非 GPL 程序；自建 spec 属构建产物 | 无需随附（构建工具），升级时复核 |
+
+> **边界判断**：Qdrant 以独立进程运行，PyInstaller 只是构建工具——两者都不与
+> HyPRA 代码形成衍生关系，因此既不会「传染」AGPL，也不受 AGPL 传染。
+>
+> 升级 Qdrant 版本时必须重新核对其 LICENSE（见 `backend/THIRD_PARTY_LICENSES/README.md`）。
+
+> 另：打包产物的资源边界由 `desktop/scripts/verify-release-assets.mjs` 硬校验。
+> 它禁止模型/音频/密钥类文件；`certifi/cacert.pem` 与 `grpc/.../roots.pem`
+> 是**公开 CA 证书 bundle**（非密钥），已按精确路径白名单放行，否则后端无法发起 HTTPS。
+
 ## 7. 变更记录
 
 | 日期 | 变更 |
 | --- | --- |
 | 2026-09-23 | 协议由 Apache-2.0 迁移至 AGPL-3.0；建立本文件 |
+| 2026-09-25 | 阶段二自包含打包：登记随包分发的 Qdrant（Apache-2.0）与 PyInstaller 运行时义务；新增 `backend/THIRD_PARTY_LICENSES/` |
