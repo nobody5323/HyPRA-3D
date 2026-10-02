@@ -213,6 +213,13 @@ for depth in 0..maxDepth:
   **P2 已实现**：`STRenderContext.style_text` 追加到 jailbreak 正文之后；
   预设未启用 jailbreak 槽位时追加到消息末尾并告警（不丢用户选的文风）。
 - **不覆盖**预设作者的正文，只在其后追加，保证预设原意优先。
+- **输出形态层**（产品级硬约束，**恒开**）→ 在 `render_st_preset` 与 `at_depth` 插入**之后**，
+  追加一条末尾 system 消息（`prompt_manager.DIALOGUE_ONLY_RULE`：只输出说的话，
+  不写旁白 / 动作 / 神情 / 环境 / 心理描写）。理由：本路径不经过 `PromptManager` 的
+  `LAYER_FORMAT`，而这条口径是**两种模式全局强制**的（见 `docs/prompt-composition.md` §2.8）；
+  放在 at_depth 之后是为了不改变深度插入的锚点——否则 `depth=1` 会从「插在用户输入之前」
+  变成「插在约束块之前」，两条路径的 depth 语义就不一致了。
+  它不属于预设条目，也不参与 `squash_system_messages` 合并（追加发生在渲染之后）。
 
 ---
 
@@ -386,7 +393,7 @@ ST 预设正文大量使用 `{{...}}` 宏。**P3 已实现**，落在**独立模
 | P4 | API + graph 分派 + 记忆扩展注入 | 接口测试 + 组装端到端测试（mock LLM） | ✅ 已实现（33 项测试） |
 | P5 | 前端预设面板 | 前端测试 + lint/build | ✅ 已实现（`StPresetPanel`） |
 | P6 | 前端条目编辑器 | 同上 | ✅ 已实现（`StPresetEditor` + `lib/studio/st-preset.ts`） |
-| P7 | README / 文档同步 / 合规声明段落 | 全量 pytest + 前端 build | ⬜ 待做 |
+| P7 | README / 文档同步 / 合规声明段落 | 全量 pytest + 前端 build | ✅ 已实现（README 合规声明段落与文档索引已就位） |
 
 ---
 

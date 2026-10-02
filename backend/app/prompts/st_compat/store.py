@@ -35,6 +35,7 @@ from app.prompts.st_compat.models import (
     STPromptOrderEntry,
     strip_sensitive_keys,
 )
+from app.paths import data_path
 from app.prompts.st_compat.parser import (
     RUNTIME_FILLED_MARKERS,
     ParsedPreset,
@@ -43,8 +44,10 @@ from app.prompts.st_compat.parser import (
     slugify,
 )
 
-# 预设目录默认位置：本文件位于 backend/app/prompts/st_compat/store.py
-DEFAULT_ROOT = Path(__file__).resolve().parents[3] / "data" / "presets"
+
+def default_root() -> Path:
+    """ST 预设的默认存放目录（用户本地数据，可写）。"""
+    return data_path("data", "presets")
 
 _INDEX_FILE = "index.json"
 _INDEX_VERSION = 1
@@ -117,7 +120,7 @@ class StPresetStore:
     """导入预设的本地存储门面。"""
 
     def __init__(self, root: str | Path | None = None) -> None:
-        self._root = Path(root) if root is not None else DEFAULT_ROOT
+        self._root = Path(root) if root is not None else default_root()
 
     # ---------- 路径与校验 ----------
 

@@ -51,7 +51,7 @@ from app.prompts.st_compat.renderer import (
 )
 from app.prompts.st_compat.store import (
     DEFAULT_MEMORY_INJECTION,
-    DEFAULT_ROOT,
+    default_root,
     MEMORY_POSITIONS,
     PresetSummary,
     StPresetStore,
@@ -86,7 +86,7 @@ __all__ = [
     "slugify",
     # store
     "DEFAULT_MEMORY_INJECTION",
-    "DEFAULT_ROOT",
+    "default_root",
     "MEMORY_POSITIONS",
     "PresetSummary",
     "StPresetStore",

@@ -12,6 +12,7 @@ from app.api import chat as chat_module
 from app.api import st_presets as st_presets_module
 from app.llm.base import ChatMessage, LLMProvider
 from app.main import app
+from app.rag.prompt_manager import DIALOGUE_ONLY_RULE, PERCEPTION_SECTION
 
 client = TestClient(app)
 
@@ -338,8 +339,19 @@ def test_assembly_switch_affects_rendering() -> None:
     ).json()
     system_messages = [m for m in body["messages"] if m["role"] == "system"]
 
+    # 末尾那条是产品级的输出形态约束（渲染之后追加，见 `_assemble_with_st_preset`），
+    # 它不属于预设自身条目、也不参与预设的 squash，所以统计时要排除；
+    # 感知层（`[此刻]`，含「现在几点 / 最近在做什么」）同理——它由宿主注入，
+    # 不是预设条目，也与 squash 无关。
+    preset_system = [
+        message
+        for message in system_messages
+        if DIALOGUE_ONLY_RULE not in message["content"]
+        and not message["content"].startswith(f"[{PERCEPTION_SECTION}]")
+    ]
+
     # main / charDescription / jailbreak 都是 system，squash 后应合并成更少的消息
-    assert len(system_messages) < 3
+    assert len(preset_system) < 3
 
 
 def test_reset_override_restores_import_state() -> None:
