@@ -9,6 +9,10 @@ import type {
   ConsoleStateListener,
   OpenWebResult,
   PetSettings,
+  ServiceId,
+  ServiceSettings,
+  ServiceState,
+  ServiceStateListener,
 } from "../shared/ipc";
 
 /**
@@ -29,6 +33,10 @@ const CHANNELS: Record<ConsoleChannelName, ConsoleChannel> = {
   hidePet: "console:hide-pet",
   updatePetSettings: "console:update-pet-settings",
   openWeb: "console:open-web",
+  startService: "console:start-service",
+  stopService: "console:stop-service",
+  updateServiceSettings: "console:update-service-settings",
+  servicesChanged: "console:services-changed",
   quit: "console:quit",
 };
 
@@ -55,6 +63,15 @@ const bridge: ConsoleBridge = {
 
   openWeb: () => ipcRenderer.invoke(CHANNELS.openWeb) as Promise<OpenWebResult>,
 
+  startService: (id: ServiceId) =>
+    ipcRenderer.invoke(CHANNELS.startService, id) as Promise<ConsoleState>,
+
+  stopService: (id: ServiceId) =>
+    ipcRenderer.invoke(CHANNELS.stopService, id) as Promise<ConsoleState>,
+
+  updateServiceSettings: (patch: Partial<ServiceSettings>) =>
+    ipcRenderer.invoke(CHANNELS.updateServiceSettings, patch) as Promise<ServiceSettings>,
+
   quit: () => ipcRenderer.send(CHANNELS.quit),
 
   onStateChanged: (listener: ConsoleStateListener) => {
@@ -78,6 +95,18 @@ const bridge: ConsoleBridge = {
 
     return () => {
       ipcRenderer.removeListener(CHANNELS.settingsChanged, handler);
+    };
+  },
+
+  onServicesChanged: (listener: ServiceStateListener) => {
+    const handler = (_event: Electron.IpcRendererEvent, states: ServiceState[]) => {
+      listener(states);
+    };
+
+    ipcRenderer.on(CHANNELS.servicesChanged, handler);
+
+    return () => {
+      ipcRenderer.removeListener(CHANNELS.servicesChanged, handler);
     };
   },
 };

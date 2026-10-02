@@ -107,4 +107,25 @@ describe("buildContentSecurityPolicy", () => {
     expect(csp).toContain("frame-src 'none'");
     expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
   });
+
+  it("魔珐数字人的脚本、连接域名空间与 Worker 已放行（否则 3D 数字人建不起来）", () => {
+    const csp = buildContentSecurityPolicy("http://localhost:8000");
+
+    // 脚本来源**保持精确**（外部脚本越窄越好）
+    expect(csp).toContain("https://media.xingyun3d.com");
+    // 连接类用**厂商级通配**：实测 SDK 会连一串子域，其中驱动 WebSocket 在
+    // ttsa-gateway-lite.xingyun3d.com——官方接入文档里根本没写这个域名
+    expect(csp).toContain("https://*.xingyun3d.com");
+    expect(csp).toContain("wss://*.xingyun3d.com");
+    // SDK 从 blob: 创建 Web Worker（缺了只报「浏览器能力检查失败」）
+    expect(csp).toContain("worker-src 'self' blob:");
+  });
+
+  it("外部脚本源是精确白名单，不是放开 https 通配", () => {
+    const csp = buildContentSecurityPolicy("http://localhost:8000");
+    const scriptSrc = csp.split("; ").find((part) => part.startsWith("script-src"));
+
+    // 锁死 script-src 的确切内容：往后谁想往里加通配符，这条测试会先炸
+    expect(scriptSrc).toBe("script-src 'self' https://media.xingyun3d.com");
+  });
 });

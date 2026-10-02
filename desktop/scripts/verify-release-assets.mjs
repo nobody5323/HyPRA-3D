@@ -49,6 +49,23 @@ const FORBIDDEN_DIRECTORIES = new Set(["live2d"]);
 /** 允许的例外：这些扩展名即便命中上面的规则也放行（框架自带资源） */
 const ALLOWED_EXTENSION_OVERRIDES = new Set([".d.ts"]);
 
+/**
+ * 允许的例外路径（按「路径结尾」匹配）。
+ *
+ * `.pem` 一律禁止是为了挡住**私钥与证书**，但下面两个是随包必需的
+ * **公开 CA 根证书 bundle**（不含私钥），由 PyInstaller 从依赖包里带出来：
+ *
+ * - `certifi/cacert.pem` —— certifi 的根证书集（Python 的 ssl/requests 用）
+ * - `grpc/_cython/_credentials/roots.pem` —— grpc 的根证书集
+ *
+ * 删掉它们会让打包版后端无法发起 HTTPS（LLM / Embedding 调不通），
+ * 所以按**精确路径**放行，而不是放宽 `.pem` 扩展名规则。
+ */
+const ALLOWED_PATH_SUFFIXES = [
+  path.join("certifi", "cacert.pem"),
+  path.join("grpc", "_cython", "_credentials", "roots.pem"),
+];
+
 const targets = [path.join(desktopRoot, "dist")];
 
 if (process.argv.includes("--release")) {
@@ -98,6 +115,13 @@ function violationOf(filePath) {
   for (const directory of FORBIDDEN_DIRECTORIES) {
     if (lowerPath.split(path.sep).includes(directory)) {
       return `禁止的目录（${directory}）`;
+    }
+  }
+
+  // 公开 CA 证书 bundle：按精确路径放行（理由见 ALLOWED_PATH_SUFFIXES 的注释）
+  for (const suffix of ALLOWED_PATH_SUFFIXES) {
+    if (lowerPath.endsWith(suffix.toLowerCase())) {
+      return null;
     }
   }
 

@@ -111,17 +111,59 @@ export function resolveAssetPath(root: string, requestPath: string): string | un
   return target;
 }
 
-/** 生成页面用的 CSP（页面由本服务提供，因此用响应头而不是 meta 标签） */export function buildContentSecurityPolicy(backendOrigin?: string): string {
+/**
+ * 魔珐星云 LiteSDK 的来源白名单。
+ *
+ * 数字人是**客户端渲染**：SDK 脚本从 CDN 拉取，会话与驱动数据再经网关
+ * （HTTP 长轮询 → WebSocket 升级）往返。上面任何一环没放行，SDK 都建不起来
+ * ——表现为「SDK 脚本加载失败」或初始化一直卡到超时。
+ *
+ * ⚠️ 这是桌宠窗安全边界上**唯一**允许的外部脚本来源，所以写成模块级常量、
+ * 不随调用方参数变化：「这里放开了外部脚本」必须一眼看得见。
+ */
+/** SDK 脚本来源（**保持精确**：外部脚本来源越窄越好） */
+const XMOV_SCRIPT_ORIGIN = "https://media.xingyun3d.com";
+/**
+ * 魔珐的**连接类**域名空间。
+ *
+ * 为什么用通配而不是逐个列：实测 SDK 会连一串子域，而**官方接入文档没写全**——
+ * 会话 API 是 `nebula-agent.xingyun3d.com`，但真正跑驱动的 WebSocket 在
+ * `ttsa-gateway-lite.xingyun3d.com`（这个域名文档里根本没有，是从 CSP 拦截报错里抓出来的）。
+ * 逐个试错的代价是每一轮都要「改 CSP → 重建 → 重启桌面端 → 复现」。
+ *
+ * 通配的边界仍是**厂商级**的（只放开魔珐自己的域名空间），
+ * 不等于放开整个 https；`script-src` 也没跟着放宽。
+ */
+const XMOV_ORIGIN_WILDCARD = "https://*.xingyun3d.com";
+const XMOV_WS_WILDCARD = "wss://*.xingyun3d.com";
+/**
+ * 形象资源 CDN（阿里云 OSS）。
+ *
+ * **不给通配**：那是阿里云的域，不是魔珐的，通配等于敞开整个 OSS。
+ * SDK 会 **fetch** 数字人数据（`char_data.bin.gz` 之类）而不是用 `<img>`，
+ * 所以它必须出现在 `connect-src`，只写在 `img-src` 里不管用。
+ */
+const XMOV_ASSET_ORIGIN = "https://public-xmov.oss-cn-hangzhou.aliyuncs.com";
+
+/** 生成页面用的 CSP（页面由本服务提供，因此用响应头而不是 meta 标签） */
+export function buildContentSecurityPolicy(backendOrigin?: string): string {
   const backend = backendOrigin ? ` ${backendOrigin}` : "";
 
   return [
     "default-src 'self'",
-    "script-src 'self'",
+    // 魔珐 SDK 脚本（数字人渲染）。除此之外不引入任何外部脚本
+    `script-src 'self' ${XMOV_SCRIPT_ORIGIN}`,
     // 前端有内联 style（Live2D 的 canvas 尺寸、情绪光晕颜色）
     "style-src 'self' 'unsafe-inline'",
-    `img-src 'self' data: blob:${backend}`,
-    `media-src 'self' data: blob:${backend}`,
-    `connect-src 'self'${backend}`,
+    // 魔珐 SDK 会从 CDN 取形象 / 贴图等资源
+    `img-src 'self' data: blob:${backend} ${XMOV_SCRIPT_ORIGIN} ${XMOV_ORIGIN_WILDCARD} ${XMOV_ASSET_ORIGIN}`,
+    `media-src 'self' data: blob:${backend} ${XMOV_SCRIPT_ORIGIN} ${XMOV_ORIGIN_WILDCARD} ${XMOV_ASSET_ORIGIN}`,
+    // 连接：会话 API / 驱动 WebSocket / 形象数据 CDN
+    `connect-src 'self'${backend} ${XMOV_ORIGIN_WILDCARD} ${XMOV_WS_WILDCARD} ${XMOV_ASSET_ORIGIN}`,
+    // 魔珐 SDK 会从 **blob: URL 创建 Web Worker** 跑解码/渲染准备工作。
+    // 不写这条就回落到 `script-src`（其中没有 blob:），Worker 被拦，
+    // SDK 只报「浏览器能力检查失败」——而 WebGL / 编解码器其实都是好的（实测）。
+    "worker-src 'self' blob:",
     "font-src 'self' data:",
     "object-src 'none'",
     "frame-src 'none'",

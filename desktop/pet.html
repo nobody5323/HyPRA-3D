@@ -4,12 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!--
-      生产 CSP：桌宠窗只允许加载自身资源，且只能连本机后端（FastAPI，默认 8000）。
-      开发环境下 vite.config.ts 的 devServerCsp 插件会按需放宽 HMR 所需的两项。
+      页面 CSP。**这是两处 CSP 之一**：另一处在主进程（`src/main/assetServer.ts`
+      的 `buildContentSecurityPolicy`，以响应头下发）。两者同时生效时浏览器取**交集**
+      ——所以放开白名单必须**两处都改**，只改一处会被另一处挡掉。
+      `tests/pet-csp.test.ts` 把「两处都放行了魔珐域名」钉住，防止今后单边漂移。
+
+      默认只允许自身资源 + 本机后端（FastAPI，默认 8000）。
+      魔珐星云那几项是**数字人 3D 渲染**所需，且都是实测抓出来的：
+      - `media.xingyun3d.com`：SDK 脚本（唯一放行的外部脚本）；
+      - `*.xingyun3d.com` / `wss://*.xingyun3d.com`：会话 API 与**驱动 WebSocket**
+        （后者实际在 `ttsa-gateway-lite.xingyun3d.com`，官方文档里没有）；
+      - `public-xmov.oss-...`：形象数据，且是 **fetch** 拉的（必须在 connect-src）。
+      `worker-src ... blob:` 同样是必须的：SDK 从 blob: 创建 Web Worker，
+      缺这条会回落到 script-src 被拦，而它只报「浏览器能力检查失败」。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob: http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:*; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
+      content="default-src 'self'; script-src 'self' https://media.xingyun3d.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://media.xingyun3d.com https://*.xingyun3d.com https://public-xmov.oss-cn-hangzhou.aliyuncs.com; media-src 'self' data: blob: https://media.xingyun3d.com https://*.xingyun3d.com https://public-xmov.oss-cn-hangzhou.aliyuncs.com http://127.0.0.1:* http://localhost:*; connect-src 'self' http://127.0.0.1:* http://localhost:* https://*.xingyun3d.com wss://*.xingyun3d.com https://public-xmov.oss-cn-hangzhou.aliyuncs.com; worker-src 'self' blob:; font-src 'self' data:; object-src 'none'; frame-src 'none'; base-uri 'none'; form-action 'none'"
     />
     <title>HyPRA 桌宠</title>
   </head>

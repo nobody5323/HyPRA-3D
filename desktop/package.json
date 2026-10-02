@@ -20,10 +20,11 @@
     "test:watch": "vitest",
     "verify:assets": "node scripts/verify-release-assets.mjs",
     "verify:release": "node scripts/verify-release-assets.mjs --release",
+    "verify:bundled": "node scripts/verify-bundled-runtime.mjs",
     "install:model": "node scripts/install-live2d-model.mjs",
     "icon": "node scripts/make-app-icon.mjs",
-    "pack": "npm run build && npm run icon && electron-builder --dir && npm run verify:release",
-    "dist:win": "npm run build && npm run icon && electron-builder --win && npm run verify:release"
+    "pack": "npm run build && npm run verify:bundled && npm run icon && electron-builder --dir && npm run verify:release",
+    "dist:win": "npm run build && npm run verify:bundled && npm run icon && electron-builder --win && npm run verify:release"
   },
   "build": {
     "appId": "dev.hypra.desktop",
@@ -50,6 +51,12 @@
       "!dist/**/*.pth",
       "!dist/**/*.ckpt",
       "!dist/**/*.local.json"
+    ],
+    "extraResources": [
+      { "from": "../backend/dist/backend", "to": "backend" },
+      { "from": "../_local/qdrant/qdrant.exe", "to": "qdrant/qdrant.exe" },
+      { "from": "../backend/.env.example", "to": "backend-res/.env.example" },
+      { "from": "../backend/THIRD_PARTY_LICENSES", "to": "backend-res/THIRD_PARTY_LICENSES" }
     ],
     "win": {
       "icon": "assets/icon.png",

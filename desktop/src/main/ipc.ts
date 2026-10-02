@@ -1,6 +1,7 @@
 import { BrowserWindow, app, ipcMain } from "electron";
 
 import { PET_CHANNELS, normalizePetSettings, type PetSettings } from "../shared/ipc";
+import { collectDesktopContext } from "./desktopContext";
 import { requireBoolean, requirePoint, requireSettingsPatch } from "./ipcValidation";
 import {
   applyPetSettings,
@@ -9,6 +10,7 @@ import {
   getPetWindowState,
   hidePetWindow,
   movePetWindowDrag,
+  setPetWindowChatPanel,
   setPetWindowClickThrough,
   setPetWindowControlInteractive,
   startPetWindowDrag,
@@ -84,12 +86,24 @@ export function registerIpc(deps: IpcDependencies): void {
     development: deps.development,
   }));
 
+  // 桌面情景采集（感知层，见 docs/proactive-multimodal.md §4.2）。
+  // **只采集不上报**：渲染层拿到后自己 POST 给后端——主进程不直连后端。
+  // 采集失败一律降级为「拿不到」（返回空字段），绝不抛错。
+  ipcMain.handle(PET_CHANNELS.getDesktopContext, (_event, force: unknown) =>
+    collectDesktopContext(force === true),
+  );
+
   ipcMain.handle(PET_CHANNELS.setClickThrough, (_event, value: unknown) =>
     commitSettings({ clickThrough: requireBoolean(value, "value") }, deps),
   );
 
   ipcMain.handle(PET_CHANNELS.setControlInteractive, (_event, value: unknown) =>
     setPetWindowControlInteractive(requireBoolean(value, "value")),
+  );
+
+  // 展开 / 收起对话面板：主进程负责加宽窗口（面板不挤压模型）
+  ipcMain.handle(PET_CHANNELS.setChatPanel, (_event, value: unknown) =>
+    setPetWindowChatPanel(requireBoolean(value, "value")),
   );
 
   ipcMain.handle(PET_CHANNELS.updateSettings, (_event, patch: unknown) => {

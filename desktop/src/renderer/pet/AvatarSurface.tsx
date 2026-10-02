@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { resolvePortraitId, type AvatarMotion, type AvatarRenderer } from "@/lib/avatar/avatar-renderer";
+import type { AvatarRendererPreference } from "@/lib/avatar/avatar-config";
 import { resolveAvatarModelSource } from "@/lib/avatar/avatar-model-source";
 import { CUBISM_UNAVAILABLE_REASON, probeCubismCore } from "@/lib/live2d/cubism-core";
 import { createLive2DRenderer } from "@/lib/live2d/live2d-renderer";
@@ -9,6 +10,8 @@ import { resolveEmotionPortrait } from "@/lib/avatar/portrait-assets";
 import { createStaticPortraitRenderer } from "@/lib/avatar/static-portrait-renderer";
 import { useAvatarModels } from "@/hooks/avatar/useAvatarModels";
 import type { EmotionInfo, VisemeFrame } from "@/lib/api/types";
+
+import { resolveStatusText, type PetLoadStage } from "./pet-chrome";
 
 /** SDK 落位探测结果（pending 期间先按静态立绘布局，避免闪一下） */
 type Availability = "pending" | "available" | "missing";
@@ -20,7 +23,15 @@ export interface AvatarSurfaceProps {
   /** 口型时间轴（服务端 TTS 路径提供；null = 停止并闭嘴） */
   lipSync: readonly VisemeFrame[] | null;
   characterLabel: string;
-  /** 渲染状态文本（"正在加载模型…" 等），由外层统一展示 */
+  /**
+   * 渲染方式偏好：`static` = **只画静态立绘**（连 Cubism 都不探测、不加载）。
+   *
+   * 这不是性能优化，而是「用户选什么就用什么」：本组件原先没有这个概念，
+   * 于是「仅静态立绘」照样会去加载 Live2D（用户报的「会自动渲染 live2d」）。
+   * 语义与 Web 端的 `LocalAvatarStage` 保持一致。
+   */
+  renderer?: AvatarRendererPreference;
+  /** 渲染状态文本（“正在加载模型…” 等），由外层统一展示；**就绪后为空串** */
   onStatusChange?: (status: string) => void;
   /**
    * 实际生效的渲染种类。
@@ -49,6 +60,7 @@ export function AvatarSurface({
   motion,
   lipSync,
   characterLabel,
+  renderer = "auto",
   onStatusChange,
   onAvailabilityChange,
 }: AvatarSurfaceProps) {
@@ -58,6 +70,13 @@ export function AvatarSurface({
   const rendererRef = useRef<AvatarRenderer | null>(null);
 
   const [availability, setAvailability] = useState<Availability>("pending");
+  /**
+   * 加载阶段：底部那行字的生死就靠它（规则见 `pet-chrome.ts`）。
+   *
+   * 不能只看 `detail` 有没有值：Live2D 渲染器在**就绪时也会**上报一句文本
+   * （“模型已就绪：N 个参数…”），只看 detail 就会永远挂在底部。
+   */
+  const [stage, setStage] = useState<PetLoadStage>("loading");
   const [detail, setDetail] = useState("");
 
   /*
@@ -68,6 +87,15 @@ export function AvatarSurface({
    */
   const avatarModels = useAvatarModels();
   const source = resolveAvatarModelSource(avatarModels.selected);
+
+  /**
+   * 是否要走 Live2D。
+   *
+   * 用户明确选了「仅静态立绘」时**连探测都不做**：探测本身虽只是 HEAD，
+   * 但它是建 Live2D 渲染器的前置——跳过它才能真正确保「选了立绘就不会加载 Live2D」。
+   * 「选了静态立绘模型」同理：SDK 会把模型盖到上传的立绘上。
+   */
+  const wantsLive2D = renderer !== "static" && source.kind !== "images";
 
   /** 渲染器重建的判据：换模型必须重建（贴图/物理/表情全来自模型包），换构图不用 */
   const modelKey = source.kind === "live2d" ? source.modelUrl : source.kind;
@@ -86,6 +114,16 @@ export function AvatarSurface({
 
   // ① 探测 Cubism Core 是否落位（HEAD 静态资源，不加载 SDK，零副作用）
   useEffect(() => {
+    // 用户选了「仅静态立绘」：不探测也不建渲染器，直接按「没有」处理
+    if (!wantsLive2D) {
+      setAvailability("missing");
+      setDetail("");
+      // 立绘即刻就位：没有加载过程，不该在底部留一行说明（用户自己选的东西不用反复告知）
+      setStage("ready");
+
+      return;
+    }
+
     let cancelled = false;
 
     void probeCubismCore().then((available) => {
@@ -97,13 +135,15 @@ export function AvatarSurface({
 
       if (!available) {
         setDetail(CUBISM_UNAVAILABLE_REASON);
+        // “没装 SDK”不是加载中，也不是加载好了：降级结果得看得见（首次部署最难查的一种）
+        setStage("failed");
       }
     });
 
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [wantsLive2D]);
 
   // ② 按探测结果建立渲染器（探测完成前不建，避免白建一个再销毁）
   useEffect(() => {
@@ -111,11 +151,12 @@ export function AvatarSurface({
       return;
     }
 
-    // 选了「静态立绘模型」时不能再挂 Live2D：SDK 会把模型盖到上传的立绘上
+    // 选了「静态立绘模型」或用户选了「仅静态立绘」时不能再挂 Live2D：
+    // 前者 SDK 会把模型盖到上传的立绘上；后者是用户明确要求（见文件顶部的 wantsLive2D）
     const current = sourceRef.current;
-    const wantsLive2D = availability === "available" && current.kind !== "images";
+    const buildLive2D = availability === "available" && current.kind !== "images";
 
-    if (wantsLive2D) {
+    if (buildLive2D) {
       const renderer = createLive2DRenderer({
         stage: stageRef.current,
         canvas: canvasRef.current,
@@ -137,8 +178,16 @@ export function AvatarSurface({
                 layout: current.layout ?? undefined,
               }
             : resolveLive2DModel(),
-        onStageChange: (_stage, text) => setDetail(text),
-        onError: (error) => setDetail(error.message),
+        // 阶段（loading / ready / failed）决定底部那行字的生死：
+        // ready 时渲染器也会给一句诊断文本，但那句不该留在界面上
+        onStageChange: (next, text) => {
+          setStage(next === "loading" || next === "idle" ? "loading" : next);
+          setDetail(text);
+        },
+        onError: (error) => {
+          setDetail(error.message);
+          setStage("failed");
+        },
       });
 
       rendererRef.current = renderer;
@@ -153,7 +202,10 @@ export function AvatarSurface({
     const renderer = createStaticPortraitRenderer({
       stage: stageRef.current,
       image: imageRef.current,
-      onImageLoadError: (payload) => setDetail(`立绘加载失败：${payload.expression.url ?? ""}`),
+      onImageLoadError: (payload) => {
+        setDetail(`立绘加载失败：${payload.expression.url ?? ""}`);
+        setStage("failed");
+      },
     });
 
     rendererRef.current = renderer;
@@ -200,20 +252,12 @@ export function AvatarSurface({
 
   // ⑥ 状态文本上报（外层用气泡或角标展示）
   useEffect(() => {
-    if (availability === "pending") {
-      onStatusChangeRef.current?.("正在检测渲染环境…");
+    onStatusChangeRef.current?.(resolveStatusText(stage, detail));
+  }, [stage, detail]);
 
-      return;
-    }
-
-    if (availability === "missing") {
-      onStatusChangeRef.current?.("未安装 Cubism SDK，当前使用占位立绘");
-
-      return;
-    }
-
-    onStatusChangeRef.current?.(detail ? `正在加载 Live2D 模型：${detail}` : "");
-  }, [availability, detail]);
+  // ⑦ 卸载（如凭证到达后切到魔珐 3D）时清掉状态文字：
+  //    否则本组件消失后，上一套渲染器的「正在加载模型…」会**永远**留在底部状态区。
+  useEffect(() => () => onStatusChangeRef.current?.(""), []);
 
   return (
     <div

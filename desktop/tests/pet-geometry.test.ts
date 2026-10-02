@@ -66,14 +66,14 @@ describe("clampBoundsToWorkArea", () => {
 
 describe("scalePetSize", () => {
   it("按比例缩放并取整", () => {
-    expect(scalePetSize(PET_BASE_SIZE, 0.7, WORK_AREA)).toEqual({ width: 266, height: 336 });
+    expect(scalePetSize(PET_BASE_SIZE, 0.7, WORK_AREA)).toEqual({ width: 196, height: 336 });
   });
 
   it("放大到超过工作区时等比退化为放得下的最大尺寸", () => {
     const smallArea: Rect = { x: 0, y: 0, width: 300, height: 400 };
 
-    // 宽高必须保持同一比例（否则角色会被拉伸），因此取更严格的一边：300/380
-    expect(scalePetSize(PET_BASE_SIZE, 1.5, smallArea)).toEqual({ width: 300, height: 379 });
+    // 宽高必须保持同一比例（否则角色会被拉伸），因此取更严格的一边：400/480
+    expect(scalePetSize(PET_BASE_SIZE, 1.5, smallArea)).toEqual({ width: 233, height: 400 });
   });
 
   it("缩放后宽高比与基准尺寸一致", () => {
@@ -140,12 +140,12 @@ describe("applyDragDelta", () => {
 });
 
 describe("resizeBoundsForScale", () => {
-  const current: Rect = { x: 1400, y: 500, width: 380, height: 480 };
+  const current: Rect = { x: 1400, y: 500, width: 280, height: 480 };
 
   it("以底边中点为锚点缩放（桌宠的脚不动）", () => {
     const grown = resizeBoundsForScale(current, WORK_AREA, 1.5);
 
-    expect(grown.width).toBe(570);
+    expect(grown.width).toBe(420);
     expect(grown.height).toBe(720);
     // 底边中点不变
     expect(grown.x + grown.width / 2).toBeCloseTo(current.x + current.width / 2, 0);
@@ -155,12 +155,12 @@ describe("resizeBoundsForScale", () => {
   it("缩小后同样保持底边中点", () => {
     const shrunk = resizeBoundsForScale(current, WORK_AREA, 0.7);
 
-    expect(shrunk.width).toBe(266);
+    expect(shrunk.width).toBe(196);
     expect(shrunk.x + shrunk.width / 2).toBeCloseTo(current.x + current.width / 2, 0);
   });
 
   it("放大后溢出屏幕时仍保留可见区域", () => {
-    const atEdge: Rect = { x: 1800, y: 900, width: 380, height: 480 };
+    const atEdge: Rect = { x: 1800, y: 900, width: 280, height: 480 };
     const grown = resizeBoundsForScale(atEdge, WORK_AREA, 1.5);
 
     expect(grown.x).toBeLessThanOrEqual(WORK_AREA.width - 80);

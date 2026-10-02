@@ -4,6 +4,7 @@ import {
   requireBoolean,
   requireConsoleSettingsPatch,
   requirePoint,
+  requireServiceId,
   requireSettingsPatch,
 } from "../src/main/ipcValidation";
 
@@ -36,6 +37,22 @@ describe("requirePoint", () => {
 
   it("只返回白名单字段（不把多余字段透传下去）", () => {
     expect(requirePoint({ x: 1, y: 2, injected: true })).toEqual({ x: 1, y: 2 });
+  });
+});
+
+describe("requireServiceId", () => {
+  it("接受受管清单里的三个服务", () => {
+    expect(requireServiceId("qdrant")).toBe("qdrant");
+    expect(requireServiceId("backend")).toBe("backend");
+    expect(requireServiceId("frontend")).toBe("frontend");
+  });
+
+  it("清单外的值一律拒绝（渲染层是不可信输入源）", () => {
+    expect(() => requireServiceId("nginx")).toThrow();
+    expect(() => requireServiceId("Frontend")).toThrow();
+    expect(() => requireServiceId("")).toThrow();
+    expect(() => requireServiceId(null)).toThrow();
+    expect(() => requireServiceId(3000)).toThrow();
   });
 });
 

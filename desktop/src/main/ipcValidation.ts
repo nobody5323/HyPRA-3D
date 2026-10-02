@@ -1,5 +1,5 @@
-import type { ConsoleSettings, PetSettings } from "../shared/ipc";
-import { normalizePetSettings, normalizeWebUrl } from "../shared/ipc";
+import type { ConsoleSettings, PetSettings, ServiceId, ServiceSettings } from "../shared/ipc";
+import { normalizePetSettings, normalizeWebUrl, SERVICE_PATH_FIELDS } from "../shared/ipc";
 import type { PetDragPoint } from "../shared/ipc";
 
 /**
@@ -85,6 +85,57 @@ export function requireConsoleSettingsPatch(value: unknown): Partial<ConsoleSett
     }
 
     patch.webUrl = normalized;
+  }
+
+  return patch;
+}
+
+/**
+ * 读取受管服务标识。
+ *
+ * 白名单而不是 `as ServiceId`：渲染层是**不可信输入源**，一个字面量写歪了就会
+ * 在管理器里查到不存在的服务并抛错，不如在边界上直接挡下来。
+ */
+export function requireServiceId(value: unknown): ServiceId {
+  if (value !== "qdrant" && value !== "backend" && value !== "frontend") {
+    throw new TypeError("IPC 参数 id 必须是 qdrant、backend 或 frontend");
+  }
+
+  return value;
+}
+
+/**
+ * 读取服务设置补丁。
+ *
+ * 路径字段只接受字符串（空串 = 清除覆盖，回落到自动探测），
+ * 布尔字段必须是真布尔值：服务设置会被下次启动读回，不能靠隐式转换蒙混过关。
+ */
+export function requireServiceSettingsPatch(value: unknown): Partial<ServiceSettings> {
+  if (!value || typeof value !== "object") {
+    throw new TypeError("IPC 参数 patch 必须是对象");
+  }
+
+  const source = value as Record<string, unknown>;
+  const patch: Partial<ServiceSettings> = {};
+
+  if ("autoStart" in source) {
+    patch.autoStart = requireBoolean(source.autoStart, "autoStart");
+  }
+
+  if ("backendReload" in source) {
+    patch.backendReload = requireBoolean(source.backendReload, "backendReload");
+  }
+
+  for (const field of SERVICE_PATH_FIELDS) {
+    if (field in source) {
+      const raw = source[field];
+
+      if (typeof raw !== "string") {
+        throw new TypeError(`IPC 参数 ${field} 必须是字符串路径`);
+      }
+
+      patch[field] = raw.trim();
+    }
   }
 
   return patch;

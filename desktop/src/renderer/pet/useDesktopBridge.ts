@@ -28,6 +28,7 @@ const INITIAL_STATE: PetWindowState = {
   controlInteractive: false,
   scale: 1,
   alwaysOnTop: true,
+  chatPanelOpen: false,
 };
 
 export function useDesktopBridge(): DesktopBridge {

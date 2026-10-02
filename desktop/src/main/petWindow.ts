@@ -1,7 +1,7 @@
 import { BrowserWindow, screen } from "electron";
 import path from "node:path";
 
-import { DEFAULT_PET_SETTINGS, type PetDragPoint, type PetSettings, type PetStateListener, type PetWindowState } from "../shared/ipc";
+import { DEFAULT_PET_SETTINGS, PET_CHAT_PANEL_BASE_WIDTH, type PetDragPoint, type PetSettings, type PetStateListener, type PetWindowState } from "../shared/ipc";
 import {
   applyDragDelta,
   clampBoundsToWorkArea,
@@ -10,6 +10,7 @@ import {
   scalePetSize,
   PET_BASE_SIZE,
   type Rect,
+  type Size,
 } from "./petGeometry";
 import { loadPetWindowPosition, savePetWindowPosition } from "./petPositionStore";
 import { hardenWindowNavigation } from "./windowSecurity";
@@ -26,6 +27,14 @@ let pageOrigin = "";
 
 /** 穿透模式下的临时解锁态（不持久化） */
 let controlInteractive = false;
+
+/**
+ * 对话面板是否展开（**不持久化**：它只是临时的界面状态）。
+ *
+ * 展开时窗口向右加宽 `PET_CHAT_PANEL_BASE_WIDTH`，面板占新多出来的那一栏；
+ * 模型区由 CSS 锁在左侧原宽度，所以模型不移动也不缩放。
+ */
+let chatPanelOpen = false;
 
 const stateListeners = new Set<PetStateListener>();
 
@@ -73,6 +82,29 @@ function windowRect(window: BrowserWindow): Rect {
 
 function workAreaFor(rect: Rect): Rect {
   return screen.getDisplayMatching(rect).workArea;
+}
+
+/**
+ * 窗口的**理论**尺寸（`PET_BASE_SIZE × scale`，并受工作区上限约束）。
+ *
+ * ⚠️ 不要把 `window.getBounds()` 读到的尺寸原样写回去。
+ *
+ * 实测（2560×1600 物理 / **150% 缩放** + 透明无边框窗）：Electron 的窗口尺寸会在
+ * **每次移动后 +1 DIP**——当年请求 380×480（当时的基准尺寸），读回就已经是 382×482，
+ * 之后每动一次再 +1。尺寸本身后来收成了 280×480，但漂移的机制与宽度无关。
+ * 沿用读回值就会**每次拖动都变大一点**，而 `scale` 恒为 1.0，所以设置面板一直显示
+ * 「100%」，用户只能看到桌宠在无端膨胀。
+ *
+ * 每次都按理论值重设，漂移就**不累积**（`_local/win-probe-drag.cjs` 实测：
+ * 12 次移动后仍稳定在请求的那个尺寸）。
+ */
+function expectedPetSize(anchor: Rect): Size {
+  // 对话面板展开时，窗口本体在**右侧多出一栏**（模型区宽度不变，见 chatPanelOpen）
+  const base = chatPanelOpen
+    ? { width: PET_BASE_SIZE.width + PET_CHAT_PANEL_BASE_WIDTH, height: PET_BASE_SIZE.height }
+    : PET_BASE_SIZE;
+
+  return scalePetSize(base, settings.scale, workAreaFor(anchor));
 }
 
 /**
@@ -131,6 +163,7 @@ function snapshot(): PetWindowState {
     controlInteractive,
     scale: settings.scale,
     alwaysOnTop: settings.alwaysOnTop,
+    chatPanelOpen,
   };
 }
 
@@ -162,9 +195,18 @@ function recoverWindowIntoWorkArea(): void {
   }
 
   const bounds = windowRect(window);
-  const clamped = clampBoundsToWorkArea(bounds, workAreaFor(bounds));
+  // 写入时用**理论尺寸**：沿用它自己漂移过的值会固化偏差，显示器切换时越拉越大
+  const clamped = clampBoundsToWorkArea(
+    { ...bounds, ...expectedPetSize(bounds) },
+    workAreaFor(bounds),
+  );
 
-  if (clamped.x !== bounds.x || clamped.y !== bounds.y) {
+  if (
+    clamped.x !== bounds.x ||
+    clamped.y !== bounds.y ||
+    clamped.width !== bounds.width ||
+    clamped.height !== bounds.height
+  ) {
     window.setBounds(clamped, false);
     void savePetWindowPosition({ x: clamped.x, y: clamped.y }).catch(() => undefined);
   }
@@ -320,6 +362,38 @@ export function setPetWindowClickThrough(value: boolean): PetWindowState {
   return emitStateChanged();
 }
 
+/**
+ * 展开 / 收起对话面板：**向右加宽**窗口（左边缘与顶边不动）。
+ *
+ * 为什么是加宽而不是在原窗口里挤一块：挤出来的面板会把模型压小、或把它推到一边，
+ * 看起来就是「模型被压缩了」。加宽之后模型区仍是原来的宽度、并被 CSS 锁在左侧，
+ * 于是模型**位置与大小都不变**，只是旁边多出一栏。
+ *
+ * 尺寸照旧用 `expectedPetSize` 重算——不能沿用读回值（见那里的高 DPI 漂移）。
+ */
+export function setPetWindowChatPanel(open: boolean): PetWindowState {
+  const window = alivePetWindow();
+
+  if (!window || chatPanelOpen === open) {
+    return snapshot();
+  }
+
+  chatPanelOpen = open;
+
+  const bounds = windowRect(window);
+
+  // 保持左边缘与顶边不动：模型区在窗口左侧，因此它在屏幕上的位置完全不变。
+  // 夹进工作区是必要的：桌宠默认停在右下角，加宽后可能顶出屏幕。
+  const next = clampBoundsToWorkArea(
+    { x: bounds.x, y: bounds.y, ...expectedPetSize(bounds) },
+    workAreaFor(bounds),
+  );
+
+  window.setBounds(next, false);
+
+  return emitStateChanged();
+}
+
 /** 上报光标是否位于角色区域（穿透模式下临时恢复可点击，用于点击「解锁」） */
 export function setPetWindowControlInteractive(value: boolean): PetWindowState {
   if (!alivePetWindow()) {
@@ -357,9 +431,9 @@ export function movePetWindowDrag(point: PetDragPoint): void {
   }
 
   const next = applyDragDelta(dragStart.origin, dragStart.pointer, currentPointer(point));
-  const bounds = windowRect(window);
 
-  window.setBounds({ ...next, width: bounds.width, height: bounds.height }, false);
+  // 尺寸用**理论值**而不是当前 bounds：后者会累积高 DPI 下的 +1 漂移（见 expectedPetSize）
+  window.setBounds({ ...next, ...expectedPetSize({ ...next, width: 1, height: 1 }) }, false);
 }
 
 /** 结束拖拽：夹进工作区并保存位置 */
@@ -375,9 +449,18 @@ export async function endPetWindowDrag(): Promise<void> {
   dragStart = null;
 
   const bounds = windowRect(window);
-  const clamped = clampBoundsToWorkArea(bounds, workAreaFor(bounds));
+  // 与拖动中同一理由：落盘前把尺寸纠正回理论值，避免把漂移过的尺寸固化
+  const clamped = clampBoundsToWorkArea(
+    { ...bounds, ...expectedPetSize(bounds) },
+    workAreaFor(bounds),
+  );
 
-  if (clamped.x !== bounds.x || clamped.y !== bounds.y) {
+  if (
+    clamped.x !== bounds.x ||
+    clamped.y !== bounds.y ||
+    clamped.width !== bounds.width ||
+    clamped.height !== bounds.height
+  ) {
     window.setBounds(clamped, false);
   }
 

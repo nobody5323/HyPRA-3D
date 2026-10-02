@@ -45,10 +45,19 @@ export function useConsoleBridge(): ConsoleBridgeState {
     });
     const unsubscribeSettings = bridge.onSettingsChanged(setSettings);
 
+    /*
+     * 服务状态有独立的推送通道：它变化大多发生在请求之外（启动就绪、进程意外退出），
+     * 主进程只能主动推。这里合并回 state，保证界面读的还是同一个快照对象。
+     */
+    const unsubscribeServices = bridge.onServicesChanged((nextServices) => {
+      setState((previous) => (previous ? { ...previous, services: nextServices } : previous));
+    });
+
     return () => {
       active = false;
       unsubscribeState();
       unsubscribeSettings();
+      unsubscribeServices();
     };
   }, [bridge]);
 

@@ -5,7 +5,8 @@
  * 1. 整页必须完全透明（窗口本身是 transparent），只有角色与控件可见；
  * 2. 所有尺寸/字号都乘 `--pet-scale`（由 App 按主进程的缩放设置注入）——
  *    窗口尺寸由主进程按同一比例调整，两边必须等比，否则布局会错位；
- * 3. 布局用绝对定位而不是文档流：窗口只有 380×480（缩放前），
+ * 3. 布局用绝对定位而不是文档流：窗口只有 280×480（缩放前，见 petGeometry 的
+ *    PET_BASE_SIZE——宽度已贴着角色收紧，高度则由角色区 + 上下留白决定），
  *    任何一个元素长高都会把角色挤出可视区。
  */
 
@@ -32,6 +33,40 @@ body {
   width: 100%;
   height: 100%;
   --mood-color: #e0a24e;
+  /*
+   * 层级（从小到大：角色区 < 气泡 < 底部状态条 < 面板 < 菜单）。
+   *
+   * **必须显式声明，不能靠 DOM 顺序**：魔珐 SDK 会给它创建的 canvas 带自己的
+   * z-index，而「谁盖住谁」是产品行为，不该由第三方决定。
+   * `.petStage` 的 z-index 非 auto，因此它成为一个**层叠上下文**——
+   * SDk canvas 的 z-index 再高也只在角色区内部排序，跑不出来。
+   * 同理 `.petBody` 与 `.petXmov` 也各自建一层，把 canvas 锁在角色内部。
+   */
+  --pet-z-stage: 0;
+  --pet-z-avatar: 1;
+  --pet-z-bubble: 2;
+  --pet-z-dock: 3;
+  --pet-z-panel: 4;
+  --pet-z-menu-backdrop: 5;
+  --pet-z-menu: 6;
+  /*
+   * 对话面板栏宽（**基准值，必须与 shared/ipc.ts 的 PET_CHAT_PANEL_BASE_WIDTH 一致**）。
+   *
+   * 面板不是在原窗口里挤出来的一块——那样会把模型压小、或把它推到一边（试过，很怪）。
+   * 正确做法：主进程把窗口**向右加宽**这一栏，面板占新加出来的空间，
+   * 模型区则由下面的 `[data-chat-open]` 规则锁在**左侧原来的宽度**，
+   * 所以模型的位置与大小一点不变。
+   */
+  --pet-chat-panel-width: 190px;
+  --pet-chat-inset: 8px;
+  /*
+   * 角色区上下留白（气泡 / 底部状态条的让位）。
+   *
+   * 抽成变量是因为还有**第二处**要用它：魔珐 3D 生效时 `.petBody` 从
+   * 「200×200 的圆」变成「撑满整个内容区」，两处各自硬编码同一个数字迟早漂移。
+   */
+  --pet-stage-top: 56px;
+  --pet-stage-bottom: 52px;
 }
 
 .petShell[data-click-through="true"] {
@@ -44,10 +79,12 @@ body {
 .petStage {
   position: absolute;
   inset: 0;
+  /* 非 auto 的 z-index → 层叠上下文：把 SDK canvas 锁在角色区这一层 */
+  z-index: var(--pet-z-stage);
   display: grid;
   place-items: center;
-  padding-top: calc(var(--pet-scale, 1) * 56px);
-  padding-bottom: calc(var(--pet-scale, 1) * 52px);
+  padding-top: calc(var(--pet-scale, 1) * var(--pet-stage-top));
+  padding-bottom: calc(var(--pet-scale, 1) * var(--pet-stage-bottom));
   cursor: grab;
   touch-action: none;
 }
@@ -56,6 +93,14 @@ body {
   cursor: grabbing;
 }
 
+/*
+ * 情绪光晕（占位形象背后的氛围底，真模型生效时由下面的规则隐藏）。
+ *
+ * 尺寸比角色本体（200×200）大一圈是刻意的。注意它的**可见半径只有约 103px**
+ * （直径 206）：渐变在半径的 62% 处就完全透明，再往外只有 16px 的模糊，
+ * 所以即便窗口宽度收到 280，边缘也不会被裁出硬边。
+ * 再往下收窗口宽度前，请一并核对这个数。
+ */
 .petGlow {
   position: absolute;
   width: calc(var(--pet-scale, 1) * 280px);
@@ -69,6 +114,8 @@ body {
 
 .petBody {
   position: relative;
+  /* 非 auto → 层叠上下文（锁住内部 canvas），同时压在光晕之上 */
+  z-index: var(--pet-z-avatar);
   width: calc(var(--pet-scale, 1) * 200px);
   height: calc(var(--pet-scale, 1) * 200px);
   border-radius: 50%;
@@ -112,6 +159,75 @@ body {
   display: none;
 }
 
+/* ---------- 魔珐 3D（xmov）---------- */
+
+/*
+ * 3D 生效时：热区 = 整个内容区，而不是 200×200 的圆。
+ *
+ * 竖屏容器（9:16）高约 372px，圆底座装不下；热区比角色小又会出现
+ * 「鼠标明明在人物身上，解锁按钮却不出来」。
+ * 代价是容器内的透明区也算热区——这是**已知取舍**：比「整窗都算热区」精确，
+ * 又不必按像素抠出人形轮廓。
+ */
+.petShell[data-avatar="xmov"] .petBody,
+.petShell[data-avatar="xmov"] .petStageDragging .petBody {
+  position: absolute;
+  top: calc(var(--pet-scale, 1) * var(--pet-stage-top));
+  bottom: calc(var(--pet-scale, 1) * var(--pet-stage-bottom));
+  left: 0;
+  right: 0;
+  width: auto;
+  height: auto;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+  /* 同 Live2D：不能裁，竖屏容器会顶到上下边界 */
+  overflow: visible;
+}
+
+.petShell[data-avatar="xmov"] .petGlow {
+  display: none;
+}
+
+/*
+ * 魔珐渲染面（`.petXmov` 是定位盒子，`.petXmovStage` 是 SDK 真正挂载的那块）。
+ *
+ * ⚠️ 容器必须**始终存在于 DOM 且有非零尺寸**：SDK 在 init 时读容器宽高，
+ * 读到 0 就初始化失败。所以未激活时它也在——只是个空盒子，
+ * 由本地渲染层（Live2D / 立绘）叠在上面显示。
+ */
+.petXmov {
+  position: absolute;
+  inset: 0;
+  /* 非 auto → 层叠上下文：SDK canvas 自己的 z-index 不会浮到解锁按钮之上 */
+  z-index: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /*
+   * 指针事件全部让给 `.petBody`：SDK 的 canvas 是一整块矩形，
+   * 而数字人四周是透明的——若由它接事件，「鼠标进入角色区域」会在整块
+   * 透明矩形上恒为真，穿透模式下的解锁入口就常显了。
+   */
+  pointer-events: none;
+}
+
+/*
+ * 竖屏 9:16 —— 比例必须与**魔珐控制台创建应用时**选定的应用类型一致，
+ * 否则人物会被拉伸 / 跑偏（实测：同一个 appId 换比例就会变形）。
+ * 高度撑满内容区，宽度按比例算，水平居中。
+ */
+.petXmovStage {
+  height: 100%;
+  aspect-ratio: 9 / 16;
+}
+
+.petXmovStage canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
 /* ---------- 形象渲染（Live2D / 立绘，两种模式共用一块区域） ---------- */
 
 .petAvatar {
@@ -145,6 +261,8 @@ body {
 
 .petBubble {
   position: absolute;
+  /* 高于 `.petBody`：字幕气泡不能被模型盖住 */
+  z-index: var(--pet-z-bubble);
   top: calc(var(--pet-scale, 1) * 10px);
   left: calc(var(--pet-scale, 1) * 12px);
   right: calc(var(--pet-scale, 1) * 12px);
@@ -168,6 +286,8 @@ body {
 
 .petUnlock {
   position: absolute;
+  /* 压在 `.petXmov`（z-index: 0）之上，3D 生效时也看得见、点得到 */
+  z-index: 1;
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
@@ -188,6 +308,7 @@ body {
 
 .petDock {
   position: absolute;
+  z-index: var(--pet-z-dock);
   left: calc(var(--pet-scale, 1) * 8px);
   right: calc(var(--pet-scale, 1) * 8px);
   bottom: calc(var(--pet-scale, 1) * 8px);
@@ -219,15 +340,28 @@ body {
   background: color-mix(in srgb, var(--mood-color) 30%, rgba(253, 248, 241, 0.9));
 }
 
+/*
+ * 工具条默认**完全隐藏**，只在指针位于桌宠（角色本体或工具条本身）上、
+ * 或用户正在用某个浮层时出现（`.petShell[data-controls="show"]`）：
+ * 380×480 的窗口里常挂三个按钮会一直在桌宠身下晃（窗口现已收到 280×480，
+ * 更挂不住——见 petGeometry 的 PET_BASE_SIZE）。
+ *
+ * 用 `visibility` 而不是 `display: none`：两者都能隐藏，但 `display: none`
+ * 会把 `.petDock` 的高度抽掉——指针刚从角色移到工具条上，容器就缩了，
+ * dock 的 `:hover` 随之失效，于是刚冒出来的按钮又消失（闪一下、点不到）。
+ * `visibility: hidden` 仍占位，`.petDock` 的命中区域稳定。
+ */
 .petToolbar {
   display: flex;
   gap: calc(var(--pet-scale, 1) * 6px);
-  opacity: 0.62;
-  transition: opacity 0.18s ease;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.18s ease, visibility 0.18s ease;
 }
 
-.petToolbar:hover {
+.petShell[data-controls="show"] .petToolbar {
   opacity: 1;
+  visibility: visible;
 }
 
 .petToolbar button,
@@ -255,14 +389,89 @@ body {
   cursor: not-allowed;
 }
 
+/*
+ * 语音输入按钮（图标）。
+ *
+ * 覆盖 `.petChatForm button` 的横向内边距：那个值是给「发送 / 打断」这类
+ * 带文字的按钮留的，用在纯图标按钮上会让它变成一个宽扁的空壳，
+ * 而面板只有 190px 宽——输入框会被挤没。
+ */
+.petMic {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: calc(var(--pet-scale, 1) * 4px) calc(var(--pet-scale, 1) * 8px);
+  line-height: 0;
+}
+
+/* 录音中：换成告警色，让「正在录」一眼可见（否则用户不知道麦克风开着） */
+.petMicRecording {
+  background: rgba(214, 122, 96, 0.92) !important;
+  border-color: rgba(214, 122, 96, 1) !important;
+  color: #fff !important;
+}
+
+/* 识别中：三点跳动，与对话区的「……正在想」同一套视觉语言 */
+.petMicDots {
+  display: inline-flex;
+  gap: calc(var(--pet-scale, 1) * 3px);
+}
+
+.petMicDots span {
+  width: calc(var(--pet-scale, 1) * 3px);
+  height: calc(var(--pet-scale, 1) * 3px);
+  border-radius: 999px;
+  background: currentColor;
+  animation: petMicDot 1.2s ease-in-out infinite;
+}
+
+.petMicDots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.petMicDots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+@keyframes petMicDot {
+  0%,
+  100% {
+    opacity: 0.3;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* 录音中的停止标记（方块比红点更明确地表示「按这里结束」） */
+.petMicStop {
+  width: calc(var(--pet-scale, 1) * 9px);
+  height: calc(var(--pet-scale, 1) * 9px);
+  border-radius: calc(var(--pet-scale, 1) * 2px);
+  background: currentColor;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .petMicDots span {
+    animation: none;
+  }
+}
+
 /* ---------- 对话面板 ---------- */
 
 .petChat {
   position: absolute;
-  left: calc(var(--pet-scale, 1) * 8px);
-  right: calc(var(--pet-scale, 1) * 8px);
+  z-index: var(--pet-z-panel);
+  /*
+   * 面板栏（原先是从 top:34 铺到 bottom、左右各 8px 的**全宽**面板，必然压住模型）。
+   * 换到左侧：把下面的 left/right 对调，并同步 [data-chat-open] 的锁定规则即可。
+   */
+  left: auto;
+  right: calc(var(--pet-scale, 1) * var(--pet-chat-inset));
+  /* 面板栏总宽减去两侧内边距 */
+  width: calc(var(--pet-scale, 1) * (var(--pet-chat-panel-width) - var(--pet-chat-inset) * 2));
   top: calc(var(--pet-scale, 1) * 34px);
-  bottom: calc(var(--pet-scale, 1) * 8px);
+  bottom: calc(var(--pet-scale, 1) * var(--pet-chat-inset));
   display: flex;
   flex-direction: column;
   gap: calc(var(--pet-scale, 1) * 6px);
@@ -270,6 +479,19 @@ body {
   border-radius: calc(var(--pet-scale, 1) * 14px);
   background: rgba(253, 248, 241, 0.97);
   box-shadow: 0 12px 30px rgba(93, 74, 52, 0.22);
+}
+
+/*
+ * 对话面板打开时：窗口已被主进程**向右加宽**（多出 `--pet-chat-panel-width` 一栏），
+ * 这里把模型区锁回**左侧原来的宽度**——模型不移动、不缩放，只是旁边多出一栏。
+ *
+ * `.petStage` 是 `inset: 0`，收 `right` 即可。3D 模式下 `.petBody` 虽是绝对定位，
+ * 但以 `.petStage` 为基准，因此跟着一起收窄；气泡在 `.petStage` 内部，同样自动跟随
+ * ——所以这里**不需要**再为它们各写一条规则。
+ */
+.petShell[data-chat-open="true"] .petStage,
+.petShell[data-chat-open="true"] .petDock {
+  right: calc(var(--pet-scale, 1) * var(--pet-chat-panel-width));
 }
 
 .petChatHeader,
@@ -350,6 +572,7 @@ body {
 
 .petPanel {
   position: absolute;
+  z-index: var(--pet-z-panel);
   left: calc(var(--pet-scale, 1) * 8px);
   right: calc(var(--pet-scale, 1) * 8px);
   top: calc(var(--pet-scale, 1) * 8px);
@@ -381,6 +604,40 @@ body {
 .petField input[type="range"] {
   width: 100%;
   accent-color: #b99a6d;
+}
+
+/* 文本 / 密码 / 下拉：与聊天输入框同一套外观 */
+.petField input[type="text"],
+.petField input[type="password"],
+.petField select {
+  width: 100%;
+  padding: calc(var(--pet-scale, 1) * 5px) calc(var(--pet-scale, 1) * 8px);
+  border: 1px solid #d9cbb6;
+  border-radius: calc(var(--pet-scale, 1) * 8px);
+  background: #fffdf9;
+  font: inherit;
+  color: inherit;
+}
+
+.petFieldRow {
+  display: flex;
+  gap: calc(var(--pet-scale, 1) * 6px);
+}
+
+.petFieldRow button {
+  flex: 1;
+  padding: calc(var(--pet-scale, 1) * 5px) calc(var(--pet-scale, 1) * 8px);
+  border: 1px solid #d9cbb6;
+  border-radius: calc(var(--pet-scale, 1) * 8px);
+  background: #fffdf9;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+}
+
+.petFieldRow button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .petHint {
@@ -435,11 +692,14 @@ kbd {
 .petMenuBackdrop {
   position: absolute;
   inset: 0;
+  z-index: var(--pet-z-menu-backdrop);
 }
 
 .petMenu {
   position: absolute;
-  min-width: calc(var(--pet-scale, 1) * 168px);
+  /* 菜单本体在它自己的遮罩之上 */
+  z-index: var(--pet-z-menu);
+  min-width: calc(var(--pet-scale, 1) * 188px);
   padding: calc(var(--pet-scale, 1) * 4px);
   border-radius: calc(var(--pet-scale, 1) * 10px);
   background: rgba(253, 248, 241, 0.98);
@@ -474,6 +734,25 @@ kbd {
 .petMenuCheck {
   width: 1em;
   color: #96703a;
+}
+
+/*
+  标签与补充说明。
+  `hint` 用在「交互模式」这类**光看名字不知道后果**的项上（酒馆世界书召不召回），
+  所以它必须比标签更轻：字号更小、颜色更淡，不能抢主标签的视线。
+*/
+.petMenuLabel {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 1px);
+  min-width: 0;
+}
+
+.petMenuHint {
+  color: #a2957f;
+  font-size: calc(var(--pet-scale, 1) * 9.5px);
+  line-height: 1.35;
 }
 
 .petMenuSeparator {
@@ -534,4 +813,95 @@ kbd {
   .petGlow {
     transition: none;
   }
+}
+
+/* ---------- 角色与会话（设置面板里的桌宠自有入口） ---------- */
+
+/*
+ * 列表自己滚：设置面板（.petPanelBody）本来就整体可滚，但会话可能有几十段，
+ * 不限高会把下面的形象 / 凭证设置推到几屏之外。
+ */
+.petSessionList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 4px);
+  max-height: calc(var(--pet-scale, 1) * 140px);
+  overflow-y: auto;
+}
+
+.petSessionItem {
+  display: flex;
+  align-items: stretch;
+  gap: calc(var(--pet-scale, 1) * 4px);
+  padding: calc(var(--pet-scale, 1) * 4px) calc(var(--pet-scale, 1) * 6px);
+  border: 1px solid #e4d9c7;
+  border-radius: calc(var(--pet-scale, 1) * 8px);
+  background: #fffdf9;
+}
+
+/* 当前会话：与 Web 端的「当前」标记同一种视觉语言（换底色 + 深边框） */
+.petSessionItem[data-current="true"] {
+  border-color: #b99a6d;
+  background: #f7efe2;
+}
+
+.petSessionOpen {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: calc(var(--pet-scale, 1) * 2px);
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.petSessionOpen:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.petSessionTitle {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.petSessionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: calc(var(--pet-scale, 1) * 8px);
+  color: #8a7a62;
+  font-size: 0.92em;
+}
+
+.petSessionDelete {
+  align-self: center;
+  padding: calc(var(--pet-scale, 1) * 3px) calc(var(--pet-scale, 1) * 6px);
+  border: 1px solid #d9cbb6;
+  border-radius: calc(var(--pet-scale, 1) * 6px);
+  background: #fffdf9;
+  color: #8a7a62;
+  font: inherit;
+  cursor: pointer;
+}
+
+.petSessionDelete:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+/* 不可恢复的操作（确认删除 / 确认清空）：只用在二次确认那一下 */
+.petFieldRow button.petSessionDanger,
+.petSessionDelete.petSessionDanger {
+  border-color: #c4706a;
+  background: #c4706a;
+  color: #fff;
 }

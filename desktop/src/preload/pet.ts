@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  DesktopContextSnapshot,
   PetBridge,
   PetChannel,
   PetChannelName,
@@ -25,6 +26,7 @@ const CHANNELS: Record<PetChannelName, PetChannel> = {
   stateChanged: "pet:state-changed",
   setClickThrough: "pet:set-click-through",
   setControlInteractive: "pet:set-control-interactive",
+  setChatPanel: "pet:set-chat-panel",
   startDrag: "pet:start-drag",
   moveDrag: "pet:move-drag",
   endDrag: "pet:end-drag",
@@ -34,6 +36,7 @@ const CHANNELS: Record<PetChannelName, PetChannel> = {
   updateSettings: "pet:update-settings",
   settingsChanged: "pet:settings-changed",
   getEnvironment: "pet:get-environment",
+  getDesktopContext: "pet:get-desktop-context",
 };
 
 /**
@@ -50,6 +53,9 @@ const bridge: PetBridge = {
 
   setControlInteractive: (value: boolean) =>
     ipcRenderer.invoke(CHANNELS.setControlInteractive, value) as Promise<PetWindowState>,
+
+  setChatPanel: (open: boolean) =>
+    ipcRenderer.invoke(CHANNELS.setChatPanel, open) as Promise<PetWindowState>,
 
   startDrag: (point: PetDragPoint) => {
     ipcRenderer.send(CHANNELS.startDrag, point);
@@ -101,6 +107,12 @@ const bridge: PetBridge = {
   },
 
   getEnvironment: () => ipcRenderer.invoke(CHANNELS.getEnvironment) as Promise<PetEnvironment>,
+
+  getDesktopContext: (force = false) =>
+    ipcRenderer.invoke(
+      CHANNELS.getDesktopContext,
+      force,
+    ) as Promise<DesktopContextSnapshot>,
 };
 
 contextBridge.exposeInMainWorld("hyprPet", bridge);
