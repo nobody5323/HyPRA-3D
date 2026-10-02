@@ -31,8 +31,10 @@ SKILL_FILENAME = "SKILL.md"
 #: frontmatter 分隔符
 _FENCE = "---"
 
-#: 接受为「单文件技能」的扩展名（用户不一定愿意为一条说明建目录）
-_SINGLE_FILE_SUFFIXES = frozenset({".md", ".markdown"})
+#: 接受为「单文件技能」的扩展名（用户不一定愿意为一条说明建目录）。
+#: 公开而非私有：删除（`writer.delete_skill`）必须认出**同一个**集合，
+#: 否则会出现「装载器认它、删除说它不是技能」这种自相矛盾。
+SINGLE_FILE_SUFFIXES = frozenset({".md", ".markdown"})
 
 
 def split_frontmatter(text: str) -> tuple[dict, str]:
@@ -110,7 +112,7 @@ def scan_skills(directory: str | Path, *, source: str) -> list[Skill]:
                 skill = load_skill(candidate, source=source, default_id=child.name)
                 if skill is not None:
                     found.append(skill)
-        elif child.suffix.lower() in _SINGLE_FILE_SUFFIXES:
+        elif child.suffix.lower() in SINGLE_FILE_SUFFIXES:
             skill = load_skill(child, source=source, default_id=child.stem)
             if skill is not None:
                 found.append(skill)
