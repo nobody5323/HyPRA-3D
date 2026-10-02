@@ -66,6 +66,9 @@ class _BrokenWarmStore(WarmMemoryStore):
     def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
         raise RuntimeError("模拟 Qdrant 连接失败")
 
+    def clear_scope(self, companion_id):  # pragma: no cover - 不使用
+        raise RuntimeError("模拟 Qdrant 连接失败")
+
 
 # ---------- 召回聚合 ----------
 
@@ -167,6 +170,9 @@ class _SpyWarmStore(WarmMemoryStore):
 
     def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
         return []
+
+    def clear_scope(self, companion_id):  # pragma: no cover - 不使用
+        return 0
 
 
 def test_recall_uses_candidate_pool_without_pre_decay(cold) -> None:

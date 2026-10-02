@@ -6,7 +6,9 @@
 - url=... (+ api_key)     远程服务（评审用 docker 内网 / 开发用云 Qdrant）
 
 实现要点：
-- collection 隔离：每个陪伴对象一个 memory_{companion_id}（参照⑧）；
+- collection 隔离：每个陪伴对象一个 memory_{scope}（参照⑧）；
+  scope 先经 app/memory/naming.py 规范化——Qdrant collection 名
+  **不接受冒号**（AGENTS.md §8.2 的 scope 键含冒号，实测返回 422）；
 - 时间衰减：Qdrant 只负责相似度召回，应用层再用 combined_score 重排
   （保持 decay 逻辑单一来源，且支持时间衰减参数调节）；
 - id 约束：Qdrant 要求 point id 为 UUID 或整数，故 memory_id 用 uuid4().hex。
@@ -17,6 +19,7 @@ from datetime import datetime
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from app.memory.naming import normalize_scope_id
 from app.memory.warm.base import (
     CANDIDATE_FACTOR,
     MemoryRecord,
@@ -64,7 +67,8 @@ class QdrantWarmStore(WarmMemoryStore):
         return self._provider
 
     def _collection_name(self, companion_id: str) -> str:
-        return f"{COLLECTION_PREFIX}{companion_id}"
+        """collection 名：前缀 + 规范化作用域 id（冒号等非法字符会被 Qdrant 拒绝）。"""
+        return f"{COLLECTION_PREFIX}{normalize_scope_id(companion_id)}"
 
     def _ensure_collection(self, companion_id: str) -> str:
         """collection 不存在则创建（按当前 embedding 维度、余弦距离）。"""
@@ -190,6 +194,21 @@ class QdrantWarmStore(WarmMemoryStore):
         if not self._client.collection_exists(name):
             return 0
         return self._client.count(collection_name=name).count
+
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的整个 collection，返回被删除的条数。
+
+        先 count 再删：`delete_collection` 不返回影响条数，而「清掉了几条」正是
+        用户在那个不可恢复的确认框后最需要看到的反馈。
+
+        不用 `_ensure_collection`（它会建库）：清空一个不存在的库应当直接返回 0。
+        """
+        name = self._collection_name(companion_id)
+        if not self._client.collection_exists(name):
+            return 0
+        removed = self._client.count(collection_name=name).count
+        self._client.delete_collection(collection_name=name)
+        return int(removed)
 
     def list_records(self, companion_id: str) -> list[MemoryRecord]:
         """滚动拉取全量记录（供构建 BM25 稀疏索引）。

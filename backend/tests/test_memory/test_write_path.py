@@ -93,6 +93,9 @@ def test_remember_turn_survives_warm_failure(cold) -> None:
         def purge_expired(self, companion_id, *, ttl_days, now=None):  # pragma: no cover
             return []
 
+        def clear_scope(self, companion_id):  # pragma: no cover - 不使用
+            return 0
+
     store = MemoryStore(cold, _BrokenWarm())
     stats = store.remember_turn("therapist", "我喜欢猫", "…", turn_index=1)
     assert stats["memory"] == 0          # 温层失败

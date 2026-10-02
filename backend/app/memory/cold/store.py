@@ -51,3 +51,10 @@ class ColdMemoryStore(ABC):
     @abstractmethod
     def delete_fact(self, companion_id: str, fact_id: str) -> bool:
         """删除一条事实（误抽取纠正用）。"""
+
+    @abstractmethod
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的**全部**事实（连表一起删），返回被删除的条数。
+
+        没有该表时返回 0，不报错（清空要幂等）。不可恢复，调用方需二次确认。
+        """

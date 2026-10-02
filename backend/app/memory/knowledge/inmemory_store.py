@@ -142,3 +142,9 @@ class InMemoryKnowledgeStore(KnowledgeStore):
 
     def count_chunks(self, companion_id: str) -> int:
         return len(self._chunks_of(companion_id))
+
+    def clear_scope(self, companion_id: str) -> int:
+        """清空该陪伴对象的全部文档与分块，返回被删除的分块数。"""
+        removed = len(self._chunks.pop(companion_id, {}))
+        self._docs.pop(companion_id, None)
+        return removed

@@ -6,7 +6,6 @@
       防止表名注入与 SQL 语法错误。
 """
 
-import hashlib
 import re
 import sqlite3
 import uuid
@@ -19,9 +18,14 @@ from app.memory.cold.models import (
     FactType,
 )
 from app.memory.cold.store import ColdMemoryStore
+from app.memory.naming import normalize_scope_id
+from app.paths import data_path
 
-# 默认库文件位置（backend/data/memory.db）
-_DEFAULT_DB = Path(__file__).resolve().parent.parent.parent.parent / "data" / "memory.db"
+
+def default_db_path() -> Path:
+    """冷层默认库文件位置（可写数据目录）。"""
+    return data_path("data", "memory.db")
+
 
 # 日期时间格式（与 datetime.fromisoformat 兼容的精简格式）
 _TS_FMT = "%Y-%m-%dT%H:%M:%S.%f"
@@ -32,24 +36,8 @@ _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def _table(companion_id: str) -> str:
-    """按陪伴对象生成事实表名（非法字符规范化为下划线）。"""
-    return f"facts_{_normalize(companion_id)}"
-
-
-def _normalize(companion_id: str) -> str:
-    """把 companion_id 规范化为合法且唯一的表名片段。
-
-    无非法字符时直接返回（表名可读）：
-        therapist → therapist
-    含非法字符（如连字符）时追加短哈希，保证不同 id 不碰撞：
-        therapist-elder-sister → therapist_elder_sister_4f2a1c
-        therapist_elder_sister → therapist_elder_sister（与上面不同）
-    """
-    slug = re.sub(r"[^0-9A-Za-z_]", "_", companion_id)
-    if slug == companion_id:
-        return slug
-    digest = hashlib.md5(companion_id.encode("utf-8")).hexdigest()[:6]
-    return f"{slug}_{digest}"
+    """按陪伴对象生成事实表名（非法字符经 normalize_scope_id 规范化）。"""
+    return f"facts_{normalize_scope_id(companion_id)}"
 
 
 def _valid_companion_id(companion_id: str) -> str:
@@ -62,8 +50,9 @@ def _valid_companion_id(companion_id: str) -> str:
 class SqliteColdStore(ColdMemoryStore):
     """基于 SQLite 的冷层存储。非线程安全的连接由每次操作新建保证。"""
 
-    def __init__(self, db_path: str | Path = _DEFAULT_DB) -> None:
-        self._db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        # 缺省值在**调用时**求值：打包形态的数据目录要跟着环境变量走
+        self._db_path = Path(db_path) if db_path is not None else default_db_path()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
     # ---------- 内部工具 ----------
@@ -242,3 +231,26 @@ class SqliteColdStore(ColdMemoryStore):
             )
             affected = cur.rowcount
         return affected > 0
+
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的事实表，返回被删除的条数。
+
+        用 DROP TABLE 而不是 `DELETE FROM`：表名本身就是按作用域命名的，
+        整表丢掉更彻底（也顺手丢掉可能过时的列定义），下次写入时
+        `_ensure_table` 会按当前 schema 重建。
+
+        先查 sqlite_master 再动手：`DROP TABLE IF EXISTS` 不返回影响行数，
+        而「到底删了几条」是要显示给用户的。
+        """
+        companion_id = _valid_companion_id(companion_id)
+        table = _table(companion_id)
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                return 0
+            removed = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DROP TABLE {table}")
+        return int(removed or 0)

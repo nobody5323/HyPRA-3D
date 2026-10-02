@@ -109,6 +109,10 @@ class InMemoryWarmStore(WarmMemoryStore):
         collection = self._collection(companion_id)
         return collection.pop(memory_id, None) is not None
 
+    def clear_scope(self, companion_id: str) -> int:
+        """清空该陪伴对象的全部记忆，返回被删除的条数。"""
+        return len(self._collections.pop(companion_id, {}))
+
     def count(self, companion_id: str) -> int:
         return len(self._collection(companion_id))
 

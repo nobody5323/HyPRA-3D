@@ -17,8 +17,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# 默认库文件（与冷层事实表共用）
-_DEFAULT_DB = Path(__file__).resolve().parent.parent.parent.parent / "data" / "memory.db"
+from app.paths import data_path
+
+
+def default_db_path() -> Path:
+    """情绪日记默认库文件位置（与冷层事实表共用，可写数据目录）。"""
+    return data_path("data", "memory.db")
+
 
 _TS_FMT = "%Y-%m-%dT%H:%M:%S.%f"
 _SAFE_ID = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -55,6 +60,13 @@ class MoodLogStore(ABC):
     def trend(self, companion_id: str, *, days: int = 7) -> dict:
         """统计近 N 天情绪分布：{total, distribution, avg_intensity, dominant}。"""
 
+    @abstractmethod
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的**全部**情绪日记（连表一起删），返回被删除的条数。
+
+        没有该表时返回 0，不报错。不可恢复，调用方需二次确认。
+        """
+
 
 def _normalize(companion_id: str) -> str:
     """表名安全规范化（与冷层事实表策略一致）。"""
@@ -78,8 +90,9 @@ def _table(companion_id: str) -> str:
 class SqliteMoodLogStore(MoodLogStore):
     """SQLite 实现（与冷层共用库文件）。"""
 
-    def __init__(self, db_path: str | Path = _DEFAULT_DB) -> None:
-        self._db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        # 缺省值在**调用时**求值：打包形态的数据目录要跟着环境变量走
+        self._db_path = Path(db_path) if db_path is not None else default_db_path()
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
 
     def _connect(self) -> sqlite3.Connection:
@@ -181,3 +194,18 @@ class SqliteMoodLogStore(MoodLogStore):
             "avg_intensity": avg_intensity,
             "dominant": dominant,
         }
+
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的情绪日记表，返回被删除的条数（同冷层事实表的做法）。"""
+        companion_id = _valid(companion_id)
+        table = _table(companion_id)
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (table,),
+            ).fetchone()
+            if exists is None:
+                return 0
+            removed = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DROP TABLE {table}")
+        return int(removed or 0)

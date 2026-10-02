@@ -115,3 +115,11 @@ class KnowledgeStore(ABC):
     @abstractmethod
     def count_chunks(self, companion_id: str) -> int:
         """该陪伴对象当前的分块总数。"""
+
+    @abstractmethod
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的**全部**文档与分块，返回被删除的分块数。
+
+        用在这里的场景是用户要「彻底忘掉这个角色」（知识是用户自己上传的，
+        删掉不回影响任何人）；没有数据时返回 0，不报错。不可恢复。
+        """

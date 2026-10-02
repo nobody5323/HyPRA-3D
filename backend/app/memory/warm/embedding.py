@@ -15,12 +15,16 @@ vector_threshold）必须按当前 provider 调参，不能套用同一个值。
 import hashlib
 import math
 import re
+import threading
 from abc import ABC, abstractmethod
-from collections import Counter
+from collections import Counter, OrderedDict
 
 from openai import OpenAI
 
 _WS = re.compile(r"\s+")
+
+#: 缓存 provider 的默认容量（条）。见 CachedEmbeddingProvider 的容量取舍说明。
+DEFAULT_CACHE_ENTRIES = 64
 
 
 def _l2_normalize(vector: list[float]) -> list[float]:
@@ -72,6 +76,120 @@ class EmbeddingProvider(ABC):
     @abstractmethod
     def dimension(self) -> int:
         """向量维度。"""
+
+
+class CachedEmbeddingProvider(EmbeddingProvider):
+    """带 LRU 缓存的 embedding 包装（对话链路提速的关键一环）。
+
+    **为什么必须有**：一轮对话会对**同一句用户输入**发起多次编码请求——
+    世界书向量通道 1 次、知识库每个作用域各 1 次、温层情景记忆 1 次。
+    桌宠模式（2 个作用域）合计 4 次，酒馆模式（5 个作用域）最多 7 次，
+    而它们在对话图上是**串行**执行的。远程 embedding（如硅基流动
+    Qwen3-Embedding-8B）单次约 200–500ms，这一项就能白吃掉 1–3 秒，
+    而所有请求的入参是**同一个字符串**。
+
+    **为什么缓存是安全的**：embedding 是纯函数——同一文本 + 同一模型必得同一
+    向量，没有时间或会话相关性。缓存随 provider 一起重建：改 embedding 配置
+    （模型 / 维度 / 端点）时 `get_embedding_provider()` 会重新构造，
+    旧向量不会串味到新向量空间。
+
+    **容量取舍**：单条 4096 维向量在 Python 里约 130KB（list + boxed float），
+    默认 64 条 ≈ 8MB。收益主要来自「同一轮内的重复请求」，64 条绰绰有余；
+    要更大可调 `EMBEDDING_CACHE_SIZE`（构造期读取，改完需重建图/重启）。
+
+    线程安全：对话链路已移到工作线程执行，且后台记忆写入并发进行，
+    故用锁保护缓存。
+    """
+
+    def __init__(
+        self, inner: EmbeddingProvider, *, max_entries: int = DEFAULT_CACHE_ENTRIES
+    ) -> None:
+        self._inner = inner
+        self._max_entries = max(1, int(max_entries))
+        self._cache: OrderedDict[str, list[float]] = OrderedDict()
+        self._lock = threading.Lock()
+        #: 诊断计数（命中率反映「同一轮重复编码」省下了多少次远程请求）
+        self.hits = 0
+        self.misses = 0
+
+    @property
+    def dimension(self) -> int:
+        return self._inner.dimension
+
+    @property
+    def inner(self) -> EmbeddingProvider:
+        """被包装的真实 provider（测试与诊断用）。"""
+        return self._inner
+
+    def __getattr__(self, item: str):
+        """未定义的属性透传给内层 provider（如 `model` / `name` / `base_url`）。
+
+        包装后上层若读不到这些配置属性会静默拿到默认值，排查起来很难。
+        只透传非下划线属性，避免 `__init__` 之前被探测私有属性时递归。
+        """
+        inner = self.__dict__.get("_inner")
+        if inner is None or item.startswith("_"):
+            raise AttributeError(item)
+        return getattr(inner, item)
+
+    def stats(self) -> dict[str, int]:
+        """缓存命中统计（命中率越高，省掉的远程编码请求越多）。"""
+        return {
+            "hits": self.hits,
+            "misses": self.misses,
+            "entries": len(self._cache),
+            "max_entries": self._max_entries,
+        }
+
+    def _lookup(self, text: str) -> list[float] | None:
+        with self._lock:
+            cached = self._cache.get(text)
+            if cached is None:
+                self.misses += 1
+                return None
+            self.hits += 1
+            self._cache.move_to_end(text)
+            return cached
+
+    def _store(self, text: str, vector: list[float]) -> None:
+        with self._lock:
+            self._cache[text] = vector
+            self._cache.move_to_end(text)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+
+    def embed(self, text: str) -> list[float]:
+        cached = self._lookup(text)
+        if cached is not None:
+            return cached
+        vector = self._inner.embed(text)
+        self._store(text, vector)
+        return vector
+
+    def embed_batch(self, texts: list[str]) -> list[list[float]]:
+        """批量编码：命中缓存的直接取回，未命中的**合并为一次请求**。
+
+        同一批内先按文本去重（世界书索引构造时多条条目的语义文本可能相同），
+        再把去重后的未命中项交给内层一次性编码。
+        """
+        if not texts:
+            return []
+
+        resolved: dict[str, list[float]] = {}
+        pending: list[str] = []
+        for text in dict.fromkeys(texts):  # 去重且保序
+            cached = self._lookup(text)
+            if cached is None:
+                pending.append(text)
+            else:
+                resolved[text] = cached
+
+        if pending:
+            for text, vector in zip(pending, self._inner.embed_batch(pending)):
+                resolved[text] = vector
+                self._store(text, vector)
+
+        return [resolved[text] for text in texts]
 
 
 class DeterministicEmbeddingProvider(EmbeddingProvider):

@@ -85,6 +85,16 @@ class WarmMemoryStore(ABC):
         """删除一条记忆，返回是否删除成功。"""
 
     @abstractmethod
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的**全部**记忆，返回被删除的条数。
+
+        用途：用户要「彻底忘掉这个角色」（与删掉单条记忆是两件事）。
+        - 该陪伴对象没有记忆时返回 0，**不报错**（清空一个已经空的库不是错误，
+          调用方也不需要先查一遍）；
+        - 这是**不可恢复**操作，调用方（API 层 / 界面）必须做二次确认。
+        """
+
+    @abstractmethod
     def count(self, companion_id: str) -> int:
         """某陪伴对象当前的记忆条数。"""
 

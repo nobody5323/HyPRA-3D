@@ -13,6 +13,7 @@
 warning 并降级，不阻断对话；稀疏通道不可用时自动退化为纯向量召回。
 """
 
+import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -27,6 +28,8 @@ from app.memory.warm.base import MemoryRecord, SearchResult, WarmMemoryStore
 from app.memory.warm.decay import combined_score
 from app.rag.retrieval.bm25 import BM25Index
 from app.rag.retrieval.hybrid import reciprocal_rank_fusion
+
+logger = logging.getLogger(__name__)
 
 # 默认参数（均可经 config 覆盖）
 DEFAULT_FACT_LIMIT = 5            # 语义记忆召回总条数上限
@@ -307,6 +310,34 @@ class MemoryStore:
         except Exception:  # noqa: BLE001 - 清理失败不影响对话
             pass
 
+    def purge_scope(self, companion_id: str) -> dict[str, int]:
+        """清空该陪伴对象的**全部**记忆（温层 + 冷层事实），返回各层删除计数。
+
+        为什么两层一起清：用户要的是「彻底忘掉这个角色」，只清一层会留下
+        「它还认得我」的残留——半清比不清更难解释。
+
+        个人记忆（知识库）与情绪日记不在本门面持有（分属 KnowledgeStore /
+        MoodLogStore），由 API 层合并计数，见 `DELETE /chat/memory`。
+
+        **必须同时丢掉进程内的稀疏索引缓存**（`_lexical`）：它是按全量记录建出来的
+        BM25 视图，缓存不清的话删完 BM25 仍会命中已删的记忆——
+        现场表现就是「清空了，它还提」。`_last_purge` 同样丢掉，
+        免得上一次清理的节流时间戳影响清空后的下一轮。
+        """
+        counts = {"warm": 0, "facts": 0}
+        try:
+            counts["warm"] = self.warm.clear_scope(companion_id)
+        except Exception as exc:  # noqa: BLE001 - 一层失败不阻断另一层
+            logger.warning("清空温层失败（%s）：%s", companion_id, exc)
+        try:
+            counts["facts"] = self.cold.clear_scope(companion_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("清空冷层事实失败（%s）：%s", companion_id, exc)
+
+        self._lexical.pop(companion_id, None)
+        self._last_purge.pop(companion_id, None)
+        return counts
+
     def purge_expired_memories(self, companion_id: str) -> list[str]:
         """立即清理该陪伴对象中超期未被召回的记忆，返回被删的 memory_id。
 
@@ -327,6 +358,22 @@ class MemoryStore:
                 view.index.remove(memory_id)
                 view.records.pop(memory_id, None)
         return removed
+
+    def ongoing_facts(self, companion_id: str, *, limit: int = 20) -> list[Fact]:
+        """该陪伴对象**进行中**且仍活跃的事实（供主动链路的「记忆到期」触发器用）。
+
+        为什么需要这个公开方法：主动链路要判断「有没有一件事该回头问一句」
+        （「你上次说在准备面试，后来怎么样了？」），而它拿不到冷层的私有查询。
+        让它去 import 冷层存储再自己拼 FactType 过滤，等于把「什么叫进行中事项」
+        这条业务口径复制到第二个地方——两处迟早不一致。
+
+        返回按 `last_seen_at`（没被印证过则用 `created_at`）**升序**：
+        最久没被提起的排在最前，调用方不必再排一次。
+        """
+        facts = self.cold.list_facts(
+            companion_id, type=FactType.ONGOING, limit=limit
+        )
+        return sorted(facts, key=lambda f: f.last_seen_at or f.created_at)
 
     @staticmethod
     def _boost_facts_by_emotion(facts: list[Fact], emotion: str) -> list[Fact]:

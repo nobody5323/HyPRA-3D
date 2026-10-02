@@ -36,6 +36,7 @@ from app.memory.knowledge.base import (
     KnowledgeHit,
     KnowledgeStore,
 )
+from app.memory.naming import normalize_scope_id
 from app.memory.warm.embedding import EmbeddingProvider, create_embedding_provider
 
 #: collection 名前缀
@@ -92,7 +93,7 @@ class QdrantKnowledgeStore(KnowledgeStore):
     # ---------- collection 管理 ----------
 
     def _chunk_collection(self, companion_id: str) -> str:
-        name = f"{CHUNK_PREFIX}{companion_id}"
+        name = f"{CHUNK_PREFIX}{normalize_scope_id(companion_id)}"
         if not self._client.collection_exists(name):
             self._client.create_collection(
                 collection_name=name,
@@ -103,7 +104,7 @@ class QdrantKnowledgeStore(KnowledgeStore):
         return name
 
     def _meta_collection(self, companion_id: str) -> str:
-        name = f"{META_PREFIX}{companion_id}"
+        name = f"{META_PREFIX}{normalize_scope_id(companion_id)}"
         if not self._client.collection_exists(name):
             self._client.create_collection(
                 collection_name=name,
@@ -115,11 +116,11 @@ class QdrantKnowledgeStore(KnowledgeStore):
 
     def _existing_chunk_collection(self, companion_id: str) -> str | None:
         """已存在的分块 collection（不存在则 None，避免只读操作意外建库）。"""
-        name = f"{CHUNK_PREFIX}{companion_id}"
+        name = f"{CHUNK_PREFIX}{normalize_scope_id(companion_id)}"
         return name if self._client.collection_exists(name) else None
 
     def _existing_meta_collection(self, companion_id: str) -> str | None:
-        name = f"{META_PREFIX}{companion_id}"
+        name = f"{META_PREFIX}{normalize_scope_id(companion_id)}"
         return name if self._client.collection_exists(name) else None
 
     @staticmethod
@@ -323,6 +324,24 @@ class QdrantKnowledgeStore(KnowledgeStore):
                 points_selector=[_doc_point_id(doc_id)],
             )
         return removed
+
+    def clear_scope(self, companion_id: str) -> int:
+        """删除该陪伴对象的两个 collection（分块 + 文档元数据），返回被删除的分块数。
+
+        元数据 collection 一起删：只删分块会留下一堆「文档还在、内容没了」的
+        残影，列表上仍然看得见。两个 collection 都用 `_existing_*`，
+        不存在就跳过（清空一个空库不该顺手建库）。
+        """
+        removed = 0
+        chunk_collection = self._existing_chunk_collection(companion_id)
+        if chunk_collection is not None:
+            removed = self._client.count(collection_name=chunk_collection).count
+            self._client.delete_collection(collection_name=chunk_collection)
+
+        meta_collection = self._existing_meta_collection(companion_id)
+        if meta_collection is not None:
+            self._client.delete_collection(collection_name=meta_collection)
+        return int(removed)
 
     def list_chunks(self, companion_id: str) -> list[KnowledgeChunk]:
         name = self._existing_chunk_collection(companion_id)
