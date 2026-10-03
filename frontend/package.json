@@ -1,6 +1,6 @@
 {
   "name": "hypra-frontend",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "AGPL-3.0-only",
   "description": "HyPRA 前端：情感陪伴对话 UI + 魔珐具身数字人",
