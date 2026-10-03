@@ -132,6 +132,41 @@ const XMOV_SDK_URL =
   "https://media.xingyun3d.com/xingyun3d/general/litesdk/xmovAvatar@latest.js";
 const XMOV_GATEWAY = "https://nebula-agent.xingyun3d.com/user/v1/ttsa/session";
 
+/**
+ * 魔珐 SDK 里**不能当致命错误**处理的错误码（通知 / 自恢复 / 与数字人本体无关）。
+ *
+ * ⚠️ 为什么必须区分：SDK 把「通知」与「致命错误」**走同一个 `onMessage` 回调**
+ * （签名都是 `{code, message, e?}`），只靠「有没有 code 字段」判断必然误伤。
+ * 误伤的后果不是少一行日志——`onMessage` 里调 `onUnavailable` 会让整条魔珐渲染
+ * 被判为不可用（`degraded` → `xmovActive=false`），桌宠/Web 端随即卸载 3D
+ * 并挂上本地渲染层，表现为**「数字人刚连上、几秒后被默认模型顶掉」**（用户实测）。
+ *
+ * 取值与判定依据来自 SDK 源码（`xmovAvatar@latest.js`，grep 全部 34 处
+ * `onMessage({code:…})` 调用点）：
+ * - `10002 CONNECT_SOCKET_ERROR`「socket长时间未下发数据」——SDK 紧接着自己
+ *   `stopSessionFromSocket("WS_NO_DATA_TIMEOUT")` + `reStartSDK()` 重连，
+ *   是**自恢复**。用户连上后暂时不说话就会触发，最容易误伤。
+ * - `10004 STOP_SESSION_ERROR`——停会话失败，此时会话本就已结束。
+ * - `20010 EVENT_WITHOUT_SPEECH_ID`——事件数据缺 speech_id，仅告警。
+ * - `30001 BACKGROUND_IMAGE_LOAD_ERROR`——仅背景图，不影响数字人本体。
+ * - `30005 BODY_DATA_EXPIRED`——播放过程中的瞬时状态，SDK 自行继续。
+ * - `50001 NETWORK_DOWN` / `50002 NETWORK_UP` / `50003 NETWORK_RETRY`——
+ *   SDK `NetworkMonitor` 的网络**状态通知**，恢复由其内部处理。
+ *
+ * 其余错误码（如 `10003 START_SESSION_ERROR`、`30002 FACE_BIN_LOAD_ERROR`、
+ * `40002 FACE_DECODE_ERROR`、`10005 INIT_ERROR`）仍按致命处理，维持原有降级链。
+ */
+const XMOV_NOTICE_CODES = new Set<number>([
+  10002, // CONNECT_SOCKET_ERROR（自恢复）
+  10004, // STOP_SESSION_ERROR
+  20010, // EVENT_WITHOUT_SPEECH_ID
+  30001, // BACKGROUND_IMAGE_LOAD_ERROR
+  30005, // BODY_DATA_EXPIRED
+  50001, // NETWORK_DOWN
+  50002, // NETWORK_UP
+  50003, // NETWORK_RETRY
+]);
+
 /** 初始化超时（毫秒）：资源下载或 socket.io 连接卡住时兜底，避免永久“初始化中” */
 const INIT_TIMEOUT_MS = 90_000;
 
@@ -467,14 +502,24 @@ export function useXmovAvatar(
           },
           /** SDK 消息 / 错误（错误通过 code 字段区分） */
           onMessage: (payload: any) => {
-            if (payload && payload.code !== undefined) {
-              const reason = `${payload.message ?? "SDK 报错"}（code=${payload.code}）`;
-              initError = reason;
-              setStage("failed");
-              setDetail(reason);
-              setReady(false);
-              onUnavailable?.(reason);
+            if (!payload || payload.code === undefined) return;
+
+            const text = `${payload.message ?? "SDK 消息"}（code=${payload.code}）`;
+
+            // 通知 / 自恢复类：只记录，**不得**降级。
+            // 一旦在这里调 onUnavailable，整条魔珐渲染会被判为不可用并换成
+            // 本地渲染层——就是「连上几秒后被默认模型顶掉」的直接原因
+            // （判定依据见 XMOV_NOTICE_CODES 的注释）。
+            if (XMOV_NOTICE_CODES.has(Number(payload.code))) {
+              console.info(`[HyPRA][avatar] SDK 通知（不降级）：${text}`);
+              return;
             }
+
+            initError = text;
+            setStage("failed");
+            setDetail(text);
+            setReady(false);
+            onUnavailable?.(text);
           },
           /** 以下回调官方示例均提供，这里仅占位避免 SDK 内部空引用 */
           onNetworkInfo: () => {},

@@ -20,6 +20,9 @@ const CREDENTIALS = { appId: "test-app", appSecret: "test-secret" };
 class FakeXmovAvatar {
   static instances: FakeXmovAvatar[] = [];
 
+  /** SDK 构造参数：`onMessage` 就在其中（`onError` / `onVoiceStateChange` 则是实例属性） */
+  readonly config: Record<string, any>;
+
   onError: ((error: unknown) => void) | null = null;
   onVoiceStateChange: ((...args: unknown[]) => void) | null = null;
   destroyed = false;
@@ -37,8 +40,14 @@ class FakeXmovAvatar {
   private resolveInit: (() => void) | null = null;
   private rejectInit: ((error: unknown) => void) | null = null;
 
-  constructor() {
+  constructor(config: Record<string, any> = {}) {
+    this.config = config;
     FakeXmovAvatar.instances.push(this);
+  }
+
+  /** 测试辅助：模拟 SDK 经 `onMessage` 上报（通知类与错误类走同一个回调） */
+  emitMessage(payload: { code: number; message?: string }) {
+    this.config.onMessage?.(payload);
   }
 
   init() {
@@ -112,6 +121,8 @@ beforeEach(() => {
   vi.useFakeTimers();
   // 重连会打 console.warn（预期日志）：静音以免刷屏淹没真正的失败信息
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  // 通知类 onMessage 会打 console.info（预期日志）：同样静音
+  vi.spyOn(console, "info").mockImplementation(() => {});
 });
 
 afterEach(() => {
@@ -204,6 +215,54 @@ describe("useXmovAvatar 断线退避重连", () => {
     expect(FakeXmovAvatar.instances).toHaveLength(4); // 初始 + 3 次重建
     expect(onUnavailable).toHaveBeenCalledTimes(1);
     expect(onUnavailable.mock.calls[0][0]).toContain("error 3");
+  });
+});
+
+/**
+ * 回归用例：SDK 把「通知」与「致命错误」走同一个 `onMessage` 回调。
+ *
+ * 曾经只要消息带 `code` 字段就当致命错误 → 调 `onUnavailable` → 整条魔珐渲染
+ * 被判不可用 → 桌宠/Web 端卸载 3D、挂上本地渲染层。
+ * 而 `10002 CONNECT_SOCKET_ERROR`（"socket长时间未下发数据"）是**自恢复**的：
+ * SDK 紧接着自己 `reStartSDK()` 重连。用户连上后暂时不说话就会触发，
+ * 表现就是**「数字人刚连上、几秒后被默认模型顶掉」**（用户实测反馈）。
+ */
+describe("useXmovAvatar 的 onMessage 分类（通知 vs 致命）", () => {
+  it("通知类错误码不降级，仍保持就绪", async () => {
+    const onUnavailable = vi.fn();
+    const { result } = await mountAvatar(onUnavailable);
+    const avatar = FakeXmovAvatar.instances[0];
+    await act(async () => {
+      avatar.succeedInit();
+    });
+
+    act(() => {
+      avatar.emitMessage({ code: 10002, message: "Error: socket长时间未下发数据" });
+      avatar.emitMessage({ code: 50001, message: "网络断开" });
+      avatar.emitMessage({ code: 30005, message: "Error: 身体数据过期" });
+      avatar.emitMessage({ code: 20010, message: "Error: 事件中存在不包含speech_id的事件" });
+    });
+
+    expect(onUnavailable).not.toHaveBeenCalled();
+    expect(result.current.stage).toBe("ready");
+    expect(result.current.ready).toBe(true);
+    expect(avatar.destroyed).toBe(false);
+  });
+
+  it("真正的致命错误码仍然降级", async () => {
+    const onUnavailable = vi.fn();
+    await mountAvatar(onUnavailable);
+    const avatar = FakeXmovAvatar.instances[0];
+    await act(async () => {
+      avatar.succeedInit();
+    });
+
+    act(() => {
+      avatar.emitMessage({ code: 30002, message: "表情数据加载失败" });
+    });
+
+    expect(onUnavailable).toHaveBeenCalledTimes(1);
+    expect(String(onUnavailable.mock.calls[0][0])).toContain("30002");
   });
 });
 
