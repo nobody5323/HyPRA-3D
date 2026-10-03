@@ -102,13 +102,13 @@ async function sendMessage(userText, sessionId) {
 
 | # | 注意点 | 说明 |
 |---|---|---|
-| 1 | **`speak` 不能连续调用** | 上一次 `is_end=true` 之后，需先用 `interactive_idle` 切换状态再播下一句 |
+| 1 | **`speak` 不能连续调用** | 指**两次独立播报之间**：上一次 `is_end=true` 之后，需先用 `interactive_idle` 切换状态再播下一句。**同一次播报的多个流式片段之间不受此限**（见第 7 条） |
 | 2 | **流式播报** | 对接大模型流式输出时：首句 `is_start=true`，末句 `is_end=true`，中间都为 `false`；建议首句积攒一小段内容再发 |
 | 3 | **讲话状态（坑）** | 回调签名为 `onVoiceStateChange(state, duration, client_speak_id)`，但 **`state` 的实际取值是 `"start"` / `"end"`**——官方文档用事件名 `voice_start` / `voice_end` 描述，回调里并不是这两个字符串（源码 `EventDispatcher.dispatch` 的 `voice_state_change` 分支可证）。**只认 `"voice_end"` 会让事件永远匹配不上**，每段播报都只能靠计时兜底收尾，表现为**最后一句被切断、说不完**。建议两种写法都接受 |
 | 4 | **资源释放** | 页面卸载前调用 `avatar.destroy()` |
 | 5 | **状态** | SDK 公开方法为**小写无下划线**：`idle()` / `listen()` / `interactiveidle()` / `interrupt()`（早期文档示例写的 `setState('interactive_idle')` 与实现不符，已纠正） |
 | 6 | **等待超时（坑）** | 若用计时兜底等播报结束，**别按 250ms/字估算**：中文 TTS 稍慢就被误判超时。本项目用 **400ms/字、最小 12s、上限 90s**，并在 `voice_end` 之后留 **600ms 尾音缓冲**再切回待机——`idle()` 内部会 `interrupt` 渲染调度，切太早会削掉尾音 |
-| 7 | **流式 vs 多次独立播报** | `speak(ssml, is_start, is_end)` 中 **`is_start=true` 会先 `renderScheduler.interrupt()`**（源码可证）。因此「多次独立播报」必须靠 `interactive_idle` 过渡；官方推荐的多段流式是「首段 `true,false` → 中间 `false,false` → 末段 `false,true`」的**同一次播报** |
+| 7 | **流式 vs 多次独立播报** | `speak(ssml, is_start, is_end)` 中 **`is_start=true` 会先 `renderScheduler.interrupt()`**（源码可证）。因此「多次独立播报」必须靠 `interactive_idle` 过渡；官方推荐的多段流式是「首段 `true,false` → 中间 `false,false` → 末段 `false,true`」的**同一次播报**。⚠️ **本项目曾走错**：分段播报对每段都传 `(true,true)`，等于把每段当成独立话轮——源码 `sendText` 里 `multi_turn_conversation_id` 只在 `is_end=true` 时自增，于是服务端逐段从零合成，段间出现合成空档（表现为「一段一段中间卡壳」）。现已改为流式片段 |
 
 ### 连续多轮对话的正确写法
 
@@ -124,18 +124,34 @@ async function speakSafely(ssml) {
   await waitVoiceEnd(avatar);       // 监听 onVoiceStateChange → voice_end
 }
 
-// 分段播报（赛题表达层的「流式分段」）：
-// 逐段调用 speak，每段之间同样需要 interactive_idle 过渡。
-// 分段 SSML 由后端 /media/speak（streaming=true）的 ssml_chunks 给出，前端不自拼标签。
+// 分段播报（赛题表达层的「流式分段」）——**同一次播报的多个片段**，段间无缝。
+//
+// ⚠️ 关键：`is_start` / `is_end` 是**流式片段**的标志，不是「一段话」的标志。
+// 依据（源码 `sendText`）：`multi_turn_conversation_id` 只在 `is_end === true`
+// 时才 `updateUniqueSpeakId()` 自增，即同一话轮的片段会被服务端**拼起来**
+// 当成一次播报解析。所以「每段都传 (true,true)」= 每段都是一个独立话轮
+// → 服务端逐段从零合成 → 段与段之间出现合成空档（用户听到的「中间卡壳」）；
+// 且 `is_start=true` 还会触发 `renderScheduler.interrupt()`，每段都打断一次。
+//
+// 正确写法：首段 (true,false) → 中间 (false,false) → 末段 (false,true)，
+// 全部片段共享同一个 multi_turn_conversation_id，服务端连续合成，段间无缝；
+// voice_end 也只在整段结束时下发一次（因此**只等一次**）。
+// 片段之间**不需要** interactive_idle —— 那是「两次独立播报之间」才需要的过渡。
+//
+// 片段由后端 /media/speak（streaming=true）的 ssml_chunks 给出；它们是
+// **同一个 `<speak>` 文档**的若干部分（见 backend/app/digital_human/ssml.py
+// 的 build_streaming_ssml_chunks），前端不自拼标签。
 async function speakChunks(ssmlChunks) {
-  for (let i = 0; i < ssmlChunks.length; i += 1) {
-    if (i > 0) {
-      avatar.interactiveidle?.();
-      await new Promise((resolve) => setTimeout(resolve, 400));
+  const last = ssmlChunks.length - 1;
+  const pending = waitVoiceEnd(avatar);   // 先登记，避免 voice_end 早于登记到达
+  for (let i = 0; i <= last; i += 1) {
+    avatar.speak(ssmlChunks[i], i === 0, i === last);
+    if (i < last) {
+      // 片段之间的发送节奏（150ms/字）：字幕跟着声音走，且服务端不会「等文本」
+      await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    avatar.speak(ssmlChunks[i], true, true);
-    await waitVoiceEnd(avatar);
   }
+  await pending;
 }
 ```
 

@@ -437,7 +437,7 @@ export function ChatPanel({
   error: string | null;
   onSend: (text: string) => void;
   onInterrupt: () => void;
-  /** 分段播报开关（默认开；关闭时整段合成播出——首句更慢但语调更连贯） */
+  /** 分段播报开关（默认开；关闭时整段合成播出——首句更慢但一次成形） */
   streamingSpeech: boolean;
   onToggleStreaming: (on: boolean) => void;
   /** 当前陪伴对象 id（草稿按角色分开保存） */

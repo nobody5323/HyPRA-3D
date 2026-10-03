@@ -27,6 +27,14 @@ class FakeXmovAvatar {
   onVoiceStateChange: ((...args: unknown[]) => void) | null = null;
   destroyed = false;
   spoken: string[] = [];
+  /**
+   * 每次 `speak` 的入参快照。
+   *
+   * 必须记下 `isStart` / `isEnd`：它们是**流式片段**的标志（首段 true/false、
+   * 中间 false/false、末段 false/true），不是「一段话」的标志。全传 true 会让
+   * 每段变成独立话轮 → 服务端逐段从零合成 → 段间卡壳（见 useAvatar.ts 注释）。
+   */
+  speakCalls: { ssml: string; isStart: boolean; isEnd: boolean }[] = [];
 
   /**
    * 模拟服务端回的语音事件风格。
@@ -78,8 +86,7 @@ class FakeXmovAvatar {
 
   speak(payload: string, isStart?: boolean, isEnd?: boolean) {
     this.spoken.push(payload);
-    void isStart;
-    void isEnd;
+    this.speakCalls.push({ ssml: payload, isStart: isStart ?? true, isEnd: isEnd ?? true });
     // 模拟服务端很快回语音事件（真实环境约在几十~几百毫秒内）
     setTimeout(() => {
       if (this.voiceStateStyle === "short") {
@@ -327,5 +334,41 @@ describe("useXmovAvatar 分段播报的语音事件消费", () => {
 
     expect(avatar.spoken).toHaveLength(2);
     expectNoTimeoutFallback();
+  });
+
+  /**
+   * 回归用例：多段必须是**同一次播报的流式片段**，不能每段都传 (true, true)。
+   *
+   * 依据（SDK 源码 `sendText`）：`multi_turn_conversation_id` 只在
+   * `is_end === true` 时自增。每段都传 true ⇒ 每段都是独立话轮 ⇒ 服务端逐段
+   * 从零合成 ⇒ 段间出现合成空档（用户实测的「一段一段中间卡壳」）。
+   * 正确用法：首段 (true,false)、中间 (false,false)、末段 (false,true)。
+   */
+  it("多段按「同一次播报的流式片段」发送（首段 true/false、中间 false/false、末段 false/true）", async () => {
+    const { result } = await mountAvatar();
+    const avatar = FakeXmovAvatar.instances[0];
+    await act(async () => {
+      avatar.succeedInit();
+    });
+
+    const THREE = [
+      { text: "第一段。", ssml: "<speak>第一段。" },
+      { text: "第二段。", ssml: "第二段。" },
+      { text: "第三段。", ssml: "第三段。</speak>" },
+    ];
+
+    act(() => {
+      void result.current.speakChunks(THREE);
+    });
+    // 片段之间有按语速的发送节奏（150ms/字），推进足够时间让三段都发出去
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2_000);
+    });
+
+    expect(avatar.speakCalls).toEqual([
+      { ssml: "<speak>第一段。", isStart: true, isEnd: false },
+      { ssml: "第二段。", isStart: false, isEnd: false },
+      { ssml: "第三段。</speak>", isStart: false, isEnd: true },
+    ]);
   });
 });

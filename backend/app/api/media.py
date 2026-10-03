@@ -24,7 +24,11 @@ from app.config import get_settings
 from app.digital_human.base import DigitalHumanProvider
 from app.digital_human.factory import create_digital_human_provider
 from app.digital_human.gpt_sovits_provider import GptSovitsDigitalHumanProvider
-from app.digital_human.ssml import build_speak_command, build_ssml, split_for_streaming
+from app.digital_human.ssml import (
+    build_speak_command,
+    build_streaming_ssml_chunks,
+    split_for_streaming,
+)
 from app.tts.gpt_sovits import GptSovitsConfig, parse_extra_params
 from app.tts.voices import load_voice_config
 
@@ -155,7 +159,11 @@ class SpeakResponse(BaseModel):
     )
     ssml_chunks: list[str] = Field(
         default_factory=list,
-        description="与 chunks 一一对应的 SSML 段（streaming=true 时）；逐段喂 SDK 播报",
+        description=(
+            "与 chunks 一一对应的 SSML 片段（streaming=true 时）；"
+            "它们是**同一个 <speak> 文档**的若干部分，前端须按"
+            "「首段 is_start / 末段 is_end」作为同一次播报喂给 SDK"
+        ),
     )
     meta: dict = Field(default_factory=dict)
 
@@ -181,14 +189,12 @@ def create_speak_command(req: SpeakRequest) -> SpeakResponse:
     # 而且若它撞上首段，KA 动作会被包进空段从而完全丢失（`<speak></speak>`）。
     if chunks:
         chunks = [chunk for chunk in chunks if chunk.strip()]
-    # 每段各自包一层 SSML：分段播报仍需走 SSML 通道——前端不应自行拼标签，
-    # 否则会漏掉 XML 转义与 KA 事件结构。
-    # KA 动作只放首段：一句话内连续触发多次动作指令会让数字人反复抖动，
-    # 动作语义应当服务于整段表达。
-    ssml_chunks = [
-        build_ssml(chunk, command.ka_action if index == 0 else "")
-        for index, chunk in enumerate(chunks)
-    ]
+    # 流式片段是**同一个 <speak> 文档**的若干部分，不是各自独立的文档：
+    # 前端按「首段 is_start / 末段 is_end」把它们作为**同一次播报**喂给 SDK，
+    # 服务端会把同一话轮的片段拼起来解析——若每段各自包一层 <speak>，
+    # 拼出来就是多个根节点（非法 XML）。
+    # 转义与 KA 事件结构仍由后端负责（前端不自行拼标签）；KA 动作只放首段。
+    ssml_chunks = build_streaming_ssml_chunks(chunks, command.ka_action)
 
     return SpeakResponse(
         ssml=command.ssml,

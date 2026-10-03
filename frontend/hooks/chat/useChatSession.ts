@@ -288,9 +288,9 @@ export function useChatSession(avatar: AvatarController): ChatSession {
   /**
    * 分段播报开关：**默认开**。
    *
-   * 服务端 TTS 下它就是"流水线"（首段 2~3s 出声、字幕随语音同步、段间无缝），
-   * 没有理由默认关；魔珐 SDK 路径下段间会有 400ms 的 interactive_idle 过渡，
-   * 想要整段连贯的可以在这里关掉。
+   * 两条路径都受益：服务端 TTS 下它就是"流水线"（首段 2~3s 出声、字幕随语音同步、
+   * 段间无缝）；魔珐 SDK 下走**同一次播报的流式片段**（首段 `is_start`、末段
+   * `is_end`，段间不再有 `interactive_idle` 过渡），同样首段早出声且段间无缝。
    */
   const [streamingSpeech, setStreamingSpeech] = useState(true);
   const [busy, setBusy] = useState(false);
