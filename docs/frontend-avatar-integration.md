@@ -109,6 +109,7 @@ async function sendMessage(userText, sessionId) {
 | 5 | **状态** | SDK 公开方法为**小写无下划线**：`idle()` / `listen()` / `interactiveidle()` / `interrupt()`（早期文档示例写的 `setState('interactive_idle')` 与实现不符，已纠正） |
 | 6 | **等待超时（坑）** | 若用计时兜底等播报结束，**别按 250ms/字估算**：中文 TTS 稍慢就被误判超时。本项目用 **400ms/字、最小 12s、上限 90s**，并在 `voice_end` 之后留 **600ms 尾音缓冲**再切回待机——`idle()` 内部会 `interrupt` 渲染调度，切太早会削掉尾音 |
 | 7 | **流式 vs 多次独立播报** | `speak(ssml, is_start, is_end)` 中 **`is_start=true` 会先 `renderScheduler.interrupt()`**（源码可证）。因此「多次独立播报」必须靠 `interactive_idle` 过渡；官方推荐的多段流式是「首段 `true,false` → 中间 `false,false` → 末段 `false,true`」的**同一次播报**。⚠️ **本项目曾走错**：分段播报对每段都传 `(true,true)`，等于把每段当成独立话轮——源码 `sendText` 里 `multi_turn_conversation_id` 只在 `is_end=true` 时自增，于是服务端逐段从零合成，段间出现合成空档（表现为「一段一段中间卡壳」）。现已改为流式片段 |
+| 8 | **`onMessage` 是诊断通道，不是可用性判据** | SDK 把三类东西都从 `onMessage` 报出来：① 自恢复告警——`10002 CONNECT_SOCKET_ERROR`（"socket长时间未下发数据"，SDK 紧接着自己 `reStartSDK()`）、`10007 SOCKET_DISCONNECT`（字面 `client Warning: socket disconnect`，由前者的自恢复动作触发，socket.io 配了 `reconnectionAttempts: Infinity`）；② 可选能力不支持——`10005 INIT_ERROR` 的 5 个触发点里有 3 个是音频捕获 / Opus 编码（只影响 ASR 回声消除）；③ 服务端 `error_message` 原样透传的自定义错误码（`40006 TTSA_ERROR`）。**这些都不代表数字人渲染不可用**。⚠️ 本项目的「降级」会 `destroy()` SDK 且**不可逆**（用户须手动改密钥/换渲染方式才能回到 3D），因此**不**用 `onMessage` 触发降级，只记日志并写进 `detail`；「连不上」只认**启动路径**：SDK 脚本加载失败 / `init()` reject / 初始化超时（90s），经 `scheduleReconnect` 重试 3 次后才降级。另注：当前 SDK **不会**调用 `avatar.onError`（源码 24 处 `onError` 全是 WebGL / socket.io / mp4box 内部处理），该项目里那条回调目前是兜底 |
 
 ### 连续多轮对话的正确写法
 

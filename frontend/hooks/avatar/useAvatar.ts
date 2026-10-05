@@ -133,39 +133,43 @@ const XMOV_SDK_URL =
 const XMOV_GATEWAY = "https://nebula-agent.xingyun3d.com/user/v1/ttsa/session";
 
 /**
- * 魔珐 SDK 里**不能当致命错误**处理的错误码（通知 / 自恢复 / 与数字人本体无关）。
+ * 为什么 `onMessage` 里的任何错误码**都不降级**（只看日志，见 `useXmovAvatar`）。
  *
- * ⚠️ 为什么必须区分：SDK 把「通知」与「致命错误」**走同一个 `onMessage` 回调**
- * （签名都是 `{code, message, e?}`），只靠「有没有 code 字段」判断必然误伤。
- * 误伤的后果不是少一行日志——`onMessage` 里调 `onUnavailable` 会让整条魔珐渲染
- * 被判为不可用（`degraded` → `xmovActive=false`），桌宠/Web 端随即卸载 3D
- * 并挂上本地渲染层，表现为**「数字人刚连上、几秒后被默认模型顶掉」**（用户实测）。
+ * ⚠️ 这不是「保守」，而是被两次线上问题逼出来的结论：
+ * SDK 把**诊断信息**与**致命错误**走同一个 `onMessage` 回调（签名都是
+ * `{code, message, e?}`），而「降级」在本项目里是**不可逆**的——
+ * `onUnavailable` → `degraded` → `xmovActive=false` → SDK 实例被 `destroy()`
+ * → 本地渲染层接管。用户必须手动改密钥或换渲染方式才能回到 3D。
+ * 因此只要有一次误判，3D 就「连上几秒后被默认模型顶掉」且再也回不来
+ * （用户实测反馈过两次，第二次正是下面这条 `SOCKET_DISCONNECT` 漏网）。
  *
- * 取值与判定依据来自 SDK 源码（`xmovAvatar@latest.js`，grep 全部 34 处
- * `onMessage({code:…})` 调用点）：
+ * 依据 SDK 源码（`xmovAvatar@latest.js`，全部 34 处 `onMessage({code:…})` 调用点）
+ * 逐个核对过，其中相当一部分**与「数字人能不能渲染」无关**：
+ *
  * - `10002 CONNECT_SOCKET_ERROR`「socket长时间未下发数据」——SDK 紧接着自己
- *   `stopSessionFromSocket("WS_NO_DATA_TIMEOUT")` + `reStartSDK()` 重连，
- *   是**自恢复**。用户连上后暂时不说话就会触发，最容易误伤。
- * - `10004 STOP_SESSION_ERROR`——停会话失败，此时会话本就已结束。
- * - `20010 EVENT_WITHOUT_SPEECH_ID`——事件数据缺 speech_id，仅告警。
- * - `30001 BACKGROUND_IMAGE_LOAD_ERROR`——仅背景图，不影响数字人本体。
- * - `30005 BODY_DATA_EXPIRED`——播放过程中的瞬时状态，SDK 自行继续。
- * - `50001 NETWORK_DOWN` / `50002 NETWORK_UP` / `50003 NETWORK_RETRY`——
- *   SDK `NetworkMonitor` 的网络**状态通知**，恢复由其内部处理。
+ *   `stopSessionFromSocket("WS_NO_DATA_TIMEOUT")` + `reStartSDK()`，**自恢复**。
+ * - `10007 SOCKET_DISCONNECT`——字面就是 `client Warning: socket disconnect`；
+ *   它由**上一条的自恢复动作**（主动 `ws.disconnect()`）触发，且 socket.io
+ *   配了 `reconnection: true, reconnectionAttempts: Infinity`，同样自恢复。
+ *   用户连上后暂时不说话 → 上面那条 → 紧接着这条，是**必然**会走到的路径。
+ * - `10005 INIT_ERROR`——5 个触发点里 **3 个是可选音频能力**：
+ *   「当前浏览器不支持 AudioWorkletNode，无法启用音频捕获（ASR 回声消除）」、
+ *   「不支持 WebCodecs AudioEncoder Opus…」、「不支持 Opus 编码…」。
+ *   这些只影响 ASR 回声消除，**渲染完全正常**。
+ * - `40006 TTSA_ERROR`——服务端 `error_message` 事件原样透传（含服务端自定义
+ *   `error_code`），文案来自服务端 `user_hint`，不代表会话已死。
+ * - `50001/50002/50003` NETWORK_DOWN / UP / RETRY——`NetworkMonitor` 状态通知。
+ * - `20010 EVENT_WITHOUT_SPEECH_ID` / `30001 BACKGROUND_IMAGE_LOAD_ERROR` /
+ *   `30005 BODY_DATA_EXPIRED`——告警 / 仅背景图 / 播放中的瞬时状态。
  *
- * 其余错误码（如 `10003 START_SESSION_ERROR`、`30002 FACE_BIN_LOAD_ERROR`、
- * `40002 FACE_DECODE_ERROR`、`10005 INIT_ERROR`）仍按致命处理，维持原有降级链。
+ * 那「真正连不上」怎么发现？走**启动路径**：SDK 脚本加载失败、`init()` reject、
+ * 初始化超时（90s）——这三条在 `useXmovAvatar` 的 catch 里，会经过
+ * `scheduleReconnect` 重试 3 次后才降级，是**可确认**的失败，不会误伤。
+ *
+ * 代价与取舍：若 SDK 在**已就绪之后**因致命原因自毁（如 `40002 FACE_DECODE_ERROR`
+ * 之后 SDK 自己 `destroy()`），这里不会再自动切到 2D，画面会停在空白；
+ * 诊断文本仍在 `detail` 里可见。比起「随时可能被误判顶掉」，这是更可接受的失败姿态。
  */
-const XMOV_NOTICE_CODES = new Set<number>([
-  10002, // CONNECT_SOCKET_ERROR（自恢复）
-  10004, // STOP_SESSION_ERROR
-  20010, // EVENT_WITHOUT_SPEECH_ID
-  30001, // BACKGROUND_IMAGE_LOAD_ERROR
-  30005, // BODY_DATA_EXPIRED
-  50001, // NETWORK_DOWN
-  50002, // NETWORK_UP
-  50003, // NETWORK_RETRY
-]);
 
 /** 初始化超时（毫秒）：资源下载或 socket.io 连接卡住时兜底，避免永久“初始化中” */
 const INIT_TIMEOUT_MS = 90_000;
@@ -473,8 +477,6 @@ export function useXmovAvatar(
         // 官方 SDK 要求 containerId 为 **CSS 选择器**（内部用 document.querySelector）；
         // 同时优先传 HTMLElement，避免选择器解析失败。
         const element = containerRef?.current ?? null;
-        // SDK 失败时 init() 仍会 resolve（如容器不存在），因此用标志记录 onMessage 报错
-        let initError: string | null = null;
 
         // 构造参数：
         // - containerId / container：容器定位（选择器兜底 + 元素优先）
@@ -516,26 +518,25 @@ export function useXmovAvatar(
             else if (value.includes("listen")) updateState("listen");
             else if (value.includes("idle")) updateState("idle");
           },
-          /** SDK 消息 / 错误（错误通过 code 字段区分） */
+          /**
+           * SDK 诊断消息（**不降级**，只看日志）。
+           *
+           * 这个回调是 SDK 的**诊断通道**：既报自恢复的告警（socket 重连），
+           * 也报「可选能力不支持」（音频捕获 / Opus 编码），还透传服务端的
+           * 自定义错误码。用它触发降级是**不可逆**的（`onUnavailable` →
+           * `degraded` → 销毁 SDK → 本地模型接管，不手动干预回不来），
+           * 因此这里只记录。完整判定依据见文件顶部该注释块。
+           *
+           * 真正「连不上」由**启动路径**发现：SDK 脚本加载失败 / `init()` reject /
+           * 初始化超时 —— 它们在下面的 catch 里经 `scheduleReconnect` 重试 3 次
+           * 后才降级，是可确认的失败，不会误伤。
+           */
           onMessage: (payload: any) => {
             if (!payload || payload.code === undefined) return;
-
             const text = `${payload.message ?? "SDK 消息"}（code=${payload.code}）`;
-
-            // 通知 / 自恢复类：只记录，**不得**降级。
-            // 一旦在这里调 onUnavailable，整条魔珐渲染会被判为不可用并换成
-            // 本地渲染层——就是「连上几秒后被默认模型顶掉」的直接原因
-            // （判定依据见 XMOV_NOTICE_CODES 的注释）。
-            if (XMOV_NOTICE_CODES.has(Number(payload.code))) {
-              console.info(`[HyPRA][avatar] SDK 通知（不降级）：${text}`);
-              return;
-            }
-
-            initError = text;
-            setStage("failed");
-            setDetail(text);
-            setReady(false);
-            onUnavailable?.(text);
+            console.info(`[HyPRA][avatar] SDK 诊断（不降级）：${text}`);
+            // 留在 detail 里供现场排查（数字人区域的诊断文本 / 设置面板）
+            setDetail(`SDK 诊断：${text}`);
           },
           /** 以下回调官方示例均提供，这里仅占位避免 SDK 内部空引用 */
           onNetworkInfo: () => {},
@@ -589,6 +590,14 @@ export function useXmovAvatar(
         // 断线（WebSocket 断开 / 网关重启）走**指数退避自动重连**，而不是立刻永久降级：
         // 演示现场网络抖动或服务重启后，界面应当自己恢复；
         // 连续失败超过上限才降级为静默，并保留失败原因供现场排查。
+        //
+        // ⚠️ 实测提醒：当前版本的 SDK（`xmovAvatar@latest.js`）**不会**调用这个
+        // 实例属性——源码里 24 处 `onError` 全是 WebGL / socket.io / mp4box 的内部
+        // 处理，没有一处读 `avatar.onError`。断线自恢复由 SDK 自己负责
+        // （socket.io 配了 `reconnectionAttempts: Infinity`）。
+        // 因此这条回调目前是**兜底**（若官方某版接上就能生效），
+        // 真正会走到 `scheduleReconnect` 的是下面的 catch（脚本加载失败 / init reject /
+        // 初始化超时）——那才是「连不上」的可确认判据。
         avatar.onError = (error: unknown) => {
           // 旧实例（已 destroy）的迟到回调：不得再排重连或改界面状态
           if (disposed) return;
@@ -633,7 +642,6 @@ export function useXmovAvatar(
         } finally {
           if (timeoutHandle) clearTimeout(timeoutHandle);
         }
-        if (initError) return; // 初始化已失败并在 onMessage 中上报（init 仍会 resolve）
         if (disposed) {
           avatar.destroy?.();
           return;

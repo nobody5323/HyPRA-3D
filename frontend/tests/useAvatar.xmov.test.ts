@@ -226,16 +226,21 @@ describe("useXmovAvatar 断线退避重连", () => {
 });
 
 /**
- * 回归用例：SDK 把「通知」与「致命错误」走同一个 `onMessage` 回调。
+ * 回归用例：SDK 的 `onMessage` 是**诊断通道**，不是「渲染是否可用」的判据。
  *
- * 曾经只要消息带 `code` 字段就当致命错误 → 调 `onUnavailable` → 整条魔珐渲染
- * 被判不可用 → 桌宠/Web 端卸载 3D、挂上本地渲染层。
- * 而 `10002 CONNECT_SOCKET_ERROR`（"socket长时间未下发数据"）是**自恢复**的：
- * SDK 紧接着自己 `reStartSDK()` 重连。用户连上后暂时不说话就会触发，
- * 表现就是**「数字人刚连上、几秒后被默认模型顶掉」**（用户实测反馈）。
+ * 它既报自恢复的告警，也报「可选能力不支持」，还透传服务端自定义错误码。
+ * 而本项目的「降级」是**不可逆**的（销毁 SDK → 本地模型接管，不手动干预回不来），
+ * 所以任何一条诊断都不允许触发降级——否则就是**「数字人连上几秒后被默认模型
+ * 顶掉，且再也回不来」**（用户实测反馈过两次）。
+ *
+ * 这里把两个真实踩过的坑钉死：
+ * - `10007 SOCKET_DISCONNECT`：字面就是 `client Warning: socket disconnect`，
+ *   由 `10002` 的自恢复动作（SDK 主动 `ws.disconnect()`）触发，socket.io 无限重连；
+ * - `10005 INIT_ERROR`：5 个触发点里 3 个是可选音频能力（AudioWorkletNode /
+ *   WebCodecs Opus / Opus 编码）不支持，与 3D 渲染无关。
  */
-describe("useXmovAvatar 的 onMessage 分类（通知 vs 致命）", () => {
-  it("通知类错误码不降级，仍保持就绪", async () => {
+describe("useXmovAvatar 的 onMessage 只作诊断，不触发降级", () => {
+  it("自恢复类与「可选能力不支持」类诊断都不降级，仍保持就绪", async () => {
     const onUnavailable = vi.fn();
     const { result } = await mountAvatar(onUnavailable);
     const avatar = FakeXmovAvatar.instances[0];
@@ -244,10 +249,23 @@ describe("useXmovAvatar 的 onMessage 分类（通知 vs 致命）", () => {
     });
 
     act(() => {
+      // 连上后不说话就会走到的两步：10002 → SDK 主动 ws.disconnect() → 10007
       avatar.emitMessage({ code: 10002, message: "Error: socket长时间未下发数据" });
+      avatar.emitMessage({
+        code: 10007,
+        message: "client Warning: socket disconnect, transport close",
+      });
+      // 可选音频能力不支持（只影响 ASR 回声消除，与渲染无关）
+      avatar.emitMessage({
+        code: 10005,
+        message: "当前浏览器不支持 AudioWorkletNode，无法启用音频捕获（ASR 回声消除）",
+      });
+      // 网络状态通知 / 播放中的瞬时状态 / 事件告警 / 服务端自定义错误码
       avatar.emitMessage({ code: 50001, message: "网络断开" });
+      avatar.emitMessage({ code: 50002, message: "网络恢复" });
       avatar.emitMessage({ code: 30005, message: "Error: 身体数据过期" });
       avatar.emitMessage({ code: 20010, message: "Error: 事件中存在不包含speech_id的事件" });
+      avatar.emitMessage({ code: 40006, message: "TTSA 返回异常" });
     });
 
     expect(onUnavailable).not.toHaveBeenCalled();
@@ -256,9 +274,9 @@ describe("useXmovAvatar 的 onMessage 分类（通知 vs 致命）", () => {
     expect(avatar.destroyed).toBe(false);
   });
 
-  it("真正的致命错误码仍然降级", async () => {
+  it("即便被视为「致命」的错误码也不降级（诊断 ≠ 渲染不可用）", async () => {
     const onUnavailable = vi.fn();
-    await mountAvatar(onUnavailable);
+    const { result } = await mountAvatar(onUnavailable);
     const avatar = FakeXmovAvatar.instances[0];
     await act(async () => {
       avatar.succeedInit();
@@ -268,8 +286,10 @@ describe("useXmovAvatar 的 onMessage 分类（通知 vs 致命）", () => {
       avatar.emitMessage({ code: 30002, message: "表情数据加载失败" });
     });
 
-    expect(onUnavailable).toHaveBeenCalledTimes(1);
-    expect(String(onUnavailable.mock.calls[0][0])).toContain("30002");
+    expect(onUnavailable).not.toHaveBeenCalled();
+    expect(avatar.destroyed).toBe(false);
+    // 诊断文本仍要留在 detail 里（供现场排查），但不改变就绪状态
+    expect(result.current.detail).toContain("30002");
   });
 });
 
