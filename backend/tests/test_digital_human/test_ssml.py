@@ -10,7 +10,7 @@ from app.digital_human.ssml import (
     build_ka_event,
     build_speak_command,
     build_ssml,
-    build_streaming_ssml_chunks,
+    build_ssml_chunks,
     resolve_ka_action,
     split_for_streaming,
     strip_ssml,
@@ -146,50 +146,51 @@ def test_split_empty_text() -> None:
     assert split_for_streaming("") == []
 
 
-# ---------- 流式片段（同一次 <speak> 文档） ----------
+# ---------- 分段 SSML（每段各自独立、完整） ----------
 
 
-def test_streaming_fragments_form_one_speak_document() -> None:
-    """片段拼起来必须是**一个合法 SSML 文档**（不是多个根节点）。
+def test_ssml_chunks_are_each_complete_documents() -> None:
+    """每段都必须是**各自独立、完整的 `<speak>` 文档**。
 
-    魔珐 SDK 的 `speak(ssml, is_start, is_end)` 中 `is_start/is_end` 是流式
-    片段的标志：源码 `sendText` 里 `multi_turn_conversation_id` 只在
-    `is_end === true` 时自增，即同一话轮的片段会被服务端**拼起来**当一次播报解析。
-    因此「每段各包一层 <speak>」会让拼出来的文档有多个根节点。
+    回归用例：v0.1.2 曾把片段做成「同一个 `<speak>` 文档的几片」
+    （首段带开标签、末段带闭标签、中间裸文本），依据是 SDK 源码里
+    `multi_turn_conversation_id` 只在 `is_end=true` 时自增。结果**数字人完全
+    不发声** —— 服务端是逐条解析每个 `send_text` 的 `ssml` 的，缺 `<speak>`
+    包裹的片段被判为无效 SSML。已回退。
     """
-    fragments = build_streaming_ssml_chunks(["第一句。", "第二句。", "第三句。"])
-    assert len(fragments) == 3
+    fragments = build_ssml_chunks(["第一句。", "第二句。", "第三句。"])
+    assert fragments == [
+        "<speak>第一句。</speak>",
+        "<speak>第二句。</speak>",
+        "<speak>第三句。</speak>",
+    ]
+    assert all(part.startswith("<speak>") and part.endswith("</speak>") for part in fragments)
 
-    merged = "".join(fragments)
-    assert merged == "<speak>第一句。第二句。第三句。</speak>"
 
-
-def test_streaming_fragments_ka_only_in_first() -> None:
+def test_ssml_chunks_ka_only_in_first() -> None:
     """KA 动作只放首段：一句内连续触发多次动作指令会让数字人反复抖动。"""
-    fragments = build_streaming_ssml_chunks(["甲", "乙"], ka_action="comfort")
-    assert fragments[0].startswith("<speak><ue4event>")
+    fragments = build_ssml_chunks(["甲", "乙"], ka_action="comfort")
+    assert "<ue4event>" in fragments[0]
     assert "<action_semantic>comfort</action_semantic>" in fragments[0]
-    assert "<ue4event>" not in fragments[1]
-    assert "".join(fragments).endswith("乙</speak>")
+    assert all("<ue4event>" not in part for part in fragments[1:])
 
 
-def test_streaming_fragments_single_chunk_is_complete_document() -> None:
-    """只有一段时，它自身就是完整文档（首段与末段重合，两个标记都要落到它上面）。"""
-    assert build_streaming_ssml_chunks(["只有一句。"]) == ["<speak>只有一句。</speak>"]
+def test_ssml_chunks_single_chunk() -> None:
+    assert build_ssml_chunks(["只有一句。"]) == ["<speak>只有一句。</speak>"]
 
 
-def test_streaming_fragments_escape_xml_and_drop_blank() -> None:
+def test_ssml_chunks_escape_xml_and_drop_blank() -> None:
     """文本转义由后端负责；纯空白段被丢弃（否则 KA 动作可能落进空段）。"""
-    fragments = build_streaming_ssml_chunks(["a < b", "   ", "c & d"], ka_action="idle")
+    fragments = build_ssml_chunks(["a < b", "   ", "c & d"], ka_action="idle")
     assert len(fragments) == 2
     assert "a &lt; b" in fragments[0]
     assert "c &amp; d" in fragments[1]
     assert all("<ue4event>" not in part for part in fragments[1:])
 
 
-def test_streaming_fragments_empty_input() -> None:
-    assert build_streaming_ssml_chunks([]) == []
-    assert build_streaming_ssml_chunks(["   ", "\n"]) == []
+def test_ssml_chunks_empty_input() -> None:
+    assert build_ssml_chunks([]) == []
+    assert build_ssml_chunks(["   ", "\n"]) == []
 
 
 # ---------- API：/media/speak ----------
@@ -223,18 +224,14 @@ def test_speak_endpoint_streaming_chunks() -> None:
     assert body["chunks"]
     assert "".join(body["chunks"]) == "第一句。第二句。第三句。第四句。"
 
-    # 流式片段是**同一个 <speak> 文档**的若干部分，而不是各自独立的文档：
-    # 前端按「首段 is_start / 末段 is_end」把它们作为**同一次播报**喂给 SDK，
-    # 服务端会把同一话轮的片段拼起来解析——若每段各包一层 <speak>，
-    # 拼出来就是多个根节点（非法 XML）。
+    # 分段播报需要「逐段的**完整** SSML」：前端不应自行拼标签（会漏 XML 转义与
+    # KA 结构），且每段都必须自带 <speak> 包裹——服务端逐条解析，缺包裹会完全
+    # 不出声（v0.1.2 踩过，见 build_ssml_chunks 的注释）。
     assert len(body["ssml_chunks"]) == len(body["chunks"])
-    merged = "".join(body["ssml_chunks"])
-    assert merged.startswith("<speak>")
-    assert merged.endswith("</speak>")
-    assert merged.count("<speak>") == 1
-    assert merged.count("</speak>") == 1
-    # 首段之外不得再出现 <speak> 开标签
-    assert all("<speak>" not in part for part in body["ssml_chunks"][1:])
+    assert all(
+        part.startswith("<speak>") and part.endswith("</speak>")
+        for part in body["ssml_chunks"]
+    )
     # KA 动作只放首段（动作服务于整段表达，避免一句内反复触发）
     if body["ka_action"]:
         assert "<ue4event>" in body["ssml_chunks"][0]

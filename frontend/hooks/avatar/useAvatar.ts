@@ -192,19 +192,6 @@ const SDK_FAILED_ATTR = "data-hypra-failed";
 const STATE_SWITCH_DELAY_MS = 400;
 
 /**
- * 流式片段之间的**发送节奏**（毫秒/字）。
- *
- * 为什么需要节奏：流式播报把多个片段作为**同一次播报**发给 SDK
- * （见 `speakChunks`），服务端按片段陆续合成。一次性全发出去音频也不会卡
- * （服务端会排队），但字幕只能跟着「发出」推进，会瞬间跳到最后一段；
- * 按语速节奏发送，字幕才能跟着声音走。
- *
- * 取值刻意**快于**正常中文语速（约 200~250ms/字）：宁可字幕略微超前，
- * 也不能让服务端「等文本」——那会重新制造段间空档（正是要修的问题）。
- */
-const STREAM_MS_PER_CHAR = 150;
-
-/**
  * 播报等待超时（仅作为 voice_end 丢失时的**兜底**）。
  *
  * 原先按「每字 250ms、最小 8s」估算，对中文 TTS 偏紧：稍慢一点就被判超时，
@@ -783,30 +770,25 @@ export function useXmovAvatar(
   );
 
   /**
-   * 分段播报（魔珐 SDK）——**同一次播报的流式片段**，段间无缝。
+   * 分段播报（魔珐 SDK）——**逐段独立播报**，段间需要过渡。
    *
-   * ⚠️ 核心：`speak(ssml, is_start, is_end)` 后两个参数是**流式片段**的标志，
-   * 不是「一段话」的标志。依据（SDK 源码 `xmovAvatar@latest.js`）：
-   * - `sendText` 里 `multi_turn_conversation_id = getUniqueSpeakId()`，而
-   *   `getUniqueSpeakId()` 只在 `is_end === true` 时才 `updateUniqueSpeakId()`
-   *   自增。所以「每段都传 (true,true)」= **每段都是一个独立话轮**：服务端
-   *   逐段从零合成，段与段之间必然出现合成空档——这正是「一段一段中间卡壳」
-   *   的来源（本实现原先的错误做法）。
-   * - `is_start === true` 还会触发 `renderScheduler.interrupt("speak")`，
-   *   每段都传 true 等于每段都打断一次渲染调度。
+   * ⚠️ 这里刻意是「每段一个独立话轮」，而不是「同一次播报的流式片段」：
+   * v0.1.2 曾依据 SDK 源码里 `multi_turn_conversation_id` 只在 `is_end=true`
+   * 时自增这一点，改造成「首段 (true,false) → 中间 (false,false) → 末段
+   * (false,true)」，并让后端把 SSML 切成同一个 `<speak>` 文档的几片。
+   * 结果**数字人完全不发声** —— 服务端是**逐条解析**每个 `send_text` 的
+   * `ssml` 的，缺 `<speak>` 包裹的片段被判为无效 SSML。已回退（见
+   * `backend/app/digital_human/ssml.py` 的 `build_ssml_chunks`）。
    *
-   * 正确用法（官方推荐的多段流式，见 `docs/frontend-avatar-integration.md`）：
-   *   首段 `(true, false)` → 中间 `(false, false)` → 末段 `(false, true)`。
-   * 全部片段共享同一个 `multi_turn_conversation_id`，服务端按**一次播报**
-   * 连续合成，段间无缝；voice_end 也只在整段结束时下发一次。
+   * 由此得到一条重要结论：**魔珐路径下分段播报做不到段间无缝**——每段都是
+   * 独立话轮，服务端逐段从零合成，段间必有合成空档（用户反馈的「卡壳」）。
+   * 因此 `useChatSession` 对魔珐路径**不做分段**，整段一次播报；那才是既
+   * 无缝又出声的路径。本函数保留为通用实现（`AvatarController` 接口要求），
+   * 并接受段间过渡。
    *
-   * 因此这里**不再需要** `interactive_idle` 过渡与段间 400ms 间隔——
-   * 那套是给「多次独立播报」准备的。片段之间按 `STREAM_MS_PER_CHAR` 的节奏
-   * 发送：字幕跟着推进，且服务端不会因为「文本还没到」而断流。
-   *
-   * 配套契约：后端 `ssml_chunks` 是**同一个 `<speak>` 文档**的若干部分
-   * （见 `backend/app/digital_human/ssml.py` 的 `build_streaming_ssml_chunks`），
-   * 前端不得自行拼标签。
+   * 每段之间必须走 `interactive_idle` 过渡：SDK 不允许在上一次 `is_end=true`
+   * 之后直接连续 speak，而状态切换经 WebSocket 下发，需要留出时间
+   * （`STATE_SWITCH_DELAY_MS`）。
    */
   const speakChunks = useCallback(
     async (chunks: SpeechChunk[], onChunk?: (index: number) => void) => {
@@ -826,38 +808,22 @@ export function useXmovAvatar(
         if (unmountedRef.current || generation !== speakGenerationRef.current) return;
       }
 
-      const lastIndex = chunks.length - 1;
-      const totalChars = chunks.reduce((sum, chunk) => sum + chunk.text.length, 0);
-      // 先登记等待，再发片段：voice_end 只在整段结束时下发一次
-      const pending = waitVoiceEnd(totalChars);
-
-      for (let index = 0; index <= lastIndex; index += 1) {
-        if (unmountedRef.current || generation !== speakGenerationRef.current) {
-          finishSpeakRef.current?.();
-          return;
-        }
-        // 字幕随片段推进（片段一发出，服务端就开始合成并陆续出声）
+      for (let index = 0; index < chunks.length; index += 1) {
+        if (unmountedRef.current || generation !== speakGenerationRef.current) return;
         onChunk?.(index);
-        try {
-          // 首段 is_start、末段 is_end，中间段两者皆 false —— 同一次播报
-          avatar.speak(chunks[index].ssml, index === 0, index === lastIndex);
-        } catch (error) {
-          console.warn("[HyPRA][avatar] speak 抛错:", describeError(error));
-          finishSpeakRef.current?.();
-          return;
+        if (index > 0) {
+          // 段间过渡：上一次 is_end=true 之后不能直接连续 speak
+          avatar.interactiveidle?.();
+          await new Promise((resolve) => setTimeout(resolve, STATE_SWITCH_DELAY_MS));
+          if (unmountedRef.current || generation !== speakGenerationRef.current) return;
         }
-        if (index < lastIndex) {
-          await new Promise((resolve) =>
-            setTimeout(resolve, chunks[index].text.length * STREAM_MS_PER_CHAR),
-          );
-        }
+        await speakOnce(chunks[index].ssml, chunks[index].text.length);
       }
-
-      await pending;
-      // 尾音缓冲：调用方紧接着会切回待机，避免切掉最后一句的尾巴
+      // 全部播完后再留一点尾音缓冲：最后一段之后紧接着就是「切回待机」，
+      // 不留缓冲会把最后一句的尾巴切掉（用户实测的「最后一段说不完」）
       await new Promise((resolve) => setTimeout(resolve, SPEAK_TAIL_MS));
     },
-    [waitVoiceEnd],
+    [speakOnce],
   );
 
   const interrupt = useCallback(() => {

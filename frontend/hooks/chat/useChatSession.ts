@@ -569,10 +569,16 @@ export function useChatSession(avatar: AvatarController): ChatSession {
       // 分段播报：多一次 /media/speak 请求换取「逐段产出」——服务端 TTS 下每段独立合成，
       // 首段先出声且字幕与语音同步；取不到分段（短回复 / 请求失败）时自然回退整段播报。
       //
-      // 静默路径（`none`：未接入 TTS）刻意**不请求分段**：没有音频可分段，
-      // 字幕直接显示整段回复更稳，也省掉一次无意义的合成请求。
+      // ⚠️ 只有**服务端 TTS** 才分段，两条路径各有一个不能分段的理由：
+      // - `none`（未接入 TTS）：没有音频可分段，字幕直接显示整段更稳，也省掉一次
+      //   无意义的合成请求；
+      // - `xmov`（魔珐 SDK 自带 TTS）：它每段都是一次**独立话轮**，服务端逐段从零
+      //   合成 → 段间必有合成空档（用户反馈的「一段一段中间卡壳」）。SDK 的
+      //   「同一次播报流式片段」写法实测**完全不发声**（服务端逐条解析 ssml，
+      //   见 useAvatar.ts 的 speakChunks 注释）。所以魔珐路径**整段一次播报**——
+      //   这是唯一既无缝又出声的路径。
       let chunks: SpeechChunk[] = [];
-      if (streamingRef.current && currentAvatar.provider !== "none") {
+      if (streamingRef.current && currentAvatar.provider === "server") {
         chunks = await fetchSpeechChunks(
           payload.reply,
           payload.emotion?.label,

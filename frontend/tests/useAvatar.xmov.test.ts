@@ -35,6 +35,8 @@ class FakeXmovAvatar {
    * 每段变成独立话轮 → 服务端逐段从零合成 → 段间卡壳（见 useAvatar.ts 注释）。
    */
   speakCalls: { ssml: string; isStart: boolean; isEnd: boolean }[] = [];
+  /** 段间过渡（`interactiveidle`）调用次数——分段播报必须逐段过渡 */
+  interactiveIdleCalls = 0;
 
   /**
    * 模拟服务端回的语音事件风格。
@@ -81,7 +83,9 @@ class FakeXmovAvatar {
 
   idle() {}
   listen() {}
-  interactiveidle() {}
+  interactiveidle() {
+    this.interactiveIdleCalls += 1;
+  }
   interrupt() {}
 
   speak(payload: string, isStart?: boolean, isEnd?: boolean) {
@@ -357,38 +361,38 @@ describe("useXmovAvatar 分段播报的语音事件消费", () => {
   });
 
   /**
-   * 回归用例：多段必须是**同一次播报的流式片段**，不能每段都传 (true, true)。
+   * 回归用例：分段播报必须**每段都是独立、完整的播报**（`(true, true)`），
+   * 且段与段之间走 `interactive_idle` 过渡。
    *
-   * 依据（SDK 源码 `sendText`）：`multi_turn_conversation_id` 只在
-   * `is_end === true` 时自增。每段都传 true ⇒ 每段都是独立话轮 ⇒ 服务端逐段
-   * 从零合成 ⇒ 段间出现合成空档（用户实测的「一段一段中间卡壳」）。
-   * 正确用法：首段 (true,false)、中间 (false,false)、末段 (false,true)。
+   * v0.1.2 曾改成「同一次播报的流式片段」（首段 `true/false`、中间 `false/false`、
+   * 末段 `false/true`），并让后端把 SSML 切成同一个 `<speak>` 文档的几片。
+   * 结果**数字人完全不发声** —— 服务端是逐条解析 `send_text` 的 `ssml` 的，
+   * 缺 `<speak>` 包裹的片段被判为无效 SSML。已回退。
+   *
+   * 连带的结论：魔珐路径下分段做不到段间无缝，因此 `useChatSession` 对
+   * 魔珐路径**不做分段**（整段一次播报）；本函数保留为通用实现。
    */
-  it("多段按「同一次播报的流式片段」发送（首段 true/false、中间 false/false、末段 false/true）", async () => {
+  it("每段作为独立完整播报发送（均 true/true），段间走 interactive_idle", async () => {
     const { result } = await mountAvatar();
     const avatar = FakeXmovAvatar.instances[0];
     await act(async () => {
       avatar.succeedInit();
     });
 
-    const THREE = [
-      { text: "第一段。", ssml: "<speak>第一段。" },
-      { text: "第二段。", ssml: "第二段。" },
-      { text: "第三段。", ssml: "第三段。</speak>" },
-    ];
-
     act(() => {
-      void result.current.speakChunks(THREE);
+      void result.current.speakChunks(PARTS);
     });
-    // 片段之间有按语速的发送节奏（150ms/字），推进足够时间让三段都发出去
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(1_500);
     });
 
     expect(avatar.speakCalls).toEqual([
-      { ssml: "<speak>第一段。", isStart: true, isEnd: false },
-      { ssml: "第二段。", isStart: false, isEnd: false },
-      { ssml: "第三段。</speak>", isStart: false, isEnd: true },
+      { ssml: "<speak>第一段。</speak>", isStart: true, isEnd: true },
+      { ssml: "<speak>第二段。</speak>", isStart: true, isEnd: true },
     ]);
+    // 段与段之间必须走 interactive_idle 过渡。
+    // 不断言精确次数：`handleVoiceState` 在 voice_end 时也会调一次
+    // interactiveidle（回到交互待机），这里只要求「过渡确实发生过」。
+    expect(avatar.interactiveIdleCalls).toBeGreaterThanOrEqual(1);
   });
 });

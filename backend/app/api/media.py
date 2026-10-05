@@ -26,7 +26,7 @@ from app.digital_human.factory import create_digital_human_provider
 from app.digital_human.gpt_sovits_provider import GptSovitsDigitalHumanProvider
 from app.digital_human.ssml import (
     build_speak_command,
-    build_streaming_ssml_chunks,
+    build_ssml_chunks,
     split_for_streaming,
 )
 from app.tts.gpt_sovits import GptSovitsConfig, parse_extra_params
@@ -160,9 +160,8 @@ class SpeakResponse(BaseModel):
     ssml_chunks: list[str] = Field(
         default_factory=list,
         description=(
-            "与 chunks 一一对应的 SSML 片段（streaming=true 时）；"
-            "它们是**同一个 <speak> 文档**的若干部分，前端须按"
-            "「首段 is_start / 末段 is_end」作为同一次播报喂给 SDK"
+            "与 chunks 一一对应的 SSML 段（streaming=true 时）；"
+            "每段都是**各自独立、完整的 `<speak>` 文档**（服务端逐条解析）"
         ),
     )
     meta: dict = Field(default_factory=dict)
@@ -189,12 +188,11 @@ def create_speak_command(req: SpeakRequest) -> SpeakResponse:
     # 而且若它撞上首段，KA 动作会被包进空段从而完全丢失（`<speak></speak>`）。
     if chunks:
         chunks = [chunk for chunk in chunks if chunk.strip()]
-    # 流式片段是**同一个 <speak> 文档**的若干部分，不是各自独立的文档：
-    # 前端按「首段 is_start / 末段 is_end」把它们作为**同一次播报**喂给 SDK，
-    # 服务端会把同一话轮的片段拼起来解析——若每段各自包一层 <speak>，
-    # 拼出来就是多个根节点（非法 XML）。
+    # ⚠️ 每段各自包一层**完整**的 <speak>，不能拼成「同一个文档的几片」：
+    # 服务端是逐条解析每个 send_text 的 ssml 的，缺 <speak> 包裹会被判为无效
+    # SSML → 数字人完全不发声（v0.1.2 踩过，已回退，详见 build_ssml_chunks 注释）。
     # 转义与 KA 事件结构仍由后端负责（前端不自行拼标签）；KA 动作只放首段。
-    ssml_chunks = build_streaming_ssml_chunks(chunks, command.ka_action)
+    ssml_chunks = build_ssml_chunks(chunks, command.ka_action)
 
     return SpeakResponse(
         ssml=command.ssml,

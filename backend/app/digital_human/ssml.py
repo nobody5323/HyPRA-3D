@@ -102,39 +102,31 @@ def build_ssml(text: str, ka_action: str = "") -> str:
     return f"<speak>{body}</speak>"
 
 
-def build_streaming_ssml_chunks(chunks: list[str], ka_action: str = "") -> list[str]:
-    """把分段文本拼成**同一个 `<speak>` 文档**的若干片段（流式播报用）。
+def build_ssml_chunks(chunks: list[str], ka_action: str = "") -> list[str]:
+    """把分段文本各包一层 SSML（分段播报用）。
 
-    为什么不是「一段一个完整文档」：魔珐 SDK 的
-    `speak(ssml, is_start, is_end)` 里，`is_start` / `is_end` 是**流式片段**的
-    标志，而不是「一段话」的标志——源码 `sendText` 中
-    `multi_turn_conversation_id` 只在 `is_end === true` 时才
-    `updateUniqueSpeakId()` 自增，即**同一话轮的多个片段会被服务端拼起来
-    当成一次播报**解析。因此这些片段拼起来必须是一个**合法的 SSML 文档**：
+    ⚠️ **每段必须是各自独立的完整 `<speak>` 文档** —— 这是实测结论，不要改成
+    「同一个文档切成几片」：v0.1.2 曾依据 SDK 源码里
+    `multi_turn_conversation_id` 只在 `is_end=true` 时自增这一点，推断
+    「同一话轮的片段会被服务端拼起来解析」，于是把片段做成
+    `<speak>chunk0` / `chunki` / `chunkN</speak>` 三形态。结果**数字人完全
+    不发声** —— 说明服务端是**逐条解析**每个 `send_text` 的 `ssml` 的，
+    缺 `<speak>` 包裹的片段直接被判为无效 SSML。已回退。
 
-        片段 0         : `<speak>` + KA 动作 + chunk0
-        片段 1 .. n-2  : chunki
-        片段 n-1       : chunkN + `</speak>`
-
-    若每段各自包一层 `<speak>`，拼起来就是多个根节点（非法 XML），
-    轻则被服务端判为格式错误，重则把标签当正文念出来。
-
-    前端配套用法（缺一不可）：首段 `is_start=True, is_end=False`、
-    中间段两者皆 False、末段 `is_start=False, is_end=True`。
+    由此也得到一个重要结论：魔珐路径下「分段播报」**做不到段间无缝** ——
+    每段都是独立话轮，服务端逐段从零合成，段间必有合成空档。前端因此对
+    魔珐路径**不做分段**，整段一次播报（见 `useChatSession` 的
+    `fetchSpeechChunks` 调用条件），从根上避开段间空档。
 
     KA 动作只放首段：一句话内连续触发多次动作指令会让数字人反复抖动。
-    纯空白段会被丢弃——它既无音频也无字幕价值，且若撞上首段会把 KA 动作
+    纯空白段会被丢弃 —— 它既无音频也无字幕价值，且若撞上首段会把 KA 动作
     包进空段而完全丢失（见 `create_speak_command` 的过滤逻辑）。
     """
-    cleaned = [chunk.strip() for chunk in chunks]
-    cleaned = [chunk for chunk in cleaned if chunk]
-    if not cleaned:
-        return []
-
-    fragments = [escape(chunk) for chunk in cleaned]
-    fragments[0] = f"<speak>{build_ka_event(ka_action) if ka_action else ''}{fragments[0]}"
-    fragments[-1] = f"{fragments[-1]}</speak>"
-    return fragments
+    cleaned = [chunk for chunk in (item.strip() for item in chunks) if chunk]
+    return [
+        build_ssml(chunk, ka_action if index == 0 else "")
+        for index, chunk in enumerate(cleaned)
+    ]
 
 
 def strip_ssml(ssml: str) -> str:
