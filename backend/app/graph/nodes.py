@@ -18,6 +18,7 @@ from app.llm.profiles import (
     resolve_sampling,
 )
 from app.llm.reasoning import ensure_reasoning_headroom, is_reasoning_model
+from app.memory.knowledge.mounted import load_mounted_books
 from app.memory.knowledge.retriever import KnowledgeRetriever
 from app.memory.store import MemoryStore
 from app.memory.warm.embedding import EmbeddingProvider
@@ -299,21 +300,30 @@ class ChatNodes:
         知识不老化，且是客观的。这层是「用户给过我的资料」，
         与「我们一起经历过什么」（情景记忆）职责不同。
 
-        **酒馆世界书只在酒馆聊天模式下召回**（AGENTS.md §8.2）：它同样存在知识库里，
-        但作用域带 `tavern` 前缀，由 `include_tavern` 决定要不要一起查。
-        桌宠模式查到它的话，内置人设会突然「知道」别的作品的角色设定——
-        既污染角色，又让人误以为召回坏了。
+        **酒馆世界书只在酒馆聊天模式下、且只查「当前挂载」的那几本**
+        （AGENTS.md §8.2）：每本世界书一个独立作用域（`tavern:book:{哈希}`），
+        挂载清单由 `load_mounted_books()` 统一读取——**默认空 = 一本都不查**。
+        桌宠模式（`include_tavern=False`）更是一个世界书作用域都不查：否则内置人设
+        会突然「知道」别的作品的角色设定，既污染角色，又让人误以为召回坏了。
+
+        为什么不把清单塞进图状态由路由传入：挂载是**全局当前挂载**（一份），
+        不是会话属性；由节点自己读，路由层就不必知道这个配置的存在。
         """
         if self.knowledge is None:
             return {"knowledge_lines": []}
 
         companion_id = state.get("companion_id", state.get("persona_id", ""))
         mode = normalize_mode(state.get("mode"))
+        tavern_mode = mode == MODE_TAVERN
+        # 只在酒馆模式下才去读清单：桌宠模式读了也没用（作用域一个都不加），
+        # 省一次文件读取。清单读失败降级为空（见 mounted.load_mounted_books）。
+        mounted = load_mounted_books() if tavern_mode else []
         try:
             hits = self.knowledge.retrieve(
                 companion_id,
                 state.get("user_input", ""),
-                include_tavern=mode == MODE_TAVERN,
+                include_tavern=tavern_mode,
+                mounted_books=mounted,
             )
         except Exception as exc:  # noqa: BLE001 - 知识库不可用不应阻断对话
             return {

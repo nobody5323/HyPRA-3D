@@ -374,15 +374,16 @@ def put_plugin_settings(plugin_id: str, payload: PluginSettingsPayload) -> dict:
 
 @router.post("/tavern-bridge/knowledge/sync")
 def sync_tavern_knowledge() -> dict:
-    """把酒馆世界书同步进**个人知识库**（按角色分作用域，覆盖写）。
+    """把酒馆世界书同步进**个人知识库**（每本一个独立作用域，覆盖写）。
 
     酒馆世界书统一走知识库路径，不再有「每轮直接注入」分支：
-    - 用户勾选的来源写入个人知识库；
-    - 每轮通过向量 + BM25 检索，只有相关片段才进上下文；
-    - 未命中的世界书不占提示词预算。
+    - **每本世界书**（全局书 `world/*` 与角色内嵌书 `char/*` 一视同仁）写进各自的
+      `tavern:book:{来源哈希}` 作用域；
+    - 每轮通过向量 + BM25 检索，**只检索当前挂载的那几本**（`tavern_mounted_books`），
+      只有相关片段才进上下文；未挂载/未命中的世界书完全不占预算。
 
-    274 条世界书不再塞进 400 token 的常驻注入预算；作用域与世界书 `scope`、
-    酒馆会话记忆**同一套 id**（全局书归共享作用域）。
+    同步是幂等的（`doc_id` 由来源算出 → 覆盖同一篇），并顺手清理旧版作用域
+    （`tavern` / `tavern:{角色id}` / `*`）里遗留的文档。
     """
     from app.api.knowledge import get_knowledge_store
     from app.memory.knowledge.datasource_sync import sync_worldbook_knowledge
@@ -404,7 +405,7 @@ def clear_tavern_knowledge() -> dict:
     """
     from app.api.knowledge import get_knowledge_store
     from app.memory.knowledge.datasource_sync import (
-        candidate_scopes,
+        discover_tavern_scopes,
         existing_doc_ids,
     )
     from app.plugins.datasources import read_snapshots
@@ -412,7 +413,9 @@ def clear_tavern_knowledge() -> dict:
     store = get_knowledge_store()
     snapshots, _ = read_snapshots()
     removed = 0
-    for scope in sorted(candidate_scopes(snapshots)):
+    # 用 `discover_tavern_scopes` 而非 `candidate_scopes`：后者只从当前快照推导键，
+    # 会漏掉「书已从酒馆删掉、文档还留在库里」的那些——恰恰是「清空」最该清干净的。
+    for scope in sorted(discover_tavern_scopes(store, snapshots)):
         for doc_id in sorted(existing_doc_ids(store, scope)):
             try:
                 store.delete_document(scope, doc_id)
@@ -422,6 +425,71 @@ def clear_tavern_knowledge() -> dict:
             removed += 1
     _invalidate_knowledge_caches()
     return {"removed": removed}
+
+
+class MountedBooksPayload(BaseModel):
+    """挂载清单（酒馆模式下「这个角色知道哪几本世界书」）。"""
+
+    books: list[str] = Field(
+        default_factory=list,
+        description=(
+            "要挂载的世界书来源标识，形如 world/<文件名> / char/<角色名>；"
+            "空列表 = 一本都不挂（默认）。"
+        ),
+    )
+
+
+def _mounted_books_view(source: Any) -> dict:
+    """挂载清单视图：可选来源 + 已挂载集合（供界面渲染勾选框）。"""
+    from app.memory.knowledge.datasource_sync import mounted_book_sources
+    from app.memory.knowledge.mounted import load_mounted_books
+
+    snapshot = source.read()
+    available = mounted_book_sources([snapshot])
+    mounted = load_mounted_books()
+    return {
+        # 只保留仍然存在的来源：世界书在酒馆里被删了，就不该继续挂在清单上
+        "mounted": [s for s in mounted if s in available],
+        "available": [
+            {"source": s, "mounted": s in mounted}
+            for s in available
+        ],
+    }
+
+
+@router.get("/tavern-bridge/mounted-books")
+def get_mounted_books() -> dict:
+    """读取当前挂载的世界书清单 + 全部可选来源。
+
+    挂载清单是**全局当前挂载**（一份）：切换 World Book 就是改这份清单。
+    默认空 = 酒馆模式下一本世界书都不召回。
+    """
+    source = _find_tavern_datasource()
+    return _mounted_books_view(source)
+
+
+@router.put("/tavern-bridge/mounted-books")
+def put_mounted_books(payload: MountedBooksPayload) -> dict:
+    """覆盖写挂载清单（保存后立刻生效——检索每轮现读，无需重启）。
+
+    只接受**当前确实存在**的来源：清单里留着已删除的来源没有意义，还会让
+    界面显示一本挂不上的书。传进来的无效项被静默丢弃并回报（`dropped`）。
+    """
+    from app.memory.knowledge.datasource_sync import mounted_book_sources
+    from app.memory.knowledge.mounted import save_mounted_books
+
+    source = _find_tavern_datasource()
+    available = set(mounted_book_sources([source.read()]))
+    wanted = [s for s in payload.books if s in available]
+    dropped = [s for s in payload.books if s not in available]
+    saved = save_mounted_books(wanted)
+    # 挂载变了 = 检索范围变了：对话图里的检索器缓存不必重建（作用域是每轮现算的），
+    # 但知识检索结果会变——无需额外失效，下一轮自然生效。
+    return {
+        "mounted": saved,
+        "dropped": dropped,
+        **_mounted_books_view(source),
+    }
 
 
 def _invalidate_knowledge_caches() -> None:
@@ -498,6 +566,13 @@ def tavern_bridge_status(
     catalog = getattr(source, "book_catalog", None)
     books = catalog() if callable(catalog) else []
 
+    # 挂载清单：酒馆模式下**只有挂上的世界书才参与召回**（默认全不挂）。
+    # 与 `books`（接入开关）是两回事：books 管「要不要读进知识库」，
+    # mounted 管「读进来的哪几本允许被检索」。
+    from app.memory.knowledge.mounted import load_mounted_books
+
+    mounted = load_mounted_books()
+
     return {
         "root": str(source.root) if source.root else "",
         "available": snapshot.counts,
@@ -505,12 +580,13 @@ def tavern_bridge_status(
         "imported_sessions": imported,
         "characters": [character.name for character in snapshot.characters],
         # 保留旧字段避免前端/旧客户端解包失败；它不再代表直注入开关。
-        # 酒馆世界书是否参与对话，取决于是否同步进知识库以及本轮是否检索命中。
+        # 酒馆世界书是否参与对话，取决于是否**挂载**以及本轮是否检索命中。
         "worldbook_enabled": False,
         "pending_turns": pending_turns,
         "pending_sessions": pending_sessions,
         "knowledge": knowledge,
         "books": books,
+        "mounted_books": mounted,
     }
 
 
