@@ -99,3 +99,11 @@ frontend/public/live2d/
 
 # 自备资源压缩包（Live2D SDK / 模型包等一律不入库）
 *.zip
+
+# ===== 一次性数据备份（含真实记忆与本地配置，不入库）=====
+# 改动前对 data/ 的快照；memory.db 是真实对话记忆、settings.json 含本机路径，
+# 属 §8.6 红线范围内的隐私数据
+backend/_backup_*/
+
+# ===== 本地生成的交付文档（PDF 等二进制产物，不入库）=====
+*.pdf
