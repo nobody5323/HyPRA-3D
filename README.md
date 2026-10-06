@@ -92,12 +92,10 @@ HyPRA 借鉴 [SillyTavern](https://github.com/SillyTavern/SillyTavern) 的提示
 | [`docs/plugin-development.md`](docs/plugin-development.md) | **插件开发指南**（manifest / 能力面 / 权限 / 声明式配置，公开接口说明） |
 | [`docs/plugin-market.md`](docs/plugin-market.md) | 插件市场设计（索引 / 安装 / 回滚 / 安全边界；**设计稿，未实现**） |
 
-**参赛与合规**
+**合规**
 
 | 文档 | 内容 |
 |---|---|
-| [`docs/competition-gap-analysis.md`](docs/competition-gap-analysis.md) | **赛题差距分析**（评审维度对照与行动优先级） |
-| [`docs/why-embodied-avatar.md`](docs/why-embodied-avatar.md) | **不可替代性论证**（为何情感陪伴需要具身数字人） |
 | [`docs/sillytavern-memory-design-reference.md`](docs/sillytavern-memory-design-reference.md) | 记忆与提示词机制的设计参照调研 |
 | [`docs/license-compliance.md`](docs/license-compliance.md) | **许可与合规说明**（AGPL 义务 / §13 检查清单 / 来源纪律 / 依赖审计） |
 | [`docs/deployment.md`](docs/deployment.md) | 部署说明（Docker Compose 一键部署 / 开发模式） |
