@@ -347,12 +347,36 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
 - **两模式记忆默认完全隔离**（互不读写），避免桌宠积累的记忆污染酒馆的纯净预设体验。
 - 隔离单位从「陪伴对象」升级为「作用域」，`WarmMemoryStore` / `ColdMemoryStore` 的键随之泛化。
 - 个人记忆（`knowledge`，用户上传语料）**数据两模式共享**，但**注入与否由模式决定**（`tavern` 不注入）。
-- **酒馆世界书（外部来源）走独立作用域，且只在 `tavern` 模式召回**：全局书 `tavern`、
-  角色内嵌书 `tavern:{persona_id}`。作用域键的唯一来源是
+- **酒馆世界书（外部来源）每本一个独立作用域，且只在 `tavern` 模式、且只对「已挂载」的书召回**：
+  作用域键 `tavern:book:{来源哈希}`（`scopes.book_scope`）。作用域键的唯一来源是
   `app/memory/knowledge/scopes.py`（写入侧与检索侧共用同一套函数——两边各算各的键，
-  内容就会挂在一个永远匹配不上的作用域上）。`companion` 模式**一个 `tavern` 作用域都不查**：
+  内容就会挂在一个永远匹配不上的作用域上）。`companion` 模式**一个 `tavern:book:*` 作用域都不查**：
   否则桌宠模式的内置人设会「知道」另一部作品的角色设定，实测会被用户读成「召回坏了」。
   注：这与上一条（`tavern` 不注入用户上传语料）方向相反、互不冲突——隔离的是**来源**，不是模式。
+- **隔离单位是单本世界书，不是角色**：全局书（`world/*.json`）与角色卡内嵌书
+  （`char/<角色名>`）**一视同仁**，各写进各自的作用域。旧模型「全局书共用一个 `tavern`、
+  内嵌书挂在 `tavern:{persona_id}`」已废弃——那种分法的后果是：挂 A 书却答出 B 书的内容
+  （全局书按作用域整体生效），而「内嵌书只对该角色可见」又强制把书和角色绑成因果。
+  用户明确否决了这个模型，原话是「哪个世界书就是在哪个世界书里，切换到这个世界书才有对应的知识」。
+- **生效靠「挂载」，不靠「同步」**：同步只是把书读进库（全部读进来，随时可切），
+  **挂哪几本才决定检索范围**。挂载清单是**全局当前挂载**（一份），存在插件配置
+  `tavern-bridge` 的 `tavern_mounted_books` 里，是「来源标识」列表
+  （`world/<文件名>` / `char/<角色名>`，人可读、稳定；不存作用域键——哈希派生值写进配置
+  既不直观，也会在哈希算法变更时静默失效）。
+  - **默认全不挂**：清单缺失/为空 = 酒馆模式下一本世界书都不查。刻意的——旧行为是全局书
+    无条件生效，实测会让不想用它的角色被串味。
+  - 读取入口只有一处：`app/memory/knowledge/mounted.py`（检索链路、管理 API、状态接口
+    三处共用）。三处各写一套读法的话，「界面显示挂着的」与「实际检索的」会漂移，
+    表现为「我明明挂了这本，它却答不上来」。
+  - 管理接口：`GET/PUT /plugins/tavern-bridge/mounted-books`（PUT 只接受当前确实存在的
+    来源，无效项静默丢弃并回报 `dropped`）。
+- **清理必须问存储、不能只问快照**：`datasource_sync.discover_tavern_scopes` 取三条线索的并集
+  ——① 当前快照算出的键 ② 挂载清单 ③ **存储里实际存在**的酒馆作用域。
+  只从快照推导的话，某本书在酒馆删掉后它的作用域就不在候选里，旧文档永远清不掉——
+  用户看到的现象正是「删了但仍会被召回」。为此 `KnowledgeStore` 增加
+  `list_scopes()` / `iter_scopes()`（基类给了返回空的默认实现，属可选增强；
+  两个内置实现都做了），Qdrant 侧把**作用域原文**落进元数据 payload 的 `scope` 字段
+  （collection 名经 `normalize_scope_id` 加了防碰撞哈希后缀，**无法反解**，只能存）。
 - 现状说明：记忆本来就是按作用域跨会话累积的（温层 collection / 冷层表都不含 `session`），
   只有滚动窗口是会话内的——`companion` 模式的「跨会话长期记忆」已成立，无需新建。
 
@@ -385,7 +409,8 @@ HyPRA：打通「提示词架构」与「混合记忆」的情感陪伴 3D 交�
    `personality` / `scenario` / `system_prompt` / `post_history_instructions` 实测**基本为空**，
    映射优先级靠后。
 
-`character_book` 直接映射为 `WorldBookEntry`（`scope` = 该角色 id，现有字段已支持）；
+`character_book` 映射进知识库时**与全局书同待遇**：每本内嵌书一个独立作用域
+（`tavern:book:{来源哈希}`，来源标识 `char/<角色名>`，见 §8.2），不再写成「该角色专属」。
 但酒馆条目字段远多于本项目现有模型，需补齐：`position` + `depth`、`constant`、
 `selective` + `selectiveLogic`、`probability` / `useProbability`、`sticky` / `cooldown` / `delay`、
 `group` 系列、`recursion` 三件套、`role`、跨字段匹配（`matchPersonalityDescription` 等）、
