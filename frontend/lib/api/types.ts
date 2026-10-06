@@ -458,6 +458,13 @@ export interface TavernBridgeStatus {
   knowledge: TavernKnowledgeStatus;
   /** 可选的世界书来源（勾选决定它是否参与接入） */
   books: TavernBookOption[];
+  /**
+   * 当前**已挂载**的世界书来源（决定酒馆模式下查哪几本）。
+   *
+   * 与 `books` 是两回事：`books` 管「要不要读进知识库」，`mounted_books` 管
+   * 「读进来的哪几本允许被检索」。**默认空 = 一本都不查**。
+   */
+  mounted_books: string[];
 }
 
 /** 一个可选的世界书来源（世界书文件 / 某个角色的内嵌设定） */
@@ -475,6 +482,28 @@ export interface TavernKnowledgeStatus {
   documents: number;
   chunks: number;
   scopes: number;
+}
+
+/**
+ * GET /plugins/tavern-bridge/mounted-books：挂载清单 + 全部可选来源。
+ *
+ * 挂载是**全局当前挂载**（一份）：切换世界书就是改这份清单，
+ * 只有挂上的书才参与知识检索（每本一个独立作用域，互不串味）。
+ */
+export interface TavernMountedBooks {
+  /** 当前已挂载的来源（只含仍然存在的） */
+  mounted: string[];
+  /** 全部可选来源及各自的挂载状态 */
+  available: TavernMountedEntry[];
+  /** PUT 时被丢弃的无效来源（已不存在于酒馆） */
+  dropped?: string[];
+}
+
+/** 挂载清单里的一项 */
+export interface TavernMountedEntry {
+  /** 来源标识：`world/<文件名>` 或 `char/<角色名>` */
+  source: string;
+  mounted: boolean;
 }
 
 /** POST /plugins/tavern-bridge/knowledge/sync */

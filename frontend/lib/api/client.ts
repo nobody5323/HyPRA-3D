@@ -66,6 +66,7 @@ import type {
   TavernBridgeStatus,
   TavernImportResult,
   TavernKnowledgeSyncResult,
+  TavernMountedBooks,
   TtsVoicesStatus,
 } from "@/lib/api/types";
 
@@ -1384,6 +1385,37 @@ export async function syncTavernKnowledge(): Promise<TavernKnowledgeSyncResult> 
   });
   if (!res.ok) await throwApiError(res, "同步酒馆世界书到知识库");
   return (await res.json()) as TavernKnowledgeSyncResult;
+}
+
+/**
+ * 读取世界书挂载清单 + 全部可选来源。
+ *
+ * 挂载是**全局当前挂载**（一份）：切换世界书就是改这份清单。
+ * **默认空 = 酒馆模式下一本世界书都不召回**——不挂就不串味。
+ */
+export async function getTavernMountedBooks(): Promise<TavernMountedBooks> {
+  const res = await fetch(`${API_BASE}/plugins/tavern-bridge/mounted-books`, {
+    cache: "no-store",
+  });
+  if (!res.ok) await throwApiError(res, "读取世界书挂载清单");
+  return (await res.json()) as TavernMountedBooks;
+}
+
+/**
+ * 覆盖写挂载清单（保存后**立刻生效**——检索每轮现读，无需重启）。
+ *
+ * 后端只接受当前确实存在的来源，无效项静默丢弃并在 `dropped` 里回报。
+ */
+export async function setTavernMountedBooks(
+  books: string[],
+): Promise<TavernMountedBooks> {
+  const res = await fetch(`${API_BASE}/plugins/tavern-bridge/mounted-books`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ books }),
+  });
+  if (!res.ok) await throwApiError(res, "保存世界书挂载清单");
+  return (await res.json()) as TavernMountedBooks;
 }
 
 // =============================================================

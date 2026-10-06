@@ -27,8 +27,10 @@ import {
   getPersonas,
   getPluginSettings,
   getTavernBridgeStatus,
+  getTavernMountedBooks,
   importTavernMemory,
   putPluginSettings,
+  setTavernMountedBooks,
   syncTavernKnowledge,
 } from "@/lib/api/client";
 import type {
@@ -36,6 +38,7 @@ import type {
   TavernBridgeStatus,
   TavernImportResult,
   TavernKnowledgeSyncResult,
+  TavernMountedBooks,
 } from "@/lib/api/types";
 
 const COUNT_LABEL: Record<string, string> = {
@@ -49,6 +52,21 @@ const HINT_CLASS = "mt-1 text-[11px] leading-relaxed text-ink-faint";
 function errorText(err: unknown, fallback: string): string {
   if (err instanceof ApiError) return err.message;
   return err instanceof Error ? err.message : fallback;
+}
+
+/**
+ * 把来源标识（`world/<文件名>` / `char/<角色名>`）转成挂载列表里的展示名。
+ *
+ * **不带 `world/` `char/` 前缀**：作用域里已经区分了两类来源，
+ * 而界面这里用户关心的是书名本身（「内嵌」二字足以说明它来自角色卡）。
+ * 前缀留在挂载列表的标题与无障碍名里（见复选框的 `aria-label`），
+ * 不与「参与接入的世界书」那组勾选框撞名。
+ */
+function formatMountLabel(source: string): string {
+  const slash = source.indexOf("/");
+  const kind = slash < 0 ? "" : source.slice(0, slash);
+  const name = slash < 0 ? source : source.slice(slash + 1);
+  return kind === "char" && name ? `内嵌·${name}` : name || source;
 }
 
 export function TavernImportPanel({
@@ -89,6 +107,15 @@ export function TavernImportPanel({
     useState<TavernKnowledgeSyncResult | null>(null);
   /** 勾选某个来源时的保存中标记 */
   const [booksBusy, setBooksBusy] = useState(false);
+  /**
+   * 世界书挂载清单（酒馆模式下**只查挂上的那几本**）。
+   *
+   * 与上面的 `books`（接入勾选）分开：`books` 管「要不要读进知识库」，
+   * 这里管「读进来的哪几本允许被检索」。默认全不挂——不挂就不串味。
+   */
+  const [mounted, setMounted] = useState<TavernMountedBooks | null>(null);
+  /** 挂载清单的保存中标记（与 `booksBusy` 分开：两者是不同接口） */
+  const [mountedBusy, setMountedBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** 强制重导的二次确认：重新导入会重复写入记忆，不能一键直达 */
   const [forceArmed, setForceArmed] = useState(false);
@@ -129,7 +156,15 @@ export function TavernImportPanel({
     }
     setLoading(true);
     try {
-      setStatus(await getTavernBridgeStatus(activeCompanionId));
+      // 状态与挂载清单一起拉：后者是独立端点（挂载与接入是两回事），
+      // 但它读不出来不该拖垮整个面板——所以单独 catch、降级为 null。
+      const [next] = await Promise.all([
+        getTavernBridgeStatus(activeCompanionId),
+        getTavernMountedBooks()
+          .then(setMounted)
+          .catch(() => setMounted(null)),
+      ]);
+      setStatus(next);
       setBlocked(null);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
@@ -244,6 +279,84 @@ export function TavernImportPanel({
       setStatus(rollback);
     } finally {
       setBooksBusy(false);
+    }
+  }
+
+  /**
+   * 切换某本世界书的挂载状态（酒馆模式下「查不查这本」）。
+   *
+   * 与 `handleToggleBook`（接入勾选）的关键差别：**挂载是即时生效的**——
+   * 检索每轮现读清单，保存后下一轮就换书，不必重新同步、不必重启。
+   * 所以这里不做增量重算，直接重拉一次清单（它是个轻接口，不像 status 那么贵）。
+   */
+  async function handleToggleMounted(source: string, nextMounted: boolean) {
+    if (!mounted) return;
+    const previous = mounted;
+    const nextList = nextMounted
+      ? [...mounted.mounted, source]
+      : mounted.mounted.filter((item) => item !== source);
+    setMountedBusy(true);
+    setError(null);
+    // 先就地生效：勾选框是受控组件，等往返回来才改会有「弹回去」的闪烁
+    setMounted({
+      ...mounted,
+      mounted: nextList,
+      available: mounted.available.map((item) =>
+        item.source === source ? { ...item, mounted: nextMounted } : item,
+      ),
+    });
+    try {
+      setMounted(await setTavernMountedBooks(nextList));
+    } catch (err) {
+      setError(errorText(err, "保存世界书挂载失败"));
+      setMounted(previous);
+    } finally {
+      setMountedBusy(false);
+    }
+  }
+
+  /** 只挂一本（「切换世界书」的最常用操作：避免多本互相干扰） */
+  async function handleMountOnly(source: string) {
+    if (!mounted) return;
+    const previous = mounted;
+    setMountedBusy(true);
+    setError(null);
+    setMounted({
+      ...mounted,
+      mounted: [source],
+      available: mounted.available.map((item) => ({
+        ...item,
+        mounted: item.source === source,
+      })),
+    });
+    try {
+      setMounted(await setTavernMountedBooks([source]));
+    } catch (err) {
+      setError(errorText(err, "保存世界书挂载失败"));
+      setMounted(previous);
+    } finally {
+      setMountedBusy(false);
+    }
+  }
+
+  /** 全部卸下（回到「一本都不查」的默认态） */
+  async function handleUnmountAll() {
+    if (!mounted) return;
+    const previous = mounted;
+    setMountedBusy(true);
+    setError(null);
+    setMounted({
+      ...mounted,
+      mounted: [],
+      available: mounted.available.map((item) => ({ ...item, mounted: false })),
+    });
+    try {
+      setMounted(await setTavernMountedBooks([]));
+    } catch (err) {
+      setError(errorText(err, "保存世界书挂载失败"));
+      setMounted(previous);
+    } finally {
+      setMountedBusy(false);
     }
   }
 
@@ -410,6 +523,9 @@ export function TavernImportPanel({
                         className="focus-ring h-3.5 w-3.5 rounded border-line accent-accent"
                         checked={book.enabled}
                         disabled={booksBusy}
+                        // 显式无障碍名，与下面挂载那组的 `酒馆模式挂载 …` 区分开：
+                        // 同一本书两组勾选框，靠包裹文本取名会完全撞名
+                        aria-label={`参与接入 ${book.source}`}
                         onChange={(event) =>
                           void handleToggleBook(book.source, event.target.checked)
                         }
@@ -435,7 +551,7 @@ export function TavernImportPanel({
               </p>
               <p className={HINT_CLASS}>
                 这条是按需召回：问到相关的事才进上下文，不占每轮的注入预算。
-                全局世界书所有角色共用一份；角色内嵌设定只有该角色召回得到。
+                同步会把书全部读进库（随时可切），**挂哪几本才决定查哪几本** —— 见下面。
               </p>
               <button
                 type="button"
@@ -457,6 +573,65 @@ export function TavernImportPanel({
                   。
                 </p>
               )}
+            </div>
+          )}
+
+          {mounted && mounted.available.length > 0 && (
+            <div className="mt-2 border-t border-line pt-2">
+              <div className="flex items-baseline justify-between gap-2">
+                <p className="text-[11px] text-ink-muted">
+                  酒馆模式下的世界书
+                  <span className="ml-1 text-ink-faint">
+                    （已挂 {mounted.mounted.length} / {mounted.available.length} 本）
+                  </span>
+                </p>
+                {mounted.mounted.length > 0 && (
+                  <button
+                    type="button"
+                    className="focus-ring shrink-0 rounded px-1 text-[11px] text-ink-faint hover:text-ink-muted disabled:opacity-50"
+                    disabled={mountedBusy}
+                    onClick={() => void handleUnmountAll()}
+                  >
+                    全部卸下
+                  </button>
+                )}
+              </div>
+              <ul className="mt-1 flex flex-col gap-0.5">
+                {mounted.available.map((item) => (
+                  <li key={item.source} className="flex items-center gap-2">
+                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-1.5 text-[11px] text-ink">
+                      <input
+                        type="checkbox"
+                        className="focus-ring h-3.5 w-3.5 shrink-0 rounded border-line accent-accent"
+                        checked={item.mounted}
+                        disabled={mountedBusy}
+                        // 显式无障碍名：同一本书在上面「参与接入」那组里也有勾选框，
+                        // 两组若都靠包裹文本取名，屏幕阅读器读起来完全一样
+                        aria-label={`酒馆模式挂载 ${item.source}`}
+                        onChange={(event) =>
+                          void handleToggleMounted(item.source, event.target.checked)
+                        }
+                      />
+                      <span className="truncate">{formatMountLabel(item.source)}</span>
+                    </label>
+                    {!item.mounted && (
+                      <button
+                        type="button"
+                        className="focus-ring shrink-0 rounded px-1 text-[11px] text-ink-faint hover:text-accent disabled:opacity-50"
+                        disabled={mountedBusy}
+                        onClick={() => void handleMountOnly(item.source)}
+                        title="只挂这一本（其余卸下）"
+                      >
+                        只挂这本
+                      </button>
+                    )}
+                  </li>
+                ))}
+              </ul>
+              <p className={HINT_CLASS}>
+                每本世界书各存各的，**只有挂上的才会被召回** —— 换书就是换挂载，
+                立刻生效、不必重新同步。一本都不挂时，酒馆模式下不会用到任何世界书知识。
+              </p>
             </div>
           )}
 
