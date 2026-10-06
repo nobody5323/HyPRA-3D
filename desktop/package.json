@@ -1,6 +1,6 @@
 {
   "name": "hypra-desktop",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "license": "AGPL-3.0-only",
   "description": "HyPRA 桌面端：透明桌宠窗口（Electron 外壳，渲染层走 Vite 独立入口）",
