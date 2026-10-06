@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from uuid import NAMESPACE_URL, uuid5
 
@@ -48,6 +49,8 @@ META_VECTOR_SIZE = 1
 _SCROLL_LIMIT = 256
 #: 按文档过滤的字段名
 _FIELD_DOC_ID = "doc_id"
+#: 作用域原文的字段名（collection 名带哈希后缀，反解不回来，只能存）
+_FIELD_SCOPE = "scope"
 
 
 def _chunk_point_id(doc_id: str, index: int) -> str:
@@ -62,6 +65,36 @@ def _chunk_point_id(doc_id: str, index: int) -> str:
 def _doc_point_id(doc_id: str) -> str:
     """文档元数据 point id。"""
     return str(uuid5(NAMESPACE_URL, f"hypra-kb-doc:{doc_id}"))
+
+
+def _guess_scope_from_collection(name: str) -> str:
+    """从 collection 名（已含 `knowledge_meta_` 前缀）反推作用域键的近似值。
+
+    无非法字符时 `normalize_scope_id` 是恒等映射，名字里那截就是作用域原文
+    （`knowledge_meta_therapist` → `therapist`），此时反推是**精确**的。
+    含非法字符时名字形如 `..._therapist_elder_sister_999284`，末尾 6 位是防碰撞
+    哈希，反推只能得到近似值——所以只用于老数据兜底与粗筛，
+    精确比对一律走 payload 里的 `scope` 字段。
+    """
+    return name[len(META_PREFIX) :] if name.startswith(META_PREFIX) else name
+
+
+def _filter_scope_keys(
+    keys: list[str], *, prefix: str, contains: str, exact: str, limit: int
+) -> list[str]:
+    """作用域键的递进过滤（本地做；两个实现同一口径，见 `base.list_scopes`）。
+
+    `keys` 是**短字符串**（作用域键），不含任何知识正文，因此本地过滤没有成本问题；
+    而 `exact` 命中时绕过 `limit`（纯存在性查询，不该被批量上限截断）。
+    """
+    if exact:
+        return [key for key in keys if key == exact]
+    out = [
+        key
+        for key in keys
+        if (not prefix or key.startswith(prefix)) and (not contains or contains in key)
+    ]
+    return out[:limit]
 
 
 class QdrantKnowledgeStore(KnowledgeStore):
@@ -215,6 +248,10 @@ class QdrantKnowledgeStore(KnowledgeStore):
                     vector=[0.0] * META_VECTOR_SIZE,
                     payload={
                         _FIELD_DOC_ID: resolved_id,
+                        # 作用域原文落进 payload：collection 名经
+                        # `normalize_scope_id` 加了防碰撞哈希后缀，**反解不回来**，
+                        # 而清理逻辑要按 scope 原文比对（见 base.list_scopes）。
+                        _FIELD_SCOPE: companion_id,
                         "title": title,
                         "source_type": source_type,
                         "chunk_count": len(chunks),
@@ -373,3 +410,85 @@ class QdrantKnowledgeStore(KnowledgeStore):
         if name is None:
             return 0
         return self._client.count(collection_name=name).count
+
+    # ---------- 作用域枚举（供清理逻辑） ----------
+
+    def list_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        limit: int = 500,
+    ) -> list[str]:
+        """列出真的有数据的作用域键（从**元数据 collection** 的 payload 读原文）。
+
+        为什么读 payload 而不是解析 collection 名：`knowledge_meta_{name}` 里的
+        `name` 经 `normalize_scope_id` 处理过——含非法字符时会追加 6 位哈希后缀，
+        而哈希**无法反解**（`tavern:book:bk-abc` → `tavern_book_bk-abc_9f2c11`，
+        末尾那截是 MD5 的摘要，不是原文）。所以作用域原文在写入时被落进 payload
+        的 `scope` 字段（见 `add_document`），枚举时按它取回。
+
+        用 meta collection 而非分块 collection：前者一篇文档一个 point（数量小得多），
+        且「有哪些作用域」本来就是元数据层面的问题。
+
+        过滤在**本地**做：一次 scroll 拿回的全是短字符串（scope 键），
+        而按 collection 名粗筛会把 `a-b` / `a_b` 这类同名变体混为一谈
+        （两者规范化后带不同哈希后缀，从名字反推的都不可靠）。
+        """
+        return _filter_scope_keys(
+            self._all_scope_keys(),
+            prefix=prefix,
+            contains=contains,
+            exact=exact,
+            limit=limit,
+        )
+
+    def _all_scope_keys(self) -> list[str]:
+        """扫全部元数据 collection，取回 payload 里的作用域原文（去重排序）。
+
+        老数据（`scope` 字段引入前写入的）没有这个字段，此时按 collection 名
+        反推一个**近似键**兜底——含哈希后缀的名字反推不精确，但至少能让
+        「前缀 / 子串」这种宽匹配扫到老遗留物，不至于完全漏掉。
+        """
+        found: set[str] = set()
+        for collection in self._client.get_collections().collections:
+            if not collection.name.startswith(META_PREFIX):
+                continue
+            offset = None
+            while True:
+                points, offset = self._client.scroll(
+                    collection_name=collection.name,
+                    limit=_SCROLL_LIMIT,
+                    offset=offset,
+                    with_payload=True,
+                    with_vectors=False,
+                )
+                for point in points:
+                    scope = str((point.payload or {}).get(_FIELD_SCOPE) or "")
+                    found.add(scope or _guess_scope_from_collection(collection.name))
+                if offset is None:
+                    break
+        return sorted(key for key in found if key)
+
+    def iter_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        predicate: Callable[[str], bool] | None = None,
+        limit: int = 500,
+    ) -> list[str]:
+        """带谓词的作用域枚举（同样基于 payload 里的 scope 原文）。
+
+        `predicate` 让调用方表达「去掉 `tavern:book:` 前缀再比哈希」这类条件
+        （见 `datasource_sync.discover_stored_tavern_scopes` 用它挑旧格式键），
+        而无需把所有作用域原文先拉回内存判断。返回的仍是作用域**键字符串**。
+        """
+        keys = self.list_scopes(
+            prefix=prefix, contains=contains, exact=exact, limit=limit
+        )
+        if predicate is None:
+            return keys
+        return [key for key in keys if predicate(key)]

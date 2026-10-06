@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 from app.memory.knowledge.base import (
@@ -148,3 +149,60 @@ class InMemoryKnowledgeStore(KnowledgeStore):
         removed = len(self._chunks.pop(companion_id, {}))
         self._docs.pop(companion_id, None)
         return removed
+
+    # ---------- 作用域枚举（供清理逻辑） ----------
+
+    def _scope_keys(self) -> list[str]:
+        """真的有数据的作用域键（两个 dict 合并，保持稳定排序）。"""
+        return sorted(
+            key
+            for key, docs in self._docs.items()
+            if docs
+        ) + sorted(
+            key
+            for key, chunks in self._chunks.items()
+            if chunks and not self._docs.get(key)
+        )
+
+    def list_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        limit: int = 500,
+    ) -> list[str]:
+        return self._filter_scopes(
+            self._scope_keys(), prefix=prefix, contains=contains, exact=exact, limit=limit
+        )
+
+    def iter_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        predicate: Callable[[str], bool] | None = None,
+        limit: int = 500,
+    ) -> list[str]:
+        keys = self.list_scopes(
+            prefix=prefix, contains=contains, exact=exact, limit=limit
+        )
+        if predicate is None:
+            return keys
+        return [key for key in keys if predicate(key)]
+
+    @staticmethod
+    def _filter_scopes(
+        keys: list[str], *, prefix: str, contains: str, exact: str, limit: int
+    ) -> list[str]:
+        """递进过滤（与 Qdrant 实现同一口径，见 `base.list_scopes`）。"""
+        if exact:
+            return [key for key in keys if key == exact]
+        out = [
+            key
+            for key in keys
+            if (not prefix or key.startswith(prefix))
+            and (not contains or contains in key)
+        ]
+        return out[:limit]

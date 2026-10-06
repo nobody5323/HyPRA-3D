@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -123,3 +124,51 @@ class KnowledgeStore(ABC):
         用在这里的场景是用户要「彻底忘掉这个角色」（知识是用户自己上传的，
         删掉不回影响任何人）；没有数据时返回 0，不报错。不可恢复。
         """
+
+    def list_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        limit: int = 500,
+    ) -> list[str]:
+        """列出**当前真的有数据**的作用域键（默认实现返回空列表）。
+
+        为什么需要它：同步的清理逻辑（`datasource_sync.sync_worldbook_knowledge`）
+        必须能找到「**上一次写过、本次快照里已消失**」的作用域。只从当前快照推导
+        作用域的话，某本书在酒馆被删掉后，它的 `tavern:book:{哈希}` 已不在候选里，
+        那本书的旧文档就永远清不掉——用户会遇到「删了还在答」。
+
+        递进过滤条件（三者可叠加），保证子类能下推到存储层、不必全量拉数据：
+
+        - `prefix`：作用域键的前缀（如 `tavern:book:`，一次挑出全部世界书作用域）；
+        - `contains`：子串匹配（如某个 persona_id，找「跟这个角色沾边的作用域」）；
+        - `exact`：精确匹配单个键（此时 `limit` 失效，纯存在性查询）。
+
+        默认返回空列表而非 `raise NotImplementedError`：本方法是**可选增强**，
+        旧的自定义实现不实现它也不会崩——只是清理能力退化（当前两个内置实现都实现了）。
+        """
+        return []
+
+    def iter_scopes(
+        self,
+        *,
+        prefix: str = "",
+        contains: str = "",
+        exact: str = "",
+        predicate: Callable[[str], bool] | None = None,
+        limit: int = 500,
+    ) -> list[str]:
+        """按**谓词**列出作用域（`list_scopes` 的通用版，同样可下推到存储层）。
+
+        `predicate` 让调用方表达任意条件（如「去掉 `tavern:book:` 前缀再匹配哈希」），
+        而无需把 scope 原文全量拉回内存。默认实现退化为「拉候选 → 本地过滤」，
+        能下推的实现应覆写它；拉回的是 **scope 键字符串**，不含任何知识正文。
+        """
+        keys = self.list_scopes(
+            prefix=prefix, contains=contains, exact=exact, limit=limit
+        )
+        if predicate is None:
+            return keys
+        return [key for key in keys if predicate(key)]

@@ -14,8 +14,9 @@
 因此改用「chunk 数变化即重建」这种**自检式**失效，避免依赖显式通知。
 
 作用域口径见 `app/memory/knowledge/scopes`（检索侧只调它，不自己拼键）：
-基础两个作用域（本陪伴对象 + 共享 `*`）两种模式都查；酒馆来源的三个作用域
-（`tavern` / `tavern:{本角色}`）**只在酒馆聊天模式**查——酒馆世界书不该被桌宠人设看到。
+基础两个作用域（本陪伴对象 + 共享 `*`）两种模式都查；酒馆世界书那几本
+（每本一个 `tavern:book:{哈希}` 作用域）**只在酒馆聊天模式、且只对「当前已挂载」
+的书**查——挂载清单由插件配置给出，默认空（一本都不挂）。
 各路候选合并后重新 RRF，而不是拼几段结果。
 
 **通道策略按来源分档**（`_needs_sparse`）：用户上传语料与共享作用域保持
@@ -28,6 +29,8 @@ NPC 条目挤掉；同一评测集纯向量 8/8、等权混合 7/8，加权混�
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterable
 
 from app.memory.knowledge.base import KnowledgeChunk, KnowledgeHit, KnowledgeStore
 from app.memory.knowledge.scopes import is_tavern_scope, retrieval_scopes
@@ -120,6 +123,7 @@ class KnowledgeRetriever:
         *,
         top_k: int | None = None,
         include_tavern: bool = False,
+        mounted_books: Iterable[str] = (),
     ) -> list[KnowledgeHit]:
         """混合检索，返回融合后的前 top_k 条。
 
@@ -127,9 +131,10 @@ class KnowledgeRetriever:
 
         - **基础**（两种模式都查）：本陪伴对象 + 共享作用域（`SCOPE_ALL`）
           —— 用户上传的语料按对象隔离，共享的那份只存一次；
-        - **酒馆来源**（`include_tavern=True`，仅酒馆聊天模式）：`tavern` 全局书 +
-          `tavern:{本角色}` 内嵌书。桌宠模式**不查**，所以酒馆世界书不会污染内置人设
-          （见 `app/memory/knowledge/scopes` 的模块文档）。
+        - **酒馆世界书**（`include_tavern=True`，仅酒馆聊天模式）：**只查当前挂载的
+          那几本**（`mounted_books` 给出来源标识，每本换成一个 `tavern:book:{哈希}`
+          作用域）。**默认一本都不挂 = 一本都不查**，因此不想用的世界书绝不会
+          被串味召回；桌宠模式（`include_tavern=False`）则一个世界书作用域都不查。
 
         各路候选合并后**重新融合**，而不是拼几段结果——拼的话「谁更相关」就变成
         「谁的通道先被遍历」。
@@ -138,7 +143,9 @@ class KnowledgeRetriever:
         if limit <= 0 or not query.strip():
             return []
 
-        scopes = retrieval_scopes(companion_id, include_tavern=include_tavern)
+        scopes = retrieval_scopes(
+            companion_id, include_tavern=include_tavern, mounted_books=mounted_books
+        )
 
         candidates: dict[str, KnowledgeHit] = {}
         rankings: list[list[str]] = []
