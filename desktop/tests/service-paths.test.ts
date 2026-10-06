@@ -62,9 +62,9 @@ describe("derivePackagedPaths", () => {
     expect(paths.pythonExe).toBe(path.join(RESOURCES, "backend", "backend.exe"));
     expect(paths.qdrantExe).toBe(path.join(RESOURCES, "qdrant", "qdrant.exe"));
     expect(paths.backendDir).toBe(path.join(RESOURCES, "backend"));
-    // 发布包不随包分发 Web 端，这个路径在打包形态下本来就指不到东西——
-    // 由 describeMissingFrontendPath 把它翻译成一句人话
-    expect(paths.frontendDir).toBe(path.join(RESOURCES, "frontend"));
+    // Web 端现在是**随包分发**的静态产物（由主进程内的 assetServer 托管），
+    // 目录名是 web 而不是 frontend —— 后者是「源码 + node_modules」那个 Node 项目
+    expect(paths.frontendDir).toBe(path.join(RESOURCES, "web"));
   });
 
   it("Qdrant 数据目录落在用户数据目录下，而不是只读的 resources 里", () => {
@@ -210,15 +210,36 @@ describe("describeMissingFrontendPath", () => {
     expect(message).not.toContain("Python");
   });
 
-  it("打包形态直接说「发布包不含 Web 端」，不让人去改一个本来就不存在的目录", () => {
+  it("打包形态缺资源时报「安装包不完整」，而不是让人去 npm install", () => {
     const packaged = derivePackagedPaths({
       resourcesPath: path.resolve("/install/resources"),
       userDataDir: path.resolve("/users/demo/HyPRA"),
     });
     const message = describeMissingFrontendPath(packaged, fakeExists([]));
 
-    expect(message).toContain("发布包不含 Web 端");
+    // 打包形态没有 node_modules 这个概念，责任在安装包而不在用户
+    expect(message).toContain("安装包可能不完整");
     expect(message).not.toContain("npm install");
+  });
+
+  it("打包形态下 Web 端资源齐备（含 index.html）时判为可用", () => {
+    const packaged = derivePackagedPaths({
+      resourcesPath: path.resolve("/install/resources"),
+      userDataDir: path.resolve("/users/demo/HyPRA"),
+    });
+
+    // 只有目录、没有 index.html 仍算不可用（入口缺失）
+    expect(
+      describeMissingFrontendPath(packaged, fakeExists([packaged.frontendDir])),
+    ).toContain("index.html");
+
+    // 目录与入口都在 → 通过
+    expect(
+      describeMissingFrontendPath(
+        packaged,
+        fakeExists([packaged.frontendDir, path.join(packaged.frontendDir, "index.html")]),
+      ),
+    ).toBeNull();
   });
 });
 

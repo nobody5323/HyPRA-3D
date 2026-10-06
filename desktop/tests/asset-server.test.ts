@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   buildContentSecurityPolicy,
+  injectApiBase,
   resolveAssetPath,
   resolveRootFor,
 } from "../src/main/assetServer";
@@ -127,5 +128,55 @@ describe("buildContentSecurityPolicy", () => {
 
     // 锁死 script-src 的确切内容：往后谁想往里加通配符，这条测试会先炸
     expect(scriptSrc).toBe("script-src 'self' https://media.xingyun3d.com");
+  });
+});
+
+/**
+ * 后端基址注入（打包形态的 Web 端靠它拿到真实后端地址）。
+ *
+ * 背景：静态产物里的 `NEXT_PUBLIC_API_BASE` 是构建期内联的，用户改不了。
+ * 因此在**托管这一层**把地址注入页面 —— 前端 `lib/api/client.ts` 优先读它。
+ */
+describe("injectApiBase", () => {
+  const PAGE = '<!DOCTYPE html><html><head><meta charset="utf-8"></head><body></body></html>';
+
+  it("把地址注入到 head 开标签之后（必须早于任何脚本）", () => {
+    const out = injectApiBase(PAGE, "http://127.0.0.1:8000");
+
+    expect(out).toContain("window.__HYPRA_API_BASE__=");
+    expect(out).toContain("http://127.0.0.1:8000");
+
+    // 注入点必须在 <head> 之后、其它内容之前，前端模块求值时才读得到
+    const headEnd = out.indexOf("<head>") + "<head>".length;
+    expect(out.slice(headEnd, headEnd + 8)).toBe("<script>");
+  });
+
+  it("未配置后端地址时原样返回，不往页面里塞无意义的值", () => {
+    expect(injectApiBase(PAGE, undefined)).toBe(PAGE);
+    expect(injectApiBase(PAGE, "")).toBe(PAGE);
+  });
+
+  it("重复调用不会叠加脚本（页面可能被多次请求）", () => {
+    const once = injectApiBase(PAGE, "http://127.0.0.1:8000");
+    const twice = injectApiBase(once, "http://127.0.0.1:8000");
+
+    expect(twice).toBe(once);
+    expect(twice.match(/window\.__HYPRA_API_BASE__/g)).toHaveLength(1);
+  });
+
+  it("地址里的引号与 </script> 被转义，不能截断脚本标签", () => {
+    const out = injectApiBase(PAGE, 'http://x/"><\\/script><script>alert(1)</script>');
+
+    // 危险序列要么被转义、要么不可能原样出现在脚本体内
+    expect(out).not.toContain('</script><script>alert(1)');
+    // 页面里应当只有注入的那一个脚本标签的开闭
+    expect(out.match(/<\/script>/g)).toHaveLength(1);
+  });
+
+  it("没有 <head> 的文档也能注入（插在文档最前）", () => {
+    const bare = "<html><body>hi</body></html>";
+    const out = injectApiBase(bare, "http://127.0.0.1:8000");
+
+    expect(out.startsWith("<script>")).toBe(true);
   });
 });

@@ -23,6 +23,32 @@ npm test            # vitest：接口契约 / 分段播报 / 退避重连
 npm run build       # Next.js 生产构建（standalone）
 ```
 
+### 组装「随桌面端分发的 Web 端产物」（可选）
+
+桌面端安装包会带上 Web 端（完整工作台）。它不是源码，而是一份**预渲染静态产物**：
+
+```bash
+npm run build                        # 产出 .next（standalone）
+node scripts/build-web-bundle.mjs    # 组装到 out-web/
+node scripts/build-web-bundle.mjs --check   # 只校验（桌面端 dist:win 也会调它）
+```
+
+产物只有约 1.6 MB：`index.html` + `_next/static` + `portraits`（自研立绘）+ `vendor`（Cubism 脚本）。
+
+> ⚠️ **不要改成 `output: "export"`**：Next 15.5 在 Windows 上写 `404.html` 时会抛
+> `EPERM: operation not permitted`，且该失败会**中断整个导出**，结果是 `index.html`
+> 根本生成不出来（只能拿到 `404.html` 与 `_next/`）。已实测复现（含显式
+> `app/not-found.tsx` 的情况）。因此走 standalone 构建 + 组装脚本这条路径。
+
+> **Live2D 模型不进产物**：`public/live2d/` 下的模型是第三方资源（授权 + 体积），
+> 组装脚本按**白名单**拷入（只带 `portraits` / `vendor`），桌面端的
+> `verify-release-assets.mjs` 另有一条红线会拦下越界内容。
+> 用户自己的模型从 `%APPDATA%/HyPRA/live2d/` 加载。
+
+> **后端地址在运行时注入**：页面由桌面端托管时，会往 `<head>` 注入
+> `window.__HYPRA_API_BASE__`（见 `lib/api/client.ts` 的 `resolveApiBase`）。
+> 这样用户改了后端端口，Web 端无需重新构建即可跟上。
+
 测试只覆盖**容易安静出错、且靠手测难以复现**的三处（均有回归用例）：
 
 | 文件 | 覆盖内容 |

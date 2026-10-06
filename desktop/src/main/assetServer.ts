@@ -246,22 +246,51 @@ function handleRequest(
     return;
   }
 
-  if (path.extname(filePath).toLowerCase() === ".html") {
+  const isHtml = path.extname(filePath).toLowerCase() === ".html";
+
+  if (isHtml) {
     // CSP 只挂在页面上（静态资源不需要，挂了反而会随着每个请求重复传输）
     response.setHeader("Content-Security-Policy", buildContentSecurityPolicy(options.backendOrigin));
   }
 
   response.setHeader("Content-Type", contentTypeOf(filePath));
-  response.setHeader("Content-Length", String(stat.size));
   // 本地资源随应用版本变化，允许缓存但不允许在窗口生命周期内失效
   response.setHeader("Cache-Control", "no-cache");
 
   if (request.method === "HEAD") {
+    response.setHeader("Content-Length", String(stat.size));
     response.writeHead(200);
     response.end();
 
     return;
   }
+
+  /*
+   * HTML 走「读全文 → 注入 → 发送」而不是流式管道：注入要改内容，
+   * 而 Content-Length 也随之变化（注入脚本会改变长度，不能沿用文件大小）。
+   * 页面只有几 KB 且本地读取，一次性读入没有内存顾虑。
+   */
+  if (isHtml) {
+    let html: string;
+
+    try {
+      html = fs.readFileSync(filePath, "utf8");
+    } catch {
+      respond(response, 500, "Internal Server Error");
+
+      return;
+    }
+
+    const body = Buffer.from(injectApiBase(html, options.backendOrigin), "utf8");
+
+    response.setHeader("Content-Length", String(body.byteLength));
+    response.writeHead(200);
+    response.end(body);
+
+    return;
+  }
+
+  response.setHeader("Content-Length", String(stat.size));
 
   const stream = fs.createReadStream(filePath);
 
@@ -273,6 +302,56 @@ function handleRequest(
     }
   });
   stream.pipe(response);
+}
+
+/**
+ * 把后端基址注入到 HTML 的 `<head>` 最前面。
+ *
+ * ## 为什么必须注入（而不是让前端读构建期环境变量）
+ *
+ * 发布包里的 Web 端是**静态产物**，`NEXT_PUBLIC_API_BASE` 在构建那一刻就被
+ * 内联进 JS bundle 了，用户改不了。但后端端口是可配置的，写死的地址很可能
+ * 指向一个没人监听的端口。所以在**托管这一层**把真实地址告诉页面。
+ *
+ * ## 为什么插在 `<head>` 最前
+ *
+ * 前端 `lib/api/client.ts` 的 `API_BASE` 是模块级常量，在 bundle 首次执行时
+ * 求值。这里注入的是 **inline script**，而 Next 的 bundle 走 `<script src>`
+ * —— HTML 顺序解析，inline 先执行，因此前端模块求值时一定能读到该值。
+ *
+ * ## 去重
+ *
+ * 同一个页面可能被同一进程重复请求（刷新、多窗口）。注入前先检查标记，
+ * 已有则跳过，避免叠加多个脚本。
+ */
+export function injectApiBase(html: string, apiBase?: string): string {
+  // 未配置后端地址时不做任何改动（前端会回落到构建期值 / 本地默认）
+  if (!apiBase) {
+    return html;
+  }
+
+  if (html.includes("__HYPRA_API_BASE__")) {
+    return html;
+  }
+
+  /*
+   * 值经 JSON.stringify 转义后再嵌入：地址来自配置，若含引号或 `</script>`，
+   * 裸拼接会截断脚本标签、造成 HTML 注入。JSON.stringify 已处理引号与反斜杠，
+   * 再额外把 `<` 转成 `\u003c` 挡住 `</script>` 这类序列。
+   */
+  const serialized = JSON.stringify(apiBase).replace(/</g, "\\u003c");
+  const snippet = `<script>window.__HYPRA_API_BASE__=${serialized};</script>`;
+
+  // 优先插在 <head> 开标签之后；没有 head 就插在文档最前
+  const headMatch = html.match(/<head[^>]*>/i);
+
+  if (headMatch && headMatch.index !== undefined) {
+    const at = headMatch.index + headMatch[0].length;
+
+    return `${html.slice(0, at)}${snippet}${html.slice(at)}`;
+  }
+
+  return `${snippet}${html}`;
 }
 
 /** 在 loopback 上启动静态资源服务 */

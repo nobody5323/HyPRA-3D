@@ -1,10 +1,11 @@
 /**
  * 发布前的捆绑运行时守卫：确认 extraResources 的源都在。
  *
- * 为什么需要这个脚本：安装包要内置 `backend.exe` 与 `qdrant.exe`，而这两样
- * 都不在仓库里：
+ * 为什么需要这个脚本：安装包要内置 `backend.exe`、`qdrant.exe` 与 Web 端静态产物，
+ * 而这三样都不在仓库里：
  *   - `backend/dist/backend/`      ← 由 PyInstaller 产出（见 backend/backend.spec）
  *   - `_local/qdrant/qdrant.exe`   ← 用户自备二进制（`_local/` 已被 gitignore）
+ *   - `frontend/out-web/`          ← 由 next build + build-web-bundle.mjs 组装
  *
  * 新克隆仓库的人直接跑 `npm run dist:win`，只会看到 electron-builder 一句
  * 「cannot find …」，不知道该装什么。这里提前把关，缺哪项就打印可直接
@@ -35,6 +36,17 @@ const REQUIREMENTS = [
     fix: [
       "下载 Windows 版并解压到 _local/qdrant/（须与 backend/pyproject.toml 的 qdrant-client 对齐）：",
       "  https://github.com/qdrant/qdrant/releases/download/v1.19.1/qdrant-x86_64-pc-windows-msvc.zip",
+    ],
+  },
+  {
+    label: "Web 端静态产物",
+    target: path.join(repoRoot, "frontend", "out-web", "index.html"),
+    fix: [
+      "cd frontend",
+      "npm run build                 # 产出 .next（standalone）",
+      "node scripts/build-web-bundle.mjs   # 组装 out-web/",
+      "#   注：不要用 output: \"export\" —— Next 15.5 在 Windows 上写 404.html",
+      "#   会抛 EPERM 并中断导出，导致 index.html 根本生成不出来",
     ],
   },
   {

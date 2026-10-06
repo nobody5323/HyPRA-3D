@@ -87,16 +87,17 @@ npm run dist:win
 - `HyPRA-<版本>-portable.exe` —— 免安装，双击即用
 - `HyPRA-Setup-<版本>.exe` —— NSIS 安装包（可选安装目录、创建快捷方式）
 
-**产物是自包含的**：`resources/` 下已内置 `backend/backend.exe`（PyInstaller 产物，自带 Python 运行时）
-与 `qdrant/qdrant.exe`。目标机器**不需要装 Python / Node / Qdrant**，双击即用；未压缩约 590 MB，
-NSIS 压缩后 250–350 MB。
+**产物是自包含的**：`resources/` 下已内置 `backend/backend.exe`（PyInstaller 产物，自带 Python
+运行时）、`qdrant/qdrant.exe` 与 `web/`（Web 端静态产物）。目标机器**不需要装 Python / Node /
+Qdrant**，双击即用；未压缩约 600 MB，NSIS 压缩后 250–350 MB。
 
-打包前需要两样捆绑资源就位（`npm run verify:bundled` 会把关，缺失时打印可照抄的补救命令）：
+打包前需要三样捆绑资源就位（`npm run verify:bundled` 会把关，缺失时打印可照抄的补救命令）：
 
 | 资源 | 来源 |
 |---|---|
 | `backend/dist/backend/` | `cd backend && pyinstaller backend.spec --noconfirm` |
 | `_local/qdrant/qdrant.exe` | 自备二进制（`_local/` 已被 gitignore），版本需与 `backend/pyproject.toml` 的 `qdrant-client` 对齐 |
+| `frontend/out-web/` | `cd frontend && npm run build && node scripts/build-web-bundle.mjs`（`verify:web` 会校验） |
 
 打包依赖两个二进制下载，国内网络建议先设镜像：
 
@@ -123,16 +124,26 @@ npm run build        # 开发模式则重启 npm run dev
 
 ---
 
-## 本机服务（Qdrant + 后端）
+## 本机服务（Qdrant + 后端 + Web 端）
 
-**桌面端代管这两个进程**：启动时按设置拉起，关掉 HyPRA（包括被强制结束后的下次启动）时一起收掉。
+**桌面端代管这三个进程/服务**：启动时按设置拉起前两个，关掉 HyPRA（包括被强制结束后的下次启动）时一起收掉。
 
-| 服务 | 源码模式的启动方式 | 就绪判据 |
-|---|---|---|
-| Qdrant | `_local/qdrant/qdrant.exe`（v1.19.1，与 `backend/pyproject.toml` 的 `qdrant-client` 对齐） | `127.0.0.1:6333/healthz` |
-| 后端 | `.venv/Scripts/python.exe -m uvicorn app.main:app --port 8000` | `127.0.0.1:8000/health` |
+| 服务 | 源码模式的启动方式 | 安装包形态 | 就绪判据 |
+|---|---|---|---|
+| Qdrant | `_local/qdrant/qdrant.exe`（v1.19.1，与 `backend/pyproject.toml` 的 `qdrant-client` 对齐） | 内置 `resources/qdrant/qdrant.exe` | `127.0.0.1:6333/healthz` |
+| 后端 | `.venv/Scripts/python.exe -m uvicorn app.main:app --port 8000` | 内置 `resources/backend/backend.exe` | `127.0.0.1:8000/health` |
+| Web 端 | `cd frontend && npm run dev`（Next dev，端口 3000） | 主进程内静态服务托管 `resources/web/`，端口 3000 | `127.0.0.1:3000/` |
 
-安装包形态下这两条换成内置的 `resources/backend/backend.exe` 与 `resources/qdrant/qdrant.exe`
+**Web 端在安装包形态下不是子进程**：随包的是 Next 的**预渲染静态产物**（前端只有
+`layout` + `page` 两个文件、无 API 路由），由主进程里那个静态服务直接托管
+（与桌宠窗复用同一套实现），因此**不需要 `node.exe`**——这也是安装包没因为
+加入 Web 端而显著变大（静态产物约 1.6 MB）的原因。
+
+也因此「Web 模式」的默认地址 `http://127.0.0.1:3000` 对两种形态都成立。
+后端地址由静态服务**在返回 HTML 时注入**（`window.__HYPRA_API_BASE__`），
+所以用户改了后端端口后，Web 端会自动跟上，不必重新构建前端。
+
+安装包形态下前两条换成内置的 `resources/backend/backend.exe` 与 `resources/qdrant/qdrant.exe`
 （主进程按 `app.isPackaged` 自动切换，不需要手工配置）。
 
 在控制台「总览 → 本机服务」里可以：看每个服务的状态与 PID、单独启停、
@@ -144,7 +155,9 @@ npm run build        # 开发模式则重启 npm run dev
   既不重复启动也不去停它（不会抢端口、不会误杀）；
 - **后端带 `--reload` 会产生两级子进程**，收尾更依赖进程树清理，所以默认不开；
 - **两种形态的路径来源不同**：源码模式从项目根找 `.venv` 与 `_local/qdrant`；安装包形态从自身
-  `resources/` 读内置的 `backend.exe` 与 `qdrant.exe`，数据则落在 `%APPDATA%/HyPRA/`；
+  `resources/` 读内置的 `backend.exe`、`qdrant.exe` 与 `web/`，数据则落在 `%APPDATA%/HyPRA/`；
+- **Web 端是按需启动的**：程序一开只拉 Qdrant + 后端；Web 端在你点「本机服务 → 启动」
+  或「以 Web 模式启动」时才起，避免只想用桌宠的人白搭一份内存；
 - 日志在 `%APPDATA%/HyPRA/logs/`，启动超时会把日志路径一并写在失败原因里。
 
 ---

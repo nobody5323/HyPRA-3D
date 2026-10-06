@@ -21,6 +21,8 @@ __pycache__/
 node_modules/
 .next/
 out/
+# 随桌面端分发的 Web 端静态产物（由 scripts/build-web-bundle.mjs 组装，构建产物不入库）
+frontend/out-web/
 dist/
 build/
 *.tsbuildinfo
@@ -28,6 +30,10 @@ build/
 # ===== 桌面端 Electron =====
 # 安装包与免安装产物（体积大，且可能混入本地模型/密钥），不入库
 desktop/release/
+# 备用输出目录：release/ 被正在运行的实例锁住时用它打包（见 README 排障）
+desktop/release-new/
+# 验证性打包的临时输出目录（同上，用完即可删）
+desktop/release-verify/
 # 构建时生成的应用图标（由 scripts/make-app-icon.mjs 产出）
 desktop/assets/
 # 本地模型与 Cubism SDK（桌宠渲染资源，自备且不可自由分发）

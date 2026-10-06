@@ -32,10 +32,11 @@ export interface ServicePaths {
   /**
    * Web 前端目录（Next 项目的根，`npm run dev` 的 cwd）。
    *
-   * 打包形态下它**指向一个并不存在的目录**：发布包不随包分发 Web 端
-   * （见 `electron-builder` 的 `extraResources`），所以那种形态下前端服务
-   * 会直接报「发布包不含 Web 端」。这不是漏配，是刻意的边界——
-   * 桌面端有自己的渲染层，Web 端是另一种部署形态。
+   * **开发形态**：指向项目里的 `frontend/`（源码 + node_modules），走 `npm run dev`。
+   *
+   * **打包形态**：指向随包的**静态产物目录**（`resources/web`），由主进程内的
+   * assetServer 直接托管，**不是**一个 Next 项目、也不需要 node_modules。
+   * 两种形态下 `describeMissingFrontendPath` 的判据因此不同（见该函数）。
    */
   frontendDir: string;
   /**
@@ -95,7 +96,9 @@ export function derivePackagedPaths(options: {
     qdrantExe: path.join(resources, "qdrant", "qdrant.exe"),
     qdrantDir: path.join(userData, "qdrant"),
     backendDir: path.join(resources, "backend"),
-    frontendDir: path.join(resources, "frontend"),
+    // 随包的 Web 端静态产物（不是 Next 项目，无需 node_modules）：
+    // 由主进程内的 assetServer 托管，见 electron-builder 的 extraResources
+    frontendDir: path.join(resources, "web"),
     packaged: true,
   };
 }
@@ -245,21 +248,35 @@ export function describeMissingPath(
 /**
  * 检查这批路径是否真能用来启动 **Web 前端**。
  *
- * 判据与后端/向量库完全不同：前端是个 Node 项目，需要的是项目目录本身
- * 与它自己装好的依赖，与 Python、Qdrant 一概无关。
+ * 两种形态的判据**完全不同**：
  *
- * `node_modules` 必须单独查：`npm run dev` 在依赖缺失时**能起进程但立刻退出**，
- * 报出来的是一句难懂的模块解析错误；在这里先拦住，界面就能直接说清
- * 「先 cd frontend 再 npm install」。
+ * - **开发形态**：前端是个 Node 项目，需要项目目录本身 + 它自己装好的依赖
+ *   （与 Python、Qdrant 无关）。`node_modules` 必须单独查：`npm run dev` 在依赖
+ *   缺失时**能起进程但立刻退出**，报出来是一句难懂的模块解析错误；在这里先拦住，
+ *   界面就能直接说清「先 cd frontend 再 npm install」。
+ *
+ * - **打包形态**：前端是随包的**静态产物**，由主进程内的 assetServer 直接托管
+ *   ——既不需要 node_modules，也不需要任何 Node 项目结构。判据只有一条：
+ *   入口 `index.html` 在不在。缺了它是**安装包不完整**，而不是用户少装了什么。
  */
 export function describeMissingFrontendPath(
   paths: ServicePaths,
   exists: (target: string) => boolean,
 ): string | null {
+  if (paths.packaged) {
+    if (!exists(paths.frontendDir)) {
+      return `发布包缺少 Web 端资源：${paths.frontendDir}（安装包可能不完整，建议重新安装）`;
+    }
+
+    if (!exists(path.join(paths.frontendDir, "index.html"))) {
+      return `Web 端资源不完整：缺少 ${path.join(paths.frontendDir, "index.html")}（安装包可能不完整，建议重新安装）`;
+    }
+
+    return null;
+  }
+
   if (!exists(paths.frontendDir)) {
-    return paths.packaged
-      ? "发布包不含 Web 端（Web 端是另一种部署形态，需单独部署后在「Web 模式」里填地址）"
-      : `找不到 Web 前端目录：${paths.frontendDir}（可在服务设置里指定项目根）`;
+    return `找不到 Web 前端目录：${paths.frontendDir}（可在服务设置里指定项目根）`;
   }
 
   if (!exists(path.join(paths.frontendDir, "node_modules"))) {

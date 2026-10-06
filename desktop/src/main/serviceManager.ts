@@ -360,6 +360,13 @@ interface Runtime {
   logStream: WriteStream | null;
   /** 停止流程已发起：此时进程退出不再算「崩溃」 */
   cancelled: boolean;
+  /**
+   * 进程内服务的停止函数（打包形态的 Web 端）。
+   *
+   * 与 `child` 互斥：走 `spawn` 的服务不填它，进程内的服务不填 `child`。
+   * 停止时按「哪个有值」二选一，因此两条路径不会互相干扰。
+   */
+  stopInternal: (() => Promise<void>) | null;
 }
 
 export interface ServiceManagerOptions {
@@ -380,6 +387,22 @@ export interface ServiceManagerOptions {
   kill?: (pid: number) => Promise<void>;
   /** 状态变化回调 */
   onChanged?: ServiceStateListener;
+  /**
+   * **进程内**服务启动器。
+   *
+   * 打包形态下 Web 端不是一个子进程，而是主进程里跑的一个 HTTP 服务
+   * （复用 `assetServer` 托管随包静态产物）。它没有 PID 可杀、也没有命令行，
+   * 因此无法走 `spawnService` 那条路 —— 由这个回调接管启停。
+   *
+   * 返回一个停止函数（`stopAll` / `stopService` 时调用）。
+   * 开发形态不传它，`frontend` 保持 `npm run dev` 子进程的老路径。
+   */
+  startInternalService?: (id: ServiceId, paths: ServicePaths) => Promise<{
+    /** 停止该服务并释放端口 */
+    stop: () => Promise<void>;
+    /** 供界面展示的地址（如 `http://127.0.0.1:3000`） */
+    url: string;
+  }>;
 }
 
 export class ServiceManager {
@@ -398,6 +421,7 @@ export class ServiceManager {
         child: null,
         logStream: null,
         cancelled: false,
+        stopInternal: null,
       });
     }
 
@@ -466,6 +490,19 @@ export class ServiceManager {
       }
 
       runtime.cancelled = true;
+
+      // 进程内服务先走自己的停止函数，再清空引用（重复调 stopAll 不会重复停）
+      if (runtime.stopInternal) {
+        const stop = runtime.stopInternal;
+        runtime.stopInternal = null;
+
+        try {
+          await stop();
+        } catch {
+          // 收尾阶段不因单个服务停不掉而中断整体退出
+        }
+      }
+
       await this.killRuntime(id);
       runtime.phase = "stopped";
       runtime.detail = "未启动";
@@ -514,6 +551,12 @@ export class ServiceManager {
       this.setPhase(id, "adopted", "已在运行（不是桌面端启动的，桌面端不会停止它）", null);
 
       return this.getStates();
+    }
+
+    // 打包形态的 Web 端：不是一个可 spawn 的进程，而是主进程内的 HTTP 服务。
+    // 单独一条分支，尽早分流——它没有 PID、没有命令行、也没有日志文件。
+    if (id === "frontend" && this.paths.packaged && this.options.startInternalService) {
+      return this.startInternalFrontend(runtime);
     }
 
     const command = buildServiceCommand(id, this.paths, {
@@ -565,6 +608,58 @@ export class ServiceManager {
     return this.getStates();
   }
 
+  /**
+   * 启动**进程内** Web 端（打包形态）。
+   *
+   * 与 `spawn` 路径的差别：
+   *
+   * - 没有子进程，因此不写 PID 记录、不开日志文件（服务就在本进程里，
+   *   异常会走主进程日志）；
+   * - 「就绪」不以退出码判断，而是启动成功即视为就绪——`assetServer` 在
+   *   端口绑定完成后才 resolve，此时服务已可访问；
+   * - 停止时调 `stopInternal`，不是杀进程树。
+   *
+   * 健康探测仍保留一次：万一端口被别人占了，`assetServer` 会自行递增端口，
+   * 这里不需要额外处理，但**先探一次**能避免与外部服务抢同一个端口。
+   */
+  private async startInternalFrontend(runtime: Runtime): Promise<ServiceState[]> {
+    const paths = this.paths;
+
+    if (!paths || !this.options.startInternalService) {
+      this.setPhase("frontend", "failed", "进程内 Web 端启动器不可用");
+
+      return this.getStates();
+    }
+
+    this.setPhase("frontend", "starting", "启动中…", null);
+
+    try {
+      const handle = await this.options.startInternalService("frontend", paths);
+
+      // 启动是异步的，期间可能已被 stop：那就立刻回滚，别留一个野服务
+      if (runtime.cancelled) {
+        await handle.stop();
+        runtime.stopInternal = null;
+        runtime.phase = "stopped";
+        runtime.detail = "未启动";
+        this.emit();
+
+        return this.getStates();
+      }
+
+      runtime.stopInternal = handle.stop;
+      runtime.child = null;
+      runtime.pid = null;
+      this.setPhase("frontend", "ready", `运行中（随包静态服务 ${handle.url}）`, null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      this.setPhase("frontend", "failed", `启动失败：${message}`);
+    }
+
+    return this.getStates();
+  }
+
   /** 停止单个服务；被外部接管的不停（会重新探一次，避免界面停在过期状态） */
   async stopService(id: ServiceId): Promise<ServiceState[]> {
     const runtime = this.mustGet(id);
@@ -575,6 +670,25 @@ export class ServiceManager {
       } else {
         this.setPhase(id, "stopped", "未启动", null);
       }
+
+      return this.getStates();
+    }
+
+    // 进程内服务（打包形态的 Web 端）：没有 child / pid，靠 stopInternal 收尾
+    if (runtime.stopInternal) {
+      runtime.cancelled = true;
+
+      const stop = runtime.stopInternal;
+      runtime.stopInternal = null;
+
+      try {
+        await stop();
+      } catch {
+        // 停不掉也要把状态置为 stopped：端口若真没释放，下次启动会自行递增端口
+      }
+
+      this.setPhase(id, "stopped", "未启动", null);
+      await this.writePidFile();
 
       return this.getStates();
     }

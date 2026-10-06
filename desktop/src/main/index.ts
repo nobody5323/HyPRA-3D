@@ -24,6 +24,7 @@ import { ensureUserEnvFile } from "./serviceEnv";
 import {
   cleanupStaleProcesses,
   createServiceManager,
+  FRONTEND_PORT,
   type ServiceManager,
 } from "./serviceManager";
 import { fileExists, resolveServicePaths } from "./servicePaths";
@@ -247,6 +248,33 @@ if (!gotLock) {
         logDir: serviceLogDir,
         readSettings: loadServiceSettings,
         onChanged: publishServicesChanged,
+        /*
+         * 打包形态的 Web 端：起一个进程内的静态服务托管随包产物。
+         *
+         * 复用 `assetServer`（桌宠窗那套）：CSP 生成、路径逃逸防护、MIME 表
+         * 都已经过验证。差别只在两个参数——
+         *   - `root` 指向随包的 Web 产物（`resources/web`）
+         *   - `backendOrigin` 传真实后端地址：它既进 CSP 的 connect-src
+         *     （否则前端请求会被 CSP 拦掉），也是注入到页面的
+         *     `window.__HYPRA_API_BASE__` 的值来源
+         *
+         * 端口固定 3000（与「Web 模式」默认地址一致）；被占用时
+         * assetServer 会自行递增，因此不会因端口冲突直接失败。
+         */
+        startInternalService: async (_id, paths) => {
+          const server = await startAssetServer({
+            root: paths.frontendDir,
+            backendOrigin: API_BASE,
+            // 与开发形态的 Next 服务同端口：「Web 模式」的默认地址（webUrl）
+            // 因此对两种形态都成立，用户不必区分自己拿到的是哪一种
+            preferredPort: FRONTEND_PORT,
+          });
+
+          return {
+            url: server.origin,
+            stop: () => server.close(),
+          };
+        },
       });
 
       registerConsoleIpc({

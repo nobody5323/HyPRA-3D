@@ -70,7 +70,61 @@ import type {
   TtsVoicesStatus,
 } from "@/lib/api/types";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+/**
+ * 后端基址的解析顺序（**运行时优先于构建时**）。
+ *
+ * 为什么需要运行时注入：静态产物（`out-web/`）是被**烤进发布包**的，
+ * 而 `NEXT_PUBLIC_*` 是**构建期内联**——构建机上的地址会在打包那一刻写死进
+ * JS bundle，用户改不了。但后端端口是可配置的（桌面端「服务设置」可改），
+ * 写死就会让前端指向一个没人监听的地址。
+ *
+ * 因此桌面端在托管页面时注入 `window.__HYPRA_API_BASE__`（见
+ * `desktop/src/main/assetServer.ts` 的页面注入），这里优先读它；
+ * 读不到时回落到构建期环境变量（Web 端独立部署 / Docker 场景仍走这条）。
+ *
+ * ⚠️ 顺序不能颠倒：构建期值在新形态下是「陈旧的默认值」，
+ * 若让它优先，桌面端注入的值就永远不生效。
+ */
+declare global {
+  interface Window {
+    /** 由桌面端静态资源服务注入的后端基址（形如 `http://127.0.0.1:8000`） */
+    __HYPRA_API_BASE__?: string;
+  }
+}
+
+function resolveApiBase(): string {
+  // ① 运行时注入（桌面端托管场景）—— 仅浏览器有 window
+  if (typeof window !== "undefined") {
+    const injected = window.__HYPRA_API_BASE__;
+
+    if (typeof injected === "string" && injected.trim().length > 0) {
+      return injected.trim().replace(/\/+$/, "");
+    }
+  }
+
+  // ② 构建期内联（Web 端独立部署 / Docker）
+  const buildTime = process.env.NEXT_PUBLIC_API_BASE;
+
+  if (typeof buildTime === "string" && buildTime.trim().length > 0) {
+    return buildTime.trim().replace(/\/+$/, "");
+  }
+
+  // ③ 本地默认
+  return "http://localhost:8000";
+}
+
+/**
+ * 后端基址。
+ *
+ * **求值时机**：模块首次 import 时求值一次。桌面端托管场景下，
+ * 注入脚本被放在 `<head>` 的**最前面**（见 `desktop/src/main/assetServer.ts`
+ * 的 `injectApiBase`），而 Next 的 bundle 走 `<script src>` 异步加载，
+ * HTML 又是顺序解析的 —— 因此模块求值时注入值一定已就位。
+ *
+ * 若将来出现「注入晚于 bundle」的场景（例如改成动态 import），
+ * 这里应改为 getter 惰性求值，而不是去调执行顺序。
+ */
+const API_BASE = resolveApiBase();
 
 /**
  * 把后端返回的**相对**媒体地址补全为可直接加载的地址。
