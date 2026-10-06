@@ -4,7 +4,7 @@ import pytest
 
 from app.memory.knowledge.inmemory_store import InMemoryKnowledgeStore
 from app.memory.knowledge.retriever import KnowledgeRetriever
-from app.memory.knowledge.scopes import TAVERN_SCOPE, tavern_scope
+from app.memory.knowledge.scopes import book_scope
 from app.worldbook.models import SCOPE_ALL
 
 COMPANION = "therapist"
@@ -138,46 +138,79 @@ def test_invalidate_forces_rebuild(retriever: KnowledgeRetriever) -> None:
 
 
 # =============================================================
-# 酒馆来源：只在酒馆聊天模式召回（AGENTS.md §8.1 / §8.2）
+# 酒馆世界书:只在酒馆模式 + 只查已挂载的书(AGENTS.md §8.1 / §8.2)
 # =============================================================
 
+#: 假想的「一本已挂载的世界书」的来源标识与它对应的作用域
+BOOK_A = "world/世界甲"
+SCOPE_A = book_scope(BOOK_A)
 
-def test_tavern_scope_is_not_searched_in_companion_mode() -> None:
+
+def test_mounted_book_is_not_searched_in_companion_mode() -> None:
     """★ 桌宠模式查不到酒馆世界书——内置人设不该「知道」别的作品的设定。
 
     这就是「酒馆世界书注入向量库后召回不出来」的真实期望行为：
     在桌宠模式里**就该**召不回来。混进共享作用域才是 bug。
     """
     store = InMemoryKnowledgeStore()
-    store.add_document(TAVERN_SCOPE, title="酒馆世界书", chunks=["某作品的角色设定。"])
+    store.add_document(SCOPE_A, title="酒馆世界书", chunks=["某作品的角色设定。"])
     retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
 
-    assert retriever.retrieve(COMPANION, "某作品的角色设定") == []
+    # 桌宠模式即使挂了全书也不查
+    assert retriever.retrieve(COMPANION, "某作品的角色设定", mounted_books=[BOOK_A]) == []
 
 
-def test_tavern_scope_is_searched_in_tavern_mode() -> None:
-    """★ 酒馆模式能召回全局书 + 本角色的内嵌书。"""
+def test_default_mounts_nothing_so_no_book_is_searched() -> None:
+    """★ 默认全不挂：酒馆模式下，没挂的书一本都查不到。"""
     store = InMemoryKnowledgeStore()
-    store.add_document(TAVERN_SCOPE, title="全局书", chunks=["全局设定：这座城市靠海。"])
-    store.add_document(
-        tavern_scope(COMPANION), title="内嵌书", chunks=["专属设定：她住在城南。"]
+    store.add_document(SCOPE_A, title="甲书", chunks=["甲书设定：这座城市靠海。"])
+    retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
+
+    assert retriever.retrieve(COMPANION, "这座城市靠海", include_tavern=True) == []
+
+
+def test_mounted_book_is_searched_in_tavern_mode() -> None:
+    """★ 酒馆模式 + 已挂载 → 能召回这本书的内容。"""
+    store = InMemoryKnowledgeStore()
+    store.add_document(SCOPE_A, title="甲书", chunks=["甲书设定：这座城市靠海。"])
+    retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
+
+    hits = retriever.retrieve(
+        COMPANION, "这座城市靠海", include_tavern=True, mounted_books=[BOOK_A]
     )
-    retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
 
-    global_hits = retriever.retrieve(COMPANION, "这座城市靠海", include_tavern=True)
-    assert global_hits and "靠海" in global_hits[0].chunk.text
-
-    own_hits = retriever.retrieve(COMPANION, "她住在城南", include_tavern=True)
-    assert own_hits and "城南" in own_hits[0].chunk.text
+    assert hits and "靠海" in hits[0].chunk.text
 
 
-def test_other_characters_tavern_scope_stays_isolated() -> None:
-    """★ 隔离单位落到角色：别的角色的内嵌书在酒馆模式下也不能串味。"""
+def test_unmounted_book_stays_isolated() -> None:
+    """★ 没挂的书不串味：挂着甲书时查不到乙书的内容。"""
     store = InMemoryKnowledgeStore()
-    store.add_document(tavern_scope("tbp-甲"), title="甲的专属", chunks=["甲的酒馆设定。"])
+    book_b = "world/世界乙"
+    store.add_document(book_scope(book_b), title="乙书", chunks=["乙书专属：她住在城南。"])
     retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
 
-    assert retriever.retrieve("tbp-乙", "甲的酒馆设定", include_tavern=True) == []
+    assert retriever.retrieve(
+        COMPANION, "她住在城南", include_tavern=True, mounted_books=[BOOK_A]
+    ) == []
+
+
+def test_multiple_mounted_books_are_all_searched() -> None:
+    """★ 挂多本时每本都能召回（挂哪几本查哪几本）。"""
+    store = InMemoryKnowledgeStore()
+    book_b = "char/角色乙"
+    store.add_document(SCOPE_A, title="甲书", chunks=["甲书设定：这座城市靠海。"])
+    store.add_document(book_scope(book_b), title="乙书", chunks=["乙书设定：她住在城南。"])
+    retriever = KnowledgeRetriever(store, top_k=5, candidate_n=10)
+
+    hit_a = retriever.retrieve(
+        COMPANION, "这座城市靠海", include_tavern=True, mounted_books=[BOOK_A, book_b]
+    )
+    hit_b = retriever.retrieve(
+        COMPANION, "她住在城南", include_tavern=True, mounted_books=[BOOK_A, book_b]
+    )
+
+    assert hit_a and "靠海" in hit_a[0].chunk.text
+    assert hit_b and "城南" in hit_b[0].chunk.text
 
 
 def test_tavern_mode_still_searches_user_uploaded_knowledge() -> None:
@@ -222,16 +255,18 @@ def test_tavern_scope_skips_sparse_channel_when_dense_is_enough(
     压过语义更相关的条目（实测把「凌颜玉的衣柜」挤出 top3）。
     """
     store = InMemoryKnowledgeStore()
-    store.add_document(TAVERN_SCOPE, title="甲", chunks=["甲的内容。", "甲的另一段。"])
-    store.add_document(TAVERN_SCOPE, title="乙", chunks=["乙的内容。"])
+    store.add_document(SCOPE_A, title="甲", chunks=["甲的内容。", "甲的另一段。"])
+    store.add_document(SCOPE_A, title="乙", chunks=["乙的内容。"])
     retriever = KnowledgeRetriever(store, top_k=2, candidate_n=10)
 
     seen = _spy_sparse_scopes(monkeypatch)
 
-    hits = retriever.retrieve(COMPANION, "内容", include_tavern=True)
+    hits = retriever.retrieve(
+        COMPANION, "内容", include_tavern=True, mounted_books=[BOOK_A]
+    )
 
     assert hits
-    assert TAVERN_SCOPE not in seen
+    assert SCOPE_A not in seen
 
 
 def test_tavern_scope_falls_back_to_sparse_when_dense_is_short(
@@ -239,15 +274,17 @@ def test_tavern_scope_falls_back_to_sparse_when_dense_is_short(
 ) -> None:
     """★ 稠密候选不足时，酒馆来源仍用 BM25 兜底——保住专有名词/编号的召回。"""
     store = InMemoryKnowledgeStore()
-    store.add_document(TAVERN_SCOPE, title="编号", chunks=["ORION-7 的进度。"])
+    store.add_document(SCOPE_A, title="编号", chunks=["ORION-7 的进度。"])
     retriever = KnowledgeRetriever(store, top_k=3, candidate_n=10)  # 只有 1 条 < 3
 
     seen = _spy_sparse_scopes(monkeypatch)
 
-    hits = retriever.retrieve(COMPANION, "ORION-7", include_tavern=True)
+    hits = retriever.retrieve(
+        COMPANION, "ORION-7", include_tavern=True, mounted_books=[BOOK_A]
+    )
 
     assert hits
-    assert TAVERN_SCOPE in seen
+    assert SCOPE_A in seen
 
 
 def test_user_uploaded_scope_keeps_the_full_hybrid(

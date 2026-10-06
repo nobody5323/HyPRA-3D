@@ -33,6 +33,9 @@ function stubRoutes(handler: (url: string, method: string) => Response | undefin
       const url = String(input);
       const method = (init?.method ?? "GET").toUpperCase();
       urls.push(`${method} ${url}`);
+      // 挂载清单一律给默认空清单：绝大多数用例不关心它，但**必须**有响应——
+      // 缺响应会让组件拿不到数据而崩掉（挂载是独立端点，与 /status 分开拉）
+      if (url.includes("/mounted-books")) return jsonResponse(MOUNTED_BODY);
       return handler(url, method) ?? jsonResponse({ detail: "not found" }, 404);
     }),
   );
@@ -53,6 +56,20 @@ const STATUS_BODY = {
   // 所以它和筛选后的 `available.entries` 对得上；断言「没有世界书」的用例
   // 必须把它也清空，只改 `available` 是自相矛盾的夹具。
   books: [{ source: "world/甲", label: "世界书·甲", entries: 12, enabled: true }],
+  // 挂载清单是**独立端点**，这里只作为「status 也带一份」的便利字段，
+  // 组件实际读的是 `/mounted-books`（见 MOUNTED_BODY）
+  mounted_books: [] as string[],
+};
+
+/**
+ * 挂载清单端点（`GET/PUT /plugins/tavern-bridge/mounted-books`）的默认响应。
+ *
+ * 默认**全不挂**（这是刻意的产品默认：不挂就不串味），
+ * 与 `STATUS_BODY.books` 里的可选来源保持一致，否则界面自相矛盾。
+ */
+const MOUNTED_BODY = {
+  mounted: [] as string[],
+  available: [{ source: "world/甲", mounted: false }],
 };
 
 const IMPORT_BODY = {
@@ -219,6 +236,7 @@ describe("TavernImportPanel", () => {
             secrets_set: [],
           });
         }
+        if (url.includes("/mounted-books")) return jsonResponse(MOUNTED_BODY);
         if (url.includes("/status")) return jsonResponse({ ...STATUS_BODY, books });
         return jsonResponse({});
       }),
@@ -227,10 +245,10 @@ describe("TavernImportPanel", () => {
     render(<TavernImportPanel companionId="companion-a" />);
 
     expect(await screen.findByText(/参与接入的世界书/)).toBeTruthy();
-    const unchecked = screen.getByRole("checkbox", { name: /角色内嵌设定·乙/ });
+    const unchecked = screen.getByRole("checkbox", { name: "参与接入 char/乙" });
     expect((unchecked as HTMLInputElement).checked).toBe(false);
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /世界书·甲/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "参与接入 world/甲" }));
 
     await waitFor(() => expect(saved).not.toBeNull());
     // 取消勾选甲 → 它进禁用列表；乙原本就在里面
@@ -431,6 +449,7 @@ describe("TavernImportPanel", () => {
             secrets_set: [],
           });
         }
+        if (url.includes("/mounted-books")) return jsonResponse(MOUNTED_BODY);
         if (url.includes("/status")) {
           return jsonResponse({ ...STATUS_BODY, available: { entries: 15 }, books });
         }
@@ -444,12 +463,12 @@ describe("TavernImportPanel", () => {
     expect(screen.getByText("世界书条目 15")).toBeTruthy();
     const statusCallsBefore = urls.filter((line) => line.includes("/status")).length;
 
-    fireEvent.click(screen.getByRole("checkbox", { name: /世界书·甲/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "参与接入 world/甲" }));
 
     await waitFor(() => expect(saved).not.toBeNull());
     // 勾选立刻生效（受控勾选框不闪回）
     expect(
-      (screen.getByRole("checkbox", { name: /世界书·甲/ }) as HTMLInputElement).checked,
+      (screen.getByRole("checkbox", { name: "参与接入 world/甲" }) as HTMLInputElement).checked,
     ).toBe(false);
     // 参与接入的条目数就地减掉这本书的 12 条
     expect(screen.getByText("世界书条目 3")).toBeTruthy();
@@ -474,6 +493,7 @@ describe("TavernImportPanel", () => {
             secrets_set: [],
           });
         }
+        if (url.includes("/mounted-books")) return jsonResponse(MOUNTED_BODY);
         if (url.includes("/status")) return jsonResponse({ ...STATUS_BODY, books });
         return jsonResponse({});
       }),
@@ -481,12 +501,12 @@ describe("TavernImportPanel", () => {
 
     render(<TavernImportPanel companionId="companion-a" />);
 
-    fireEvent.click(await screen.findByRole("checkbox", { name: /世界书·甲/ }));
+    fireEvent.click(await screen.findByRole("checkbox", { name: "参与接入 world/甲" }));
 
     expect(await screen.findByRole("alert")).toBeTruthy();
     // 后端一字未改（PUT 是全量写），界面必须退回改动前，不能留下假象
     expect(
-      (screen.getByRole("checkbox", { name: /世界书·甲/ }) as HTMLInputElement).checked,
+      (screen.getByRole("checkbox", { name: "参与接入 world/甲" }) as HTMLInputElement).checked,
     ).toBe(true);
   });
 
@@ -517,6 +537,7 @@ describe("TavernImportPanel", () => {
             secrets_set: [],
           });
         }
+        if (url.includes("/mounted-books")) return jsonResponse(MOUNTED_BODY);
         if (url.includes("/status")) {
           // books 是**完整清单**（后端不受勾选影响）；available 是筛选后的计数
           return jsonResponse({ ...STATUS_BODY, available: { entries: 15 }, books });
@@ -526,7 +547,8 @@ describe("TavernImportPanel", () => {
     );
 
     /** 取消一本：保存期间整组勾选框会禁用，所以先等它恢复可点 */
-    async function uncheck(name: RegExp) {
+    async function uncheck(source: string) {
+      const name = `参与接入 ${source}`;
       await waitFor(() =>
         expect((screen.getByRole("checkbox", { name }) as HTMLInputElement).disabled).toBe(false),
       );
@@ -541,20 +563,206 @@ describe("TavernImportPanel", () => {
     expect(await screen.findByText(/参与接入的世界书/)).toBeTruthy();
     expect(screen.getByText("世界书条目 15")).toBeTruthy();
 
-    await uncheck(/世界书·甲/);
+    await uncheck("world/甲");
     expect(screen.getByText("世界书条目 3")).toBeTruthy();
 
-    await uncheck(/角色内嵌设定·乙/);
+    await uncheck("char/乙");
 
     // 条目数已归零，但勾选区必须还在——否则用户没有任何办法勾回来
     expect(screen.getByText("世界书条目 0")).toBeTruthy();
     expect(screen.getByText(/参与接入的世界书/)).toBeTruthy();
-    expect(screen.getAllByRole("checkbox")).toHaveLength(2);
+    // 这一组的两个勾选框都还在（挂载那组另算，见 tavern-mounted-books 测试）
+    expect(screen.getAllByRole("checkbox", { name: /^参与接入 / })).toHaveLength(2);
     // 两份禁用清单都要落库（12 条那本 + 3 条那本）
     expect([...disabledBooks].sort()).toEqual(["char/乙", "world/甲"]);
 
     // 勾回来：条目数就地加回去
-    fireEvent.click(screen.getByRole("checkbox", { name: /世界书·甲/ }));
+    fireEvent.click(screen.getByRole("checkbox", { name: "参与接入 world/甲" }));
     await waitFor(() => expect(screen.getByText("世界书条目 12")).toBeTruthy());
+  });
+
+  // ===========================================================
+  // 世界书挂载（酒馆模式下「查哪几本」）
+  // ===========================================================
+  //
+  // 挂载与「参与接入」是两回事：前者决定**检索范围**（挂哪本查哪本），
+  // 后者决定**要不要读进库**。默认全不挂——不挂就不串味。
+
+  /** 两本书的清单夹具 + 记录 PUT 的挂载清单 */
+  function mountFixture(initial: string[]) {
+    const sources = ["world/甲", "char/乙"];
+    let saved: string[] | null = null;
+    const urls: string[] = [];
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        const method = (init?.method ?? "GET").toUpperCase();
+        urls.push(`${method} ${url}`);
+        if (url.includes("/mounted-books")) {
+          if (method === "PUT") {
+            saved = (JSON.parse(String(init?.body)) as { books: string[] }).books;
+          }
+          const mounted = saved ?? initial;
+          return jsonResponse({
+            mounted,
+            available: sources.map((source) => ({
+              source,
+              mounted: mounted.includes(source),
+            })),
+          });
+        }
+        if (url.includes("/status")) {
+          return jsonResponse({
+            ...STATUS_BODY,
+            books: sources.map((source) => ({
+              source,
+              label: source,
+              entries: 5,
+              enabled: true,
+            })),
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+    return { urls, getSaved: () => saved };
+  }
+
+  it("默认全不挂：列出可选世界书但没有一本被挂上", async () => {
+    mountFixture([]);
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    expect(await screen.findByText(/酒馆模式下的世界书/)).toBeTruthy();
+    expect(screen.getByText(/已挂 0 \/ 2 本/)).toBeTruthy();
+    expect(
+      (screen.getByRole("checkbox", { name: "酒馆模式挂载 world/甲" }) as HTMLInputElement).checked,
+    ).toBe(false);
+  });
+
+  it("勾上一本就把新的挂载清单写回后端", async () => {
+    const { getSaved } = mountFixture([]);
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "酒馆模式挂载 world/甲" }),
+    );
+
+    await waitFor(() => expect(getSaved()).toEqual(["world/甲"]));
+    expect(screen.getByText(/已挂 1 \/ 2 本/)).toBeTruthy();
+  });
+
+  it("「只挂这本」把其余卸下——切换世界书的最常用操作", async () => {
+    // 需求原话：「切换到这个世界书才有对应的知识」。只挂一本是最直接的表达，
+    // 也避免多本书同时召回互相干扰。
+    const { getSaved } = mountFixture(["world/甲"]);
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "只挂这本" }));
+
+    // 清单里只剩乙那一本
+    await waitFor(() => expect(getSaved()).toEqual(["char/乙"]));
+    expect(
+      (screen.getByRole("checkbox", { name: "酒馆模式挂载 world/甲" }) as HTMLInputElement).checked,
+    ).toBe(false);
+    expect(
+      (screen.getByRole("checkbox", { name: "酒馆模式挂载 char/乙" }) as HTMLInputElement).checked,
+    ).toBe(true);
+  });
+
+  it("「全部卸下」回到一本都不查的默认态", async () => {
+    const { getSaved } = mountFixture(["world/甲", "char/乙"]);
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "全部卸下" }));
+
+    await waitFor(() => expect(getSaved()).toEqual([]));
+    expect(screen.getByText(/已挂 0 \/ 2 本/)).toBeTruthy();
+  });
+
+  it("挂载保存失败时回滚勾选状态", async () => {
+    // PUT 失败后端一字未改，界面不能留下「挂了」的假象
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/mounted-books")) {
+          if ((init?.method ?? "GET").toUpperCase() === "PUT") {
+            return jsonResponse({ detail: "写不进去" }, 500);
+          }
+          return jsonResponse({
+            mounted: [],
+            available: [{ source: "world/甲", mounted: false }],
+          });
+        }
+        if (url.includes("/status")) {
+          return jsonResponse({
+            ...STATUS_BODY,
+            books: [{ source: "world/甲", label: "世界书·甲", entries: 5, enabled: true }],
+          });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    fireEvent.click(
+      await screen.findByRole("checkbox", { name: "酒馆模式挂载 world/甲" }),
+    );
+
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    await waitFor(() =>
+      expect(
+        (screen.getByRole("checkbox", { name: "酒馆模式挂载 world/甲" }) as HTMLInputElement)
+          .checked,
+      ).toBe(false),
+    );
+  });
+
+  it("挂载清单一本可选来源都没有时不渲染那一段", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/mounted-books")) {
+          return jsonResponse({ mounted: [], available: [] });
+        }
+        if (url.includes("/status")) {
+          return jsonResponse({ ...STATUS_BODY, books: [] });
+        }
+        return jsonResponse({});
+      }),
+    );
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    expect(await screen.findByText(/角色卡 3/)).toBeTruthy();
+    expect(screen.queryByText(/酒馆模式下的世界书/)).toBeNull();
+  });
+
+  it("挂载清单接口故障不影响面板其余部分", async () => {
+    // 挂载是可选增强：读不出来只该少一段，不该整块面板崩掉
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/mounted-books")) {
+          return jsonResponse({ detail: "炸了" }, 500);
+        }
+        if (url.includes("/status")) return jsonResponse(STATUS_BODY);
+        return jsonResponse({});
+      }),
+    );
+
+    render(<TavernImportPanel companionId="companion-a" />);
+
+    expect(await screen.findByText(/参与接入的世界书/)).toBeTruthy();
+    expect(screen.queryByText(/酒馆模式下的世界书/)).toBeNull();
   });
 });

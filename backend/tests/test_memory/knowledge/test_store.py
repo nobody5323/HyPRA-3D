@@ -149,3 +149,77 @@ def test_read_only_ops_on_unused_namespace(store: KnowledgeStore) -> None:
     assert store.count_chunks("never-used") == 0
     assert store.search("never-used", "x") == []
     assert store.delete_document("never-used", "any") == 0
+
+
+# ---------- 作用域枚举（清理逻辑的依赖） ----------
+#
+# 两个后端都要能**按作用域原文**枚举出有数据的库。清理逻辑据此找到
+# 「书已从酒馆删掉、文档还留在库里」的残留（见 `datasource_sync.discover_tavern_scopes`）。
+# Qdrant 侧的难点：collection 名经 `normalize_scope_id` 加了防碰撞哈希后缀，
+# 反解不回来——所以 scope 原文必须落进 payload。
+
+
+def test_list_scopes_returns_scope_keys(store: KnowledgeStore) -> None:
+    store.add_document("a", title="A", chunks=["内容"])
+    store.add_document("tavern:book:bk-abc", title="书", chunks=["内容"])
+
+    keys = store.list_scopes()
+
+    assert set(keys) == {"a", "tavern:book:bk-abc"}
+
+
+def test_list_scopes_prefix_and_contains(store: KnowledgeStore) -> None:
+    store.add_document("tavern:book:bk-abc", title="书", chunks=["内容"])
+    store.add_document("tavern:legacy:tbp-1", title="旧", chunks=["内容"])
+    store.add_document("user-x", title="私有", chunks=["内容"])
+
+    assert store.list_scopes(prefix="tavern:book:") == ["tavern:book:bk-abc"]
+    assert store.list_scopes(prefix="tavern:") == [
+        "tavern:book:bk-abc",
+        "tavern:legacy:tbp-1",
+    ]
+    assert store.list_scopes(contains="tbp-1") == ["tavern:legacy:tbp-1"]
+    assert store.list_scopes(exact="user-x") == ["user-x"]
+    assert store.list_scopes(exact="不存在") == []
+
+
+def test_list_scopes_survives_unsafe_characters(store: KnowledgeStore) -> None:
+    """★ 作用域键含冒号/连字符（Qdrant collection 名必须转义）时也能原样枚举。
+
+    这是 Qdrant 侧的核心风险：`normalize_scope_id("tavern:book:bk-abc")` 会变成
+    `tavern_book_bk-abc_<哈希>`，末尾那截无法反解——只有把 scope 原文存进
+    payload 才能还原，否则清理逻辑永远找不到这些库。
+    """
+    scope = "tavern:book:bk-deadbeef1234"
+    store.add_document(scope, title="书", chunks=["内容"])
+
+    assert store.list_scopes(exact=scope) == [scope]
+    assert scope in store.list_scopes(prefix="tavern:book:")
+
+
+def test_iter_scopes_applies_predicate(store: KnowledgeStore) -> None:
+    store.add_document("tavern:book:bk-1", title="新", chunks=["内容"])
+    store.add_document("tavern:legacy:tbp-1", title="旧", chunks=["内容"])
+
+    legacy = store.iter_scopes(
+        prefix="tavern:",
+        predicate=lambda key: not key.startswith("tavern:book:"),
+    )
+
+    assert legacy == ["tavern:legacy:tbp-1"]
+
+
+def test_list_scopes_empty_store(store: KnowledgeStore) -> None:
+    """没有数据的库不该报错，也不该顺手建库。"""
+    assert store.list_scopes() == []
+    assert store.iter_scopes(predicate=lambda key: True) == []
+
+
+def test_deleting_last_document_removes_scope(store: KnowledgeStore) -> None:
+    """★ 文档删空后作用域就该消失——否则清理逻辑会一直看到幽灵键。"""
+    doc = store.add_document("a", title="A", chunks=["内容"])
+    assert store.list_scopes() == ["a"]
+
+    store.delete_document("a", doc.doc_id)
+
+    assert store.list_scopes() == []

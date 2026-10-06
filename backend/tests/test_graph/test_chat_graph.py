@@ -11,7 +11,7 @@ from app.llm.mock import MockLLMProvider
 from app.memory.cold.sqlite_store import SqliteColdStore
 from app.memory.knowledge.inmemory_store import InMemoryKnowledgeStore
 from app.memory.knowledge.retriever import KnowledgeRetriever
-from app.memory.knowledge.scopes import TAVERN_SCOPE
+from app.memory.knowledge.scopes import book_scope
 from app.memory.store import MemoryStore
 from app.memory.warm.inmemory_store import InMemoryWarmStore
 from app.prompts.assemble import DepthInjection
@@ -483,13 +483,35 @@ def _nodes_with_knowledge(memory: MemoryStore, store) -> ChatNodes:
 
 
 def _tavern_store() -> InMemoryKnowledgeStore:
+    """一本书的库：内容写进**这本书自己**的作用域（`tavern:book:{哈希}`）。
+
+    旧版写在一个共享的 `tavern` 作用域里，因此「挂 A 书」与「挂 B 书」没有区别；
+    改成单本作用域后，**挂哪本才查得到哪本**——下面两条用例分别验证这两面。
+    """
     store = InMemoryKnowledgeStore()
-    store.add_document(TAVERN_SCOPE, title="酒馆世界书", chunks=["某作品的设定：她住在城南。"])
+    store.add_document(
+        book_scope("world/示例世界"),
+        title="酒馆世界书",
+        chunks=["某作品的设定：她住在城南。"],
+    )
     return store
 
 
-def test_knowledge_recall_hides_tavern_worldbook_in_companion_mode(memory) -> None:
-    """★ 桌宠模式查不到酒馆世界书——内置人设不该「知道」别的作品的设定。"""
+@pytest.fixture
+def mounted_example_book(monkeypatch):
+    """把「示例世界」设为已挂载（挂载清单默认空，不挂就查不到）。"""
+    monkeypatch.setattr(
+        "app.graph.nodes.load_mounted_books", lambda: ["world/示例世界"]
+    )
+
+
+def test_knowledge_recall_hides_tavern_worldbook_in_companion_mode(
+    memory, mounted_example_book
+) -> None:
+    """★ 桌宠模式查不到酒馆世界书——内置人设不该「知道」别的作品的设定。
+
+    即便用户挂上了这本书：挂载清单**只对酒馆模式生效**（`AGENTS.md §8.2`）。
+    """
     nodes = _nodes_with_knowledge(memory, _tavern_store())
 
     result = nodes.knowledge_recall(_state(mode=MODE_COMPANION))
@@ -497,8 +519,10 @@ def test_knowledge_recall_hides_tavern_worldbook_in_companion_mode(memory) -> No
     assert result["knowledge_lines"] == []
 
 
-def test_knowledge_recall_sees_tavern_worldbook_in_tavern_mode(memory) -> None:
-    """★ 酒馆模式查得到——否则这条链路就是白同步。"""
+def test_knowledge_recall_sees_tavern_worldbook_in_tavern_mode(
+    memory, mounted_example_book
+) -> None:
+    """★ 酒馆模式 + 已挂载 → 查得到——否则这条链路就是白同步。"""
     nodes = _nodes_with_knowledge(memory, _tavern_store())
 
     result = nodes.knowledge_recall(
@@ -509,7 +533,22 @@ def test_knowledge_recall_sees_tavern_worldbook_in_tavern_mode(memory) -> None:
     assert "城南" in result["knowledge_lines"][0]
 
 
-def test_knowledge_recall_defaults_to_companion_mode(memory) -> None:
+def test_knowledge_recall_ignores_unmounted_book(memory) -> None:
+    """★ 没挂的书查不到（默认全不挂）：库里有数据 ≠ 会被召回。
+
+    这是本次改动的核心语义——「哪个世界书就是在哪个世界书里，
+    切换到这个世界书才有对应的知识」。
+    """
+    nodes = _nodes_with_knowledge(memory, _tavern_store())
+
+    result = nodes.knowledge_recall(
+        _state(mode=MODE_TAVERN, user_input="她住在城南还是城北")
+    )
+
+    assert result["knowledge_lines"] == []
+
+
+def test_knowledge_recall_defaults_to_companion_mode(memory, mounted_example_book) -> None:
     """state 里没带 `mode`（老调用方 / 手搓 state）时按桌宠处理：宁可少注入。
 
     这是刻意的 fail-safe：酒馆内容漏进桌宠会话，比桌宠少召回一条知识更糟。
